@@ -1,0 +1,14 @@
+node_modules/
+.pnpm-store/
+.wxt/
+.output/
+dist/
+coverage/
+playwright-report/
+test-results/
+.playwright-cli/
+.env
+.logs/
+.DS_Store
+*.log
+*.tsbuildinfo

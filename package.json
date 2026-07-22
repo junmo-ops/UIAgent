@@ -1,0 +1,24 @@
+{
+  "name": "ui-requirement-agent-demo",
+  "version": "0.1.0",
+  "private": true,
+  "packageManager": "pnpm@11.9.0",
+  "scripts": {
+    "dev": "pnpm --parallel --filter @ui-agent/demo-page --filter @ui-agent/agent-service --filter @ui-agent/extension dev",
+    "dev:page": "pnpm --filter @ui-agent/demo-page dev",
+    "dev:service": "pnpm --filter @ui-agent/agent-service dev",
+    "dev:extension": "pnpm --filter @ui-agent/extension dev",
+    "build": "pnpm -r --if-present build",
+    "typecheck": "pnpm -r --if-present typecheck",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "architecture": "depcruise --config dependency-cruiser.config.cjs apps packages",
+    "check": "pnpm typecheck && pnpm test && pnpm architecture"
+  },
+  "devDependencies": {
+    "@types/node": "^24.0.0",
+    "dependency-cruiser": "^17.0.0",
+    "typescript": "^5.9.0",
+    "vitest": "^3.2.0"
+  }
+}

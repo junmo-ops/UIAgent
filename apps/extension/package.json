@@ -1,0 +1,30 @@
+{
+  "name": "@ui-agent/extension",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "wxt --browser chrome",
+    "build": "wxt build --browser chrome",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@ui-agent/contracts": "workspace:*",
+    "@ui-agent/domain": "workspace:*",
+    "@webext-core/messaging": "^2.3.0",
+    "@xstate/react": "^6.0.0",
+    "antd": "^6.0.0",
+    "react": "^19.1.0",
+    "react-dom": "^19.1.0",
+    "xstate": "^5.20.0",
+    "zod": "^4.0.0"
+  },
+  "devDependencies": {
+    "@types/react": "^19.1.0",
+    "@types/react-dom": "^19.1.0",
+    "@wxt-dev/module-react": "^1.1.0",
+    "linkedom": "^0.18.13",
+    "typescript": "^5.9.0",
+    "wxt": "^0.20.27"
+  }
+}
