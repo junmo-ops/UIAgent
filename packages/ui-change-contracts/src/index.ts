@@ -73,6 +73,7 @@ export const uiChangeOperationSchema = z.discriminatedUnion('type', [
     position: positionSchema,
     resultRef: z.string().min(1).max(80).optional(),
     props: z.object({
+      label: z.string().max(80).optional(),
       text: z.string().max(200).optional(),
       placeholder: z.string().max(120).optional(),
       options: z.array(z.string().max(80)).max(12).optional(),
@@ -156,6 +157,24 @@ export type PlannerResult = z.infer<typeof plannerResultSchema>;
 export type StartTurnRequest = z.infer<typeof startTurnRequestSchema>;
 export type ExecutionReceipt = z.infer<typeof executionReceiptSchema>;
 
+export const extensionErrorCodeSchema = z.enum([
+  'NO_ACTIVE_TAB',
+  'EDITOR_NOT_READY',
+  'TAB_UNAVAILABLE',
+  'TAB_CHANGED',
+  'UNSUPPORTED_PAGE',
+  'INVALID_PAGE_URL',
+  'ACCESS_REQUIRED',
+  'CONTENT_UNAVAILABLE',
+  'SCREENSHOT_PERMISSION_REQUIRED',
+  'SCREENSHOT_FAILED',
+  'STALE_CONTEXT',
+  'POLICY_ERROR',
+  'PAGE_OPERATION_FAILED',
+  'BROWSER_COMMAND_FAILED'
+]);
+export type ExtensionErrorCode = z.infer<typeof extensionErrorCodeSchema>;
+
 export type ContentCommand =
   | { type: 'editorHeartbeat' }
   | { type: 'deactivateEditor' }
@@ -171,10 +190,15 @@ export type ContentCommand =
 
 export type ContentCommandResult =
   | { ok: true; context?: SelectedContext; receipt?: ExecutionReceipt; canUndo?: boolean; canRedo?: boolean }
-  | { ok: false; error: string };
+  | { ok: false; code: ExtensionErrorCode; error: string };
+
+export interface BrowserCommandRequest {
+  editorClientId: string;
+  command: ContentCommand;
+}
 
 export interface ExtensionProtocolMap {
-  browserCommand(data: ContentCommand): ContentCommandResult;
+  browserCommand(data: BrowserCommandRequest): ContentCommandResult;
   contentCommand(data: ContentCommand): ContentCommandResult;
   selectionChanged(data: SelectedContext): void;
 }

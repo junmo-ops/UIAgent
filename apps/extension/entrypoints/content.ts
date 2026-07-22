@@ -1,5 +1,6 @@
 import { changePlanSchema, type ContentCommandResult } from '@ui-agent/contracts';
 import { DomEngine } from '../src/content/dom-engine';
+import { selectionTarget } from '../src/content/selection-target';
 import { onMessage, sendMessage } from '../src/messaging';
 
 export default defineContentScript({
@@ -21,13 +22,17 @@ export default defineContentScript({
     };
 
     const hover = (event: MouseEvent) => {
-      if (!selecting || !(event.target instanceof HTMLElement) || event.target.hasAttribute('data-ui-agent-overlay')) return;
-      engine.preview(event.target);
+      if (!selecting) return;
+      const target = selectionTarget(event.target);
+      if (!target || target.hasAttribute('data-ui-agent-overlay')) return;
+      engine.preview(target);
     };
     const choose = (event: MouseEvent) => {
-      if (!selecting || !(event.target instanceof HTMLElement) || event.target.hasAttribute('data-ui-agent-overlay')) return;
+      if (!selecting) return;
+      const target = selectionTarget(event.target);
+      if (!target || target.hasAttribute('data-ui-agent-overlay')) return;
       event.preventDefault(); event.stopImmediatePropagation(); selecting = false;
-      const context = engine.select(event.target);
+      const context = engine.select(target);
       sendMessage('selectionChanged', context).catch(() => undefined);
     };
     document.addEventListener('mousemove', hover, true);
@@ -56,9 +61,15 @@ export default defineContentScript({
         if (command.type === 'reset') { engine.reset(); return { ok: true, ...engine.historyState() } satisfies ContentCommandResult; }
         if (command.type === 'prepareScreenshot') { engine.hideOverlay(); return { ok: true } satisfies ContentCommandResult; }
         if (command.type === 'finishScreenshot') { engine.refreshOverlay(); return { ok: true } satisfies ContentCommandResult; }
-        return { ok: false, error: '该命令只能由 Background 执行' } satisfies ContentCommandResult;
+        return { ok: false, code: 'PAGE_OPERATION_FAILED', error: '该命令只能由 Background 执行' } satisfies ContentCommandResult;
       } catch (error) {
-        return { ok: false, error: error instanceof Error ? error.message : '页面操作失败' } satisfies ContentCommandResult;
+        const knownCode = error && typeof error === 'object' && 'code' in error
+          ? String(error.code)
+          : 'PAGE_OPERATION_FAILED';
+        const code = knownCode === 'POLICY_ERROR' ? 'POLICY_ERROR'
+          : /页面或选区已变化/.test(error instanceof Error ? error.message : '') ? 'STALE_CONTEXT'
+            : 'PAGE_OPERATION_FAILED';
+        return { ok: false, code, error: error instanceof Error ? error.message : '页面操作失败' } satisfies ContentCommandResult;
       }
     });
   }

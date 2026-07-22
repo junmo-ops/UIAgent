@@ -17,13 +17,14 @@ import { sessionMachine } from './session-machine';
 const serviceUrlItem = storage.defineItem<string>('local:agentServiceUrl', { fallback: 'http://127.0.0.1:8787' });
 
 // Side Panel 文档关闭时 Chrome 会自动断开该 Port，Background 据此立即清理选区。
-browser.runtime.connect({ name: 'ui-agent-editor' });
+const editorClientId = crypto.randomUUID();
+browser.runtime.connect({ name: `ui-agent-editor:${editorClientId}` });
 
 interface ChatEntry { id: string; role: 'user' | 'assistant'; text: string }
 
 async function command(value: ContentCommand): Promise<Extract<ContentCommandResult, { ok: true }>> {
-  const result = await sendMessage('browserCommand', value);
-  if (!result.ok) throw new Error(result.error);
+  const result = await sendMessage('browserCommand', { editorClientId, command: value });
+  if (!result.ok) throw new Error(`[${result.code}] ${result.error}`);
   return result;
 }
 

@@ -112,4 +112,43 @@ describe('DomEngine generic operations', () => {
     engine.preview(button);
     expect(overlay.style.display).toBe('block');
   });
+
+  it('clones a nearby semantic form-field template before falling back to a native select', () => {
+    const document = installDom(`<!doctype html><html><body><form><div data-testid="row">
+      <div class="grid-column" data-ui-component="form-field-select">
+        <div class="ant-form-item"><div class="ant-form-item-label"><label>订单渠道</label></div>
+          <div class="ant-select"><span class="ant-select-selection-placeholder">请选择渠道</span><input role="combobox"></div>
+        </div>
+      </div>
+    </div></form></body></html>`);
+    const engine = new DomEngine();
+    const row = document.querySelector('[data-testid="row"]') as unknown as HTMLElement;
+    const context = engine.select(row);
+    const addSelectPlan: ChangePlan = {
+      protocolVersion: PROTOCOL_VERSION, planId: 'add-payment-select',
+      selectionVersion: context.selectionVersion, pageRevision: context.pageRevision,
+      summary: '新增付款方式', requiresConfirmation: false,
+      operations: [{
+        operationId: 'add', type: 'addComponent', component: 'select',
+        anchor: { kind: 'node', nodeId: context.selected.id }, position: 'after',
+        props: { label: '付款方式', placeholder: '请选择付款方式', options: ['月结', '预付', '货到付款'] }
+      }]
+    };
+
+    engine.applyPlan(addSelectPlan, false);
+    const added = document.querySelector('[data-ui-agent-added]') as unknown as HTMLElement;
+    expect(added.className).toBe('grid-column');
+    expect(added.querySelector('label')?.textContent).toBe('付款方式');
+    expect(added.querySelector('.ant-select-selection-placeholder')?.textContent).toBe('请选择付款方式');
+    expect(added.getAttribute('data-ui-agent-options')).toContain('货到付款');
+    expect(document.querySelectorAll('select')).toHaveLength(0);
+
+    const control = added.querySelector('.ant-select') as unknown as HTMLElement;
+    control.dispatchEvent(new document.defaultView!.Event('click', { bubbles: true }));
+    expect(document.querySelectorAll('[data-ui-agent-option]')).toHaveLength(3);
+    const prepaid = document.querySelector('[data-ui-agent-option="预付"]') as unknown as HTMLElement;
+    prepaid.dispatchEvent(new document.defaultView!.Event('click', { bubbles: true }));
+    expect(added.querySelector('.ant-select-selection-item')?.textContent).toBe('预付');
+    expect(document.querySelector('[data-ui-agent-static-interaction]')).toBeNull();
+  });
 });

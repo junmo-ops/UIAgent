@@ -11,3 +11,13 @@ body { background: #f5f7fa; color: #1f2329; font-family: Inter, -apple-system, B
 .filter-card { margin-bottom: 20px; }
 .filter-row { display: flex; gap: 12px; align-items: center; flex-wrap: wrap; }
 .table-card { min-height: 360px; }
+.summary-card, .detail-card, .form-card { margin-bottom: 20px; }
+.summary-row { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 32px; align-items: center; }
+.summary-row > div { min-height: 62px; padding-right: 24px; border-right: 1px solid #eef0f3; }
+.summary-row > div:last-child { border-right: 0; }
+.summary-row h4 { margin: 4px 0 0; }
+.form-actions { position: sticky; bottom: 0; z-index: 2; box-shadow: 0 -4px 16px rgba(31, 35, 41, .06); }
+@media (max-width: 900px) {
+  .summary-row { grid-template-columns: 1fr; gap: 12px; }
+  .summary-row > div { border-right: 0; border-bottom: 1px solid #eef0f3; }
+}

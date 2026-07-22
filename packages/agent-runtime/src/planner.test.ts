@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { PROTOCOL_VERSION, type StartTurnRequest } from '@ui-agent/contracts';
-import { createAgentRuntime, DeepSeekPlanner, MockPlanner, type ConversationTurn, type Planner } from './index';
+import { createAgentRuntime, DeepSeekPlanner, MockPlanner, normalizeTemplatePlan, type ConversationTurn, type Planner } from './index';
 
 const request: StartTurnRequest = {
   protocolVersion: PROTOCOL_VERSION,
@@ -67,6 +67,45 @@ describe('DeepSeekPlanner', () => {
       .resolves.toEqual(result);
     expect(fetchMock).toHaveBeenCalledOnce();
     expect(String(fetchMock.mock.calls[0]?.[0])).toBe('https://api.deepseek.com/chat/completions');
+  });
+});
+
+describe('template plan normalization', () => {
+  it('replaces fragile framework-internal clone edits with a controlled component macro', () => {
+    const formRequest: StartTurnRequest = {
+      ...request,
+      instruction: '在订单渠道后增加付款方式，选项为月结、预付、货到付款',
+      context: {
+        ...request.context,
+        selected: { ...request.context.selected, id: 'form-row', tag: 'div', text: '订单渠道 请选择渠道' },
+        selectedTree: {
+          id: 'form-row', tag: 'div', text: '', attributes: {}, children: [{
+            id: 'channel-field', tag: 'div', text: '', attributes: { 'data-ui-component': 'form-field-select' },
+            children: [{ id: 'framework-internal', tag: 'div', text: '订单渠道 请选择渠道', attributes: {}, children: [] }]
+          }]
+        }
+      }
+    };
+    const modelResult = {
+      kind: 'plan' as const,
+      plan: {
+        protocolVersion: PROTOCOL_VERSION, planId: 'form-plan', selectionVersion: 1, pageRevision: 0,
+        summary: '新增付款方式', requiresConfirmation: false,
+        operations: [
+          { operationId: 'clone', type: 'cloneSubtree' as const, source: { kind: 'node' as const, nodeId: 'channel-field' }, anchor: { kind: 'node' as const, nodeId: 'channel-field' }, position: 'after' as const, resultRef: 'payment' },
+          { operationId: 'edit', type: 'updateContent' as const, target: { kind: 'result' as const, resultRef: 'payment', path: [0] }, text: '付款方式' }
+        ]
+      }
+    };
+
+    const normalized = normalizeTemplatePlan(formRequest, modelResult);
+    expect(normalized.kind).toBe('plan');
+    if (normalized.kind === 'plan') {
+      expect(normalized.plan.operations).toEqual([expect.objectContaining({
+        type: 'addComponent', component: 'select', resultRef: 'payment',
+        props: { label: '付款方式', placeholder: '请选择付款方式', options: ['月结', '预付', '货到付款'] }
+      })]);
+    }
   });
 });
 

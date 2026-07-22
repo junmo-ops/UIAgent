@@ -55,6 +55,7 @@ const plannerRules = [
   '向重复列表末尾追加模板副本时，cloneSubtree 的 source 和 anchor 应指向同一个最后模板节点，position 使用 after；不要把 tr 插入 div，也不要把 li 插入非列表容器。',
   '如果 selectedTree 或 reusableTrees 已明确包含 tr、row、li 等结构，不要再向用户确认 DOM 结构，直接基于可见结构生成计划。',
   '用户要求随机生成、使用默认值或由你决定时，应自行生成合理的静态示例文案，不要继续追问字段值。',
+  '使用 addComponent 新增表单控件时，从用户指令提取字段名称并填写 props.label；例如“增加付款方式，选项为...”的 label 是“付款方式”。',
   '不要通过向一个容器追加纯文本来伪造表格行、列表项或其他结构。',
   '不输出 HTML、JavaScript、选择器、网络请求、导航或事件处理器。',
   '删除已有选中元素时 requiresConfirmation 必须为 true。',
@@ -83,6 +84,12 @@ function extractQuotedValues(input: string): string[] {
   return marker?.[1]?.split(/[、，,]/).map(value => value.trim()).filter(Boolean).slice(0, 12) ?? [];
 }
 
+function extractAddedLabel(input: string): string | undefined {
+  return input.match(/(?:增加|添加|新增)(?:一个|一项)?([^，,]+?)(?=[，,]|选项|$)/)?.[1]
+    ?.replace(/(?:筛选项|下拉框|选择器|输入框|输入项)$/, '')
+    .trim() || undefined;
+}
+
 function createPlan(request: StartTurnRequest, operations: UIChangeOperation[], summary: string): PlannerResult {
   const removesExisting = operations.some(operation => operation.type === 'removeElement' && operation.target.kind === 'node');
   const plan: ChangePlan = {
@@ -95,6 +102,55 @@ function createPlan(request: StartTurnRequest, operations: UIChangeOperation[], 
     operations
   };
   return { kind: 'plan', plan };
+}
+
+function findContextNode(request: StartTurnRequest, nodeId: string) {
+  const visit = (node: StartTurnRequest['context']['selectedTree']): typeof node | undefined => {
+    if (node.id === nodeId) return node;
+    for (const child of node.children) {
+      const found = visit(child);
+      if (found) return found;
+    }
+    return undefined;
+  };
+  for (const tree of [request.context.selectedTree, ...request.context.reusableTrees, ...request.context.addedTrees]) {
+    const found = visit(tree);
+    if (found) return found;
+  }
+  return undefined;
+}
+
+/**
+ * A model should not guess deep paths inside framework component DOM. When a
+ * page explicitly exposes a semantic component template, collapse a fragile
+ * clone-and-edit sequence into the controlled component macro.
+ */
+export function normalizeTemplatePlan(request: StartTurnRequest, result: PlannerResult): PlannerResult {
+  if (result.kind !== 'plan' || !/筛选|下拉|选择器|选项/.test(request.instruction)) return result;
+  const clone = result.plan.operations.find(
+    (operation): operation is Extract<UIChangeOperation, { type: 'cloneSubtree' }> => operation.type === 'cloneSubtree' && operation.source.kind === 'node'
+  );
+  if (!clone || clone.source.kind !== 'node') return result;
+  const template = findContextNode(request, clone.source.nodeId);
+  if (template?.attributes['data-ui-component'] !== 'form-field-select') return result;
+  const label = extractAddedLabel(request.instruction);
+  const options = extractQuotedValues(request.instruction);
+  return {
+    kind: 'plan',
+    plan: {
+      ...result.plan,
+      requiresConfirmation: false,
+      operations: [{
+        operationId: clone.operationId,
+        type: 'addComponent',
+        anchor: clone.anchor,
+        component: 'select',
+        position: clone.position,
+        resultRef: clone.resultRef,
+        props: { label, placeholder: label ? `请选择${label}` : '请选择', options }
+      }]
+    }
+  };
 }
 
 export class MockPlanner implements Planner {
@@ -126,7 +182,8 @@ export class MockPlanner implements Planner {
     const position = /左侧|前面|之前/.test(input) ? 'before' as const : /内部|里面/.test(input) ? 'insideEnd' as const : 'after' as const;
     if (/筛选|下拉|选择器/.test(input)) {
       const options = values.length ? values : ['全部', '待处理', '已完成'];
-      return createPlan(request, [{ operationId, type: 'addComponent', anchor: target, component: 'select', position, props: { placeholder: '请选择', options } }], '在选中元素旁新增下拉筛选项');
+      const label = extractAddedLabel(input);
+      return createPlan(request, [{ operationId, type: 'addComponent', anchor: target, component: 'select', position, props: { label, placeholder: label ? `请选择${label}` : '请选择', options } }], '在选中元素旁新增下拉筛选项');
     }
     if (/多选|复选/.test(input)) {
       return createPlan(request, [{ operationId, type: 'addComponent', anchor: target, component: 'checkboxGroup', position, props: { options: values.length ? values : ['选项 A', '选项 B'] } }], '新增一组多选项');
@@ -169,7 +226,7 @@ export class AiSdkPlanner implements Planner {
       prompt: createPlannerPrompt(request, conversation)
     });
     if (!output) throw new Error('模型没有返回结构化结果');
-    return plannerResultSchema.parse(output);
+    return normalizeTemplatePlan(request, plannerResultSchema.parse(output));
   }
 }
 
@@ -208,7 +265,7 @@ export class DeepSeekPlanner implements Planner {
       prompt: createPlannerPrompt(request, conversation)
     });
     if (!output) throw new Error('DeepSeek 没有返回 JSON 结果');
-    return plannerResultSchema.parse(output);
+    return normalizeTemplatePlan(request, plannerResultSchema.parse(output));
   }
 }
 

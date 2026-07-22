@@ -9,6 +9,8 @@ const ALLOWED_STYLES = new Set([
 
 const SAFE_LINK_PROTOCOLS = new Set(['http:', 'https:', 'mailto:', 'tel:']);
 const FORBIDDEN_CLONE_TAGS = new Set(['html', 'body', 'script', 'style', 'iframe', 'object', 'embed']);
+const INTERACTIVE_TAGS = new Set(['button', 'a', 'input', 'select', 'textarea', 'summary']);
+const INTERACTIVE_ROLES = new Set(['button', 'link', 'checkbox', 'radio', 'combobox', 'switch', 'tab']);
 
 export class PolicyError extends Error {
   readonly code = 'POLICY_ERROR';
@@ -22,6 +24,20 @@ function indexTrees(trees: DomTreeNode[]): Map<string, DomTreeNode> {
   };
   trees.forEach(visit);
   return nodes;
+}
+
+function findTreeNode(root: DomTreeNode, id: string): DomTreeNode | undefined {
+  if (root.id === id) return root;
+  for (const child of root.children) {
+    const found = findTreeNode(child, id);
+    if (found) return found;
+  }
+  return undefined;
+}
+
+function isInteractiveSelection(context: SelectedContext): boolean {
+  return INTERACTIVE_TAGS.has(context.selected.tag)
+    || Boolean(context.selected.role && INTERACTIVE_ROLES.has(context.selected.role));
 }
 
 function validateTarget(
@@ -43,7 +59,8 @@ function validateOperation(
   context: SelectedContext,
   nodes: Map<string, DomTreeNode>,
   resultRefs: Set<string>,
-  writableNodeIds: Set<string>
+  directWritableNodeIds: Set<string>,
+  contentWritableNodeIds: Set<string>
 ): void {
   if (operation.type === 'cloneSubtree') {
     validateTarget(operation.source, nodes, resultRefs);
@@ -51,10 +68,12 @@ function validateOperation(
   } else if (operation.type === 'addComponent') {
     validateTarget(operation.anchor, nodes, resultRefs);
   } else if (operation.type === 'moveElement') {
-    validateTarget(operation.target, nodes, resultRefs, writableNodeIds);
+    validateTarget(operation.target, nodes, resultRefs, directWritableNodeIds);
     validateTarget(operation.anchor, nodes, resultRefs);
+  } else if (operation.type === 'updateContent' || operation.type === 'updateStyle' || operation.type === 'setVisualState') {
+    validateTarget(operation.target, nodes, resultRefs, contentWritableNodeIds);
   } else {
-    validateTarget(operation.target, nodes, resultRefs, writableNodeIds);
+    validateTarget(operation.target, nodes, resultRefs, directWritableNodeIds);
   }
 
   if (operation.type === 'cloneSubtree' && operation.source.kind === 'node') {
@@ -87,9 +106,16 @@ export function validatePlan(plan: ChangePlan, context: SelectedContext): void {
   }
   const nodes = indexTrees([context.selectedTree, ...context.reusableTrees, ...context.addedTrees]);
   const addedNodes = indexTrees(context.addedTrees);
-  const writableNodeIds = new Set([context.selected.id, ...addedNodes.keys()]);
+  const directWritableNodeIds = new Set([context.selected.id, ...addedNodes.keys()]);
+  const contentWritableNodeIds = new Set(directWritableNodeIds);
+  if (isInteractiveSelection(context)) {
+    const selectedNode = findTreeNode(context.selectedTree, context.selected.id);
+    if (selectedNode) indexTrees([selectedNode]).forEach((_node, id) => contentWritableNodeIds.add(id));
+  }
   const resultRefs = new Set<string>();
-  for (const operation of plan.operations) validateOperation(operation, context, nodes, resultRefs, writableNodeIds);
+  for (const operation of plan.operations) {
+    validateOperation(operation, context, nodes, resultRefs, directWritableNodeIds, contentWritableNodeIds);
+  }
 
   const removesExisting = plan.operations.some(
     operation => operation.type === 'removeElement' && operation.target.kind === 'node'

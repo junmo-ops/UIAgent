@@ -77,4 +77,24 @@ describe('validatePlan', () => {
       target: { kind: 'node', nodeId: 'row' }, text: '不允许'
     }), scopedContext)).toThrow(/仅允许读取/);
   });
+
+  it('allows content changes inside a selected interactive component but keeps structural operations on its root', () => {
+    const componentContext: SelectedContext = {
+      ...context,
+      selectedTree: {
+        id: 'selected', tag: 'button', text: '', attributes: {},
+        children: [{ id: 'button-label', tag: 'span', text: '提交订单', attributes: {}, children: [] }]
+      }
+    };
+    expect(() => validatePlan(plan({
+      operationId: 'edit-label', type: 'updateContent',
+      target: { kind: 'node', nodeId: 'button-label' }, text: '提交审核'
+    }), componentContext)).not.toThrow();
+
+    const removeChildPlan: ChangePlan = {
+      ...plan({ operationId: 'remove-label', type: 'removeElement', target: { kind: 'node', nodeId: 'button-label' } }),
+      requiresConfirmation: true
+    };
+    expect(() => validatePlan(removeChildPlan, componentContext)).toThrow(/仅允许读取/);
+  });
 });

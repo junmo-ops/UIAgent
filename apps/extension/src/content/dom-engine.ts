@@ -321,18 +321,155 @@ export class DomEngine {
 
   private addAction(operation: Extract<UIChangeOperation, { type: 'addComponent' }>, resultRefs: Map<string, HTMLElement>): Action {
     const target = this.resolve(operation.anchor, resultRefs);
-    const node = this.createComponent(operation.component, operation.props);
-    this.reuseNearbyStyle(node, target, operation.component);
+    const template = this.findComponentTemplate(target, operation.component);
+    const node = template
+      ? this.cloneComponentTemplate(template, operation.component, operation.props)
+      : this.createComponent(operation.component, operation.props);
+    if (!template) this.reuseNearbyStyle(node, target, operation.component);
+    const insertion = template && target.contains(template)
+      ? { target: template, position: 'after' as const }
+      : { target, position: operation.position };
+    const staticInteraction = template && operation.component === 'select'
+      ? this.createStaticSelectInteraction(node, operation.props.options ?? [])
+      : undefined;
     const newId = `added-${crypto.randomUUID()}`;
     node.setAttribute(ownAttribute, newId);
     node.setAttribute('data-ui-agent-added', 'true');
     const insert = () => {
-      this.insertAt(node, target, operation.position);
+      this.insertAt(node, insertion.target, insertion.position);
       this.elements.set(newId, node);
       this.addedIds.add(newId);
       if (operation.resultRef) resultRefs.set(operation.resultRef, node);
+      staticInteraction?.mount();
     };
-    return { apply: insert, revert: () => { node.remove(); this.addedIds.delete(newId); if (operation.resultRef) resultRefs.delete(operation.resultRef); } };
+    return {
+      apply: insert,
+      revert: () => {
+        staticInteraction?.unmount();
+        node.remove();
+        this.addedIds.delete(newId);
+        if (operation.resultRef) resultRefs.delete(operation.resultRef);
+      }
+    };
+  }
+
+  private createStaticSelectInteraction(root: HTMLElement, options: string[]) {
+    const control = root.matches('.ant-select') ? root : root.querySelector<HTMLElement>('.ant-select');
+    const display = root.querySelector<HTMLElement>('.ant-select-selection-placeholder, .ant-select-selection-item');
+    let panel: HTMLDivElement | undefined;
+
+    const close = () => {
+      panel?.remove();
+      panel = undefined;
+      control?.classList.remove('ant-select-open');
+      control?.setAttribute('aria-expanded', 'false');
+    };
+    const open = () => {
+      if (!control || panel || options.length === 0) return;
+      const rect = control.getBoundingClientRect();
+      panel = document.createElement('div');
+      panel.className = 'ant-select-dropdown ui-agent-static-select-dropdown';
+      panel.setAttribute('data-ui-agent-static-interaction', 'true');
+      Object.assign(panel.style, {
+        position: 'fixed', left: `${rect.left}px`, top: `${rect.bottom + 4}px`,
+        width: `${Math.max(rect.width, 160)}px`, zIndex: '2147483646', padding: '4px',
+        background: '#fff', borderRadius: '8px', boxShadow: '0 6px 16px rgba(0,0,0,.12)'
+      });
+      for (const option of options) {
+        const item = document.createElement('div');
+        item.className = 'ant-select-item ant-select-item-option';
+        item.setAttribute('data-ui-agent-option', option);
+        item.textContent = option;
+        Object.assign(item.style, { padding: '5px 12px', lineHeight: '22px', borderRadius: '4px', cursor: 'pointer' });
+        item.addEventListener('mouseenter', () => { item.style.background = 'rgba(0,0,0,.04)'; });
+        item.addEventListener('mouseleave', () => { item.style.background = ''; });
+        item.addEventListener('click', event => {
+          event.preventDefault();
+          event.stopPropagation();
+          if (display) {
+            display.textContent = option;
+            display.classList.remove('ant-select-selection-placeholder');
+            display.classList.add('ant-select-selection-item');
+          }
+          close();
+        });
+        panel.appendChild(item);
+      }
+      document.body.appendChild(panel);
+      control.classList.add('ant-select-open');
+      control.setAttribute('aria-expanded', 'true');
+    };
+    const toggle = (event: Event) => {
+      event.preventDefault();
+      event.stopPropagation();
+      if (panel) close(); else open();
+    };
+    const outside = (event: Event) => {
+      if (panel && event.target instanceof Node && !root.contains(event.target) && !panel.contains(event.target)) close();
+    };
+
+    return {
+      mount: () => {
+        close();
+        control?.addEventListener('click', toggle);
+        document.addEventListener('click', outside);
+      },
+      unmount: () => {
+        close();
+        control?.removeEventListener('click', toggle);
+        document.removeEventListener('click', outside);
+      }
+    };
+  }
+
+  private findComponentTemplate(target: HTMLElement, component: string): HTMLElement | undefined {
+    const semanticType = component === 'select' ? 'select'
+      : component === 'input' ? 'input'
+        : component === 'button' ? 'button'
+          : undefined;
+    if (!semanticType) return undefined;
+    const fieldSelector = `[data-ui-component="form-field-${semanticType}"]`;
+    const componentSelector = `[data-ui-component$="${semanticType}"]`;
+    const scopes = [target, target.parentElement, target.closest<HTMLElement>('form'), document.body]
+      .filter((scope, index, values): scope is HTMLElement => Boolean(scope) && values.indexOf(scope) === index);
+    for (const scope of scopes) {
+      if (target.matches(fieldSelector)) return target;
+      const field = [...scope.querySelectorAll<HTMLElement>(fieldSelector)].at(-1);
+      if (field) return field;
+      if (target.matches(componentSelector)) return target;
+      const componentNode = [...scope.querySelectorAll<HTMLElement>(componentSelector)].at(-1);
+      if (componentNode) return componentNode;
+    }
+    return undefined;
+  }
+
+  private cloneComponentTemplate(
+    template: HTMLElement,
+    component: string,
+    props: { label?: string; text?: string; placeholder?: string; options?: string[]; href?: string }
+  ): HTMLElement {
+    const clone = template.cloneNode(true) as HTMLElement;
+    this.sanitizeClonedTree(clone);
+    clone.setAttribute('data-ui-agent-template-source', template.getAttribute('data-ui-component') ?? component);
+    if (props.label) {
+      const label = clone.querySelector<HTMLElement>('.ant-form-item-label label, label');
+      if (label) label.textContent = props.label;
+    }
+    if (component === 'select') {
+      const placeholder = props.placeholder ?? (props.label ? `请选择${props.label}` : '请选择');
+      const display = clone.querySelector<HTMLElement>('.ant-select-selection-placeholder, .ant-select-selection-item');
+      if (display) display.textContent = placeholder;
+      const input = clone.querySelector<HTMLInputElement>('input[role="combobox"], input');
+      if (input) input.setAttribute('aria-label', props.label ?? placeholder);
+      clone.setAttribute('data-ui-agent-options', JSON.stringify(props.options ?? []));
+    } else if (component === 'input') {
+      const input = clone.matches('input') ? clone as HTMLInputElement : clone.querySelector<HTMLInputElement>('input, textarea');
+      if (input) input.placeholder = props.placeholder ?? '';
+    } else if (component === 'button') {
+      const label = clone.querySelector<HTMLElement>('span') ?? clone;
+      label.textContent = props.text ?? '按钮';
+    }
+    return clone;
   }
 
   private contentAction(node: HTMLElement, next: string): Action {
@@ -388,7 +525,7 @@ export class DomEngine {
     };
   }
 
-  private createComponent(component: string, props: { text?: string; placeholder?: string; options?: string[]; href?: string }): HTMLElement {
+  private createComponent(component: string, props: { label?: string; text?: string; placeholder?: string; options?: string[]; href?: string }): HTMLElement {
     const common = { height: '32px', boxSizing: 'border-box', font: '14px -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif' };
     if (component === 'button') {
       const node = document.createElement('button'); node.type = 'button'; node.textContent = props.text ?? '按钮';
