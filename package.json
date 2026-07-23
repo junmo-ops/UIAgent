@@ -8,6 +8,7 @@
     "dev:page": "pnpm --filter @ui-agent/demo-page dev",
     "dev:service": "pnpm --filter @ui-agent/agent-service dev",
     "dev:extension": "pnpm --filter @ui-agent/extension dev",
+    "eval:challenge": "pnpm --filter @ui-agent/challenge-runner start --",
     "build": "pnpm -r --if-present build",
     "typecheck": "pnpm -r --if-present typecheck",
     "test": "vitest run",

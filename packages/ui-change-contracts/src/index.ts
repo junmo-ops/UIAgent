@@ -19,6 +19,22 @@ export interface DomTreeNode {
   children: DomTreeNode[];
 }
 
+export const domElementFactSchema = z.object({
+  id: z.string().min(1),
+  tag: z.string().min(1).optional(),
+  parentId: z.string().optional(),
+  index: z.number().int().nonnegative(),
+  semanticRole: z.string().optional(),
+  text: z.string().max(300).optional(),
+  rect: z.object({ x: z.number(), y: z.number(), width: z.number(), height: z.number() }),
+  layout: z.object({
+    display: z.string(),
+    flexDirection: z.string(),
+    gridTemplateColumns: z.string(),
+    gap: z.string()
+  })
+});
+
 export const domTreeNodeSchema: z.ZodType<DomTreeNode> = z.lazy(() => z.object({
   id: z.string().min(1),
   tag: z.string().min(1),
@@ -40,11 +56,15 @@ export const selectedContextSchema = z.object({
   siblings: z.array(elementRefSchema).max(8),
   visibleStyle: z.record(z.string(), z.string()),
   addedElements: z.array(elementRefSchema),
-  addedTrees: z.array(domTreeNodeSchema)
+  addedTrees: z.array(domTreeNodeSchema),
+  elementFacts: z.array(domElementFactSchema).max(120).optional()
 });
 
 export const componentTypeSchema = z.enum([
-  'button', 'text', 'link', 'input', 'select', 'checkboxGroup', 'radioGroup'
+  'button', 'text', 'link', 'input', 'select', 'checkboxGroup', 'radioGroup', 'tag', 'alert'
+]);
+export const componentVariantSchema = z.enum([
+  'primary', 'danger', 'warning', 'success', 'info', 'neutral'
 ]);
 export const positionSchema = z.enum(['before', 'after', 'insideStart', 'insideEnd']);
 
@@ -56,6 +76,42 @@ export const nodeTargetSchema = z.discriminatedUnion('kind', [
     path: z.array(z.number().int().nonnegative()).max(8).default([])
   })
 ]);
+
+export const uiGoalSchema = z.object({
+  goalId: z.string().min(1).max(80),
+  action: z.enum(['create', 'update', 'remove', 'move', 'present']),
+  role: z.enum([
+    'button', 'text', 'link', 'input', 'select', 'checkboxGroup', 'radioGroup',
+    'tag', 'alert', 'field', 'row', 'container'
+  ]),
+  target: nodeTargetSchema.optional(),
+  resultRef: z.string().min(1).max(80).optional(),
+  content: z.object({
+    label: z.string().max(80).optional(),
+    text: z.string().max(500).optional(),
+    placeholder: z.string().max(120).optional(),
+    options: z.array(z.string().max(80)).max(12).optional(),
+    href: z.string().max(500).optional(),
+    variant: componentVariantSchema.optional()
+  }).default({}),
+  placement: z.object({
+    anchor: nodeTargetSchema,
+    relation: positionSchema,
+    strict: z.boolean().default(true),
+    sameRow: z.boolean().default(false)
+  }).optional(),
+  state: z.object({
+    name: z.enum(['open', 'selected', 'disabled']),
+    value: z.boolean(),
+    options: z.array(z.string().max(80)).max(12).optional()
+  }).optional(),
+  preserveTexts: z.array(z.string().max(200)).max(12).default([])
+});
+
+export const uiIntentSchema = z.object({
+  summary: z.string().min(1).max(500),
+  goals: z.array(uiGoalSchema).min(1).max(12)
+});
 
 const operationBase = z.object({ operationId: z.string().min(1) });
 export const uiChangeOperationSchema = z.discriminatedUnion('type', [
@@ -77,7 +133,8 @@ export const uiChangeOperationSchema = z.discriminatedUnion('type', [
       text: z.string().max(200).optional(),
       placeholder: z.string().max(120).optional(),
       options: z.array(z.string().max(80)).max(12).optional(),
-      href: z.string().max(500).optional()
+      href: z.string().max(500).optional(),
+      variant: componentVariantSchema.optional()
     })
   }),
   operationBase.extend({
@@ -115,6 +172,7 @@ export const changePlanSchema = z.object({
   selectionVersion: z.number().int().nonnegative(),
   pageRevision: z.number().int().nonnegative(),
   summary: z.string().min(1).max(500),
+  intent: uiIntentSchema.optional(),
   requiresConfirmation: z.boolean(),
   operations: z.array(uiChangeOperationSchema).min(1).max(12)
 });
@@ -126,7 +184,7 @@ export const clarificationSchema = z.object({
 });
 
 export const plannerResultSchema = z.discriminatedUnion('kind', [
-  z.object({ kind: z.literal('plan'), plan: changePlanSchema }),
+  z.object({ kind: z.literal('plan'), plan: changePlanSchema.extend({ intent: uiIntentSchema }) }),
   z.object({ kind: z.literal('clarification'), clarification: clarificationSchema })
 ]);
 
@@ -149,6 +207,7 @@ export const executionReceiptSchema = z.object({
     operationId: z.string(),
     status: z.enum(['applied', 'failed', 'rolledBack']),
     verified: z.boolean(),
+    resultElementId: z.string().optional(),
     errorCode: z.string().optional(),
     errorMessage: z.string().optional()
   })),
@@ -194,7 +253,10 @@ export const agentTurnResponseSchema = z.discriminatedUnion('kind', [
 ]);
 
 export type ElementRef = z.infer<typeof elementRefSchema>;
+export type DomElementFact = z.infer<typeof domElementFactSchema>;
 export type NodeTarget = z.infer<typeof nodeTargetSchema>;
+export type UiGoal = z.infer<typeof uiGoalSchema>;
+export type UiIntent = z.infer<typeof uiIntentSchema>;
 export type SelectedContext = z.infer<typeof selectedContextSchema>;
 export type UIChangeOperation = z.infer<typeof uiChangeOperationSchema>;
 export type ChangePlan = z.infer<typeof changePlanSchema>;
@@ -228,6 +290,7 @@ export type ContentCommand =
   | { type: 'editorHeartbeat' }
   | { type: 'deactivateEditor' }
   | { type: 'startSelection' }
+  | { type: 'selectFixture'; testId: string }
   | { type: 'getContext' }
   | { type: 'applyPlan'; plan: ChangePlan; confirmedExistingRemoval: boolean }
   | { type: 'undo' }

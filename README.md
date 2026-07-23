@@ -13,9 +13,12 @@
 - 导出当前浏览器可视区域 PNG。
 - LangGraph + Vercel AI SDK 的可替换 Agent Runtime。
 - 两阶段 Agent Turn：浏览器执行后回传逐操作回执和最新局部 DOM，由 Agent 完成确定性验证。
+- GoalSpec 目标驱动规划：先声明组件语义、内容、位置、状态和保持约束，再由能力注册表编译原子操作。
+- 执行后基于原始 GoalSpec 验证页面事实，避免错误计划仅凭自身操作回执“自证成功”。
 - DOM 事务失败时自动回滚，并在安全范围内最多生成一次修正计划。
 - 默认 Mock Planner，无模型 Key 也能演示核心流程。
 - 列表页、详情页、表单页三类 V1.1 固定场景和 20 条模型回归任务。
+- C 组 12 条能力上限挑战场景，以及结果导向的运行编排和确定性评分内核。
 
 ## 工程结构
 
@@ -25,6 +28,7 @@ apps/extension             WXT Chrome MV3 插件
 apps/agent-service         Hono Agent Service
 packages/agent-runtime     LangGraph、Mock/远程模型 Planner
 packages/ui-change-agent   UI Change Agent 两阶段协调、验证与修正预算
+packages/ui-change-eval    挑战场景、运行编排和确定性评分
 packages/ui-change-domain  UI 变更策略和安全边界
 packages/ui-change-contracts 版本化 DTO 和 Zod Schema
 ```
@@ -96,6 +100,8 @@ pnpm test
 pnpm architecture
 pnpm build
 ```
+
+Agent 能力上限验证当前优先人工执行，步骤和 C01～C12 的逐项指令见《[C 组挑战测试方案](./docs/UI辅助需求编写插件_C组挑战测试方案.md)》。实验性的自动化 Runner 已保留在 `apps/challenge-runner`，不影响人工测试，也无需为了当前验证安装 Playwright Chromium。
 
 当前 Demo 只保证本地或明确测试环境中的当前页面会话，不承诺页面刷新、框架重新渲染或跨页面后保留修改。
 

@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { PROTOCOL_VERSION, type ChangePlan, type ExecutionSubmission, type StartTurnRequest } from '@ui-agent/contracts';
+import { PROTOCOL_VERSION, type ChangePlan, type ExecutionSubmission, type StartTurnRequest, type UiIntent } from '@ui-agent/contracts';
 import type { AgentRuntime } from '@ui-agent/agent-runtime';
 import { UiChangeAgent, verifyExecution } from './index';
 
@@ -14,10 +14,18 @@ const request: StartTurnRequest = {
   }
 };
 
-function plan(planId = 'plan-1', pageRevision = 0): ChangePlan {
+function plan(planId = 'plan-1', pageRevision = 0): ChangePlan & { intent: UiIntent } {
   return {
     protocolVersion: PROTOCOL_VERSION, planId, selectionVersion: 1, pageRevision,
-    summary: '添加刷新按钮', requiresConfirmation: false,
+    summary: '添加刷新按钮',
+    intent: {
+      summary: '验证两阶段执行',
+      goals: [{
+        goalId: 'selected-region', action: 'present', role: 'container',
+        target: { kind: 'node', nodeId: 'selected' }, content: {}, preserveTexts: []
+      }]
+    },
+    requiresConfirmation: false,
     operations: [{ operationId: `op-${planId}`, type: 'addComponent', anchor: { kind: 'node', nodeId: 'selected' }, component: 'button', position: 'after', props: { text: '刷新' } }]
   };
 }
@@ -70,5 +78,77 @@ describe('verifyExecution', () => {
     const wrong = submission(changePlan, true);
     wrong.planId = 'other';
     expect(verifyExecution(changePlan, wrong)).toMatchObject({ status: 'failed' });
+  });
+
+  it('rejects a structurally successful receipt when the declared UI goal is not satisfied', () => {
+    const intentPlan: ChangePlan & { intent: UiIntent } = {
+      protocolVersion: PROTOCOL_VERSION, planId: 'goal-plan', selectionVersion: 1, pageRevision: 0,
+      summary: '新增风险等级',
+      intent: {
+        summary: '新增风险等级',
+        goals: [{
+          goalId: 'risk', action: 'create', role: 'tag', resultRef: 'risk-result',
+          content: { label: '风险等级', text: '高风险', variant: 'danger' },
+          placement: {
+            anchor: { kind: 'node', nodeId: 'selected' },
+            relation: 'after', strict: true, sameRow: true
+          },
+          preserveTexts: []
+        }]
+      },
+      requiresConfirmation: false,
+      operations: [{
+        operationId: 'create-risk', type: 'addComponent',
+        anchor: { kind: 'node', nodeId: 'selected' }, component: 'tag',
+        position: 'after', resultRef: 'risk-result',
+        props: { label: '风险等级', text: '高风险', variant: 'danger' }
+      }]
+    };
+    const result = submission(intentPlan, true);
+    result.receipt.operations[0]!.resultElementId = 'added-risk';
+    result.observation = {
+      ...result.observation,
+      selectedTree: { ...result.observation.selectedTree, text: '原字段' },
+      addedTrees: [{
+        id: 'added-risk', tag: 'span', text: '高风险',
+        attributes: { 'data-ui-component': 'text' }, children: []
+      }],
+      elementFacts: [
+        {
+          id: 'selected', parentId: 'parent', index: 0,
+          rect: { x: 0, y: 0, width: 100, height: 32 },
+          layout: { display: 'block', flexDirection: 'row', gridTemplateColumns: 'none', gap: '0px' }
+        },
+        {
+          id: 'added-risk', parentId: 'parent', index: 1,
+          rect: { x: 100, y: 0, width: 100, height: 32 },
+          layout: { display: 'block', flexDirection: 'row', gridTemplateColumns: 'none', gap: '0px' }
+        }
+      ]
+    };
+
+    const verification = verifyExecution(intentPlan, result);
+    expect(verification.status).toBe('repairable');
+    expect(verification.checks).toEqual(expect.arrayContaining([
+      expect.objectContaining({ code: 'GOAL_risk_ROLE', passed: false }),
+      expect.objectContaining({ code: 'GOAL_risk_CONTENT_LABEL', passed: false }),
+      expect.objectContaining({ code: 'GOAL_risk_CONTENT_VARIANT', passed: false })
+    ]));
+
+    result.observation.addedTrees = [{
+      id: 'added-risk', tag: 'div', text: '',
+      attributes: {
+        'data-ui-component': 'labeled-tag',
+        'data-ui-agent-variant': 'danger'
+      },
+      children: [
+        { id: 'risk-label', tag: 'span', text: '风险等级', attributes: {}, children: [] },
+        {
+          id: 'risk-value', tag: 'span', text: '高风险',
+          attributes: { 'data-ui-component': 'tag' }, children: []
+        }
+      ]
+    }];
+    expect(verifyExecution(intentPlan, result)).toMatchObject({ status: 'passed' });
   });
 });

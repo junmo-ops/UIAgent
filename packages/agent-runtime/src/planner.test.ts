@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { PROTOCOL_VERSION, type StartTurnRequest } from '@ui-agent/contracts';
-import { createAgentRuntime, DeepSeekPlanner, MockPlanner, normalizeTemplatePlan, type ConversationTurn, type Planner } from './index';
+import { compilePlannerResult, createAgentRuntime, DeepSeekPlanner, MockPlanner, type ConversationTurn, type Planner } from './index';
 
 const request: StartTurnRequest = {
   protocolVersion: PROTOCOL_VERSION,
@@ -44,10 +44,22 @@ describe('DeepSeekPlanner', () => {
         selectionVersion: 1,
         pageRevision: 0,
         summary: '新增刷新按钮',
+        intent: {
+          summary: '新增刷新按钮',
+          goals: [{
+            goalId: 'refresh-goal', action: 'create', role: 'button', resultRef: 'refresh',
+            content: { text: '刷新' },
+            placement: {
+              anchor: { kind: 'node', nodeId: 'selected' },
+              relation: 'after', strict: true, sameRow: false
+            },
+            preserveTexts: []
+          }]
+        },
         requiresConfirmation: false,
         operations: [{
           operationId: 'op-1', type: 'addComponent', anchor: { kind: 'node', nodeId: 'selected' },
-          component: 'button', position: 'after', props: { text: '刷新' }
+          component: 'button', position: 'after', resultRef: 'refresh', props: { text: '刷新' }
         }]
       }
     };
@@ -70,8 +82,8 @@ describe('DeepSeekPlanner', () => {
   });
 });
 
-describe('template plan normalization', () => {
-  it('replaces fragile framework-internal clone edits with a controlled component macro', () => {
+describe('intent-driven plan compilation', () => {
+  it('compiles a semantic goal into a controlled component capability', () => {
     const formRequest: StartTurnRequest = {
       ...request,
       instruction: '在订单渠道后增加付款方式，选项为月结、预付、货到付款',
@@ -91,20 +103,100 @@ describe('template plan normalization', () => {
       plan: {
         protocolVersion: PROTOCOL_VERSION, planId: 'form-plan', selectionVersion: 1, pageRevision: 0,
         summary: '新增付款方式', requiresConfirmation: false,
+        intent: {
+          summary: '新增付款方式',
+          goals: [{
+            goalId: 'payment-goal', action: 'create' as const, role: 'select' as const,
+            resultRef: 'payment',
+            content: { label: '付款方式', options: ['月结', '预付', '货到付款'] },
+            placement: {
+              anchor: { kind: 'node' as const, nodeId: 'channel-field' },
+              relation: 'after' as const, strict: true, sameRow: false
+            },
+            preserveTexts: []
+          }]
+        },
         operations: [
-          { operationId: 'clone', type: 'cloneSubtree' as const, source: { kind: 'node' as const, nodeId: 'channel-field' }, anchor: { kind: 'node' as const, nodeId: 'channel-field' }, position: 'after' as const, resultRef: 'payment' },
-          { operationId: 'edit', type: 'updateContent' as const, target: { kind: 'result' as const, resultRef: 'payment', path: [0] }, text: '付款方式' }
+          { operationId: 'clone', type: 'cloneSubtree' as const, source: { kind: 'node' as const, nodeId: 'channel-field' }, anchor: { kind: 'node' as const, nodeId: 'channel-field' }, position: 'after' as const, resultRef: 'payment' }
         ]
       }
     };
 
-    const normalized = normalizeTemplatePlan(formRequest, modelResult);
+    const normalized = compilePlannerResult(formRequest, modelResult);
     expect(normalized.kind).toBe('plan');
     if (normalized.kind === 'plan') {
       expect(normalized.plan.operations).toEqual([expect.objectContaining({
         type: 'addComponent', component: 'select', resultRef: 'payment',
         props: { label: '付款方式', placeholder: '请选择付款方式', options: ['月结', '预付', '货到付款'] }
       })]);
+    }
+  });
+
+  it('uses declared goal semantics instead of instruction keyword rewriting', () => {
+    const semanticRequest: StartTurnRequest = {
+      ...request,
+      instruction: '增加黄色提示“需要补充合同”、红色标签“高风险”和批量驳回危险按钮',
+    };
+    const modelResult = {
+      kind: 'plan' as const,
+      plan: {
+        protocolVersion: PROTOCOL_VERSION, planId: 'semantic-plan', selectionVersion: 1, pageRevision: 0,
+        summary: '新增语义组件', requiresConfirmation: false,
+        intent: {
+          summary: '新增语义组件',
+          goals: [
+            {
+              goalId: 'warning-goal', action: 'create' as const, role: 'alert' as const,
+              resultRef: 'warning', content: { text: '需要补充合同', variant: 'warning' as const },
+              placement: { anchor: { kind: 'node' as const, nodeId: 'selected' }, relation: 'after' as const, strict: true, sameRow: false },
+              preserveTexts: []
+            },
+            {
+              goalId: 'risk-goal', action: 'create' as const, role: 'tag' as const,
+              resultRef: 'risk', content: { text: '高风险', variant: 'danger' as const },
+              placement: { anchor: { kind: 'node' as const, nodeId: 'selected' }, relation: 'after' as const, strict: true, sameRow: false },
+              preserveTexts: []
+            },
+            {
+              goalId: 'reject-goal', action: 'create' as const, role: 'button' as const,
+              resultRef: 'reject', content: { text: '批量驳回', variant: 'danger' as const },
+              placement: { anchor: { kind: 'node' as const, nodeId: 'selected' }, relation: 'after' as const, strict: true, sameRow: false },
+              preserveTexts: []
+            }
+          ]
+        },
+        operations: [
+          {
+            operationId: 'alert', type: 'addComponent' as const,
+            anchor: { kind: 'node' as const, nodeId: 'selected' }, component: 'text' as const,
+            position: 'after' as const, resultRef: 'warning', props: { text: '需要补充合同' }
+          },
+          {
+            operationId: 'tag', type: 'addComponent' as const,
+            anchor: { kind: 'node' as const, nodeId: 'selected' }, component: 'text' as const,
+            position: 'after' as const, resultRef: 'risk', props: { text: '高风险' }
+          },
+          {
+            operationId: 'danger', type: 'addComponent' as const,
+            anchor: { kind: 'node' as const, nodeId: 'selected' }, component: 'button' as const,
+            position: 'after' as const, resultRef: 'reject', props: { text: '批量驳回' }
+          }
+        ]
+      }
+    };
+
+    const normalized = compilePlannerResult(semanticRequest, modelResult);
+    expect(normalized.kind).toBe('plan');
+    if (normalized.kind === 'plan') {
+      expect(normalized.plan.operations[0]).toMatchObject({
+        type: 'addComponent', component: 'alert', props: { text: '需要补充合同', variant: 'warning' }
+      });
+      expect(normalized.plan.operations[1]).toMatchObject({
+        type: 'addComponent', component: 'tag', props: { text: '高风险', variant: 'danger' }
+      });
+      expect(normalized.plan.operations[2]).toMatchObject({
+        type: 'addComponent', component: 'button', props: { text: '批量驳回', variant: 'danger' }
+      });
     }
   });
 });

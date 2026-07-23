@@ -51,6 +51,14 @@ export default defineContentScript({
           selecting = true;
           return { ok: true } satisfies ContentCommandResult;
         }
+        if (command.type === 'selectFixture') {
+          const evaluationPage = ['127.0.0.1', 'localhost'].includes(location.hostname) && location.port === '5173';
+          if (!evaluationPage) throw new Error('自动化选区仅允许固定本地测试页');
+          const target = [...document.querySelectorAll<HTMLElement>('[data-testid]')]
+            .find(element => element.getAttribute('data-testid') === command.testId);
+          if (!target) throw new Error(`测试页不存在选区 ${command.testId}`);
+          return { ok: true, context: engine.select(target), ...engine.historyState() } satisfies ContentCommandResult;
+        }
         if (command.type === 'getContext') return { ok: true, context: engine.context(), ...engine.historyState() } satisfies ContentCommandResult;
         if (command.type === 'applyPlan') {
           const plan = changePlanSchema.parse(command.plan);

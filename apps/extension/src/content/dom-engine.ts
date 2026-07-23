@@ -17,11 +17,21 @@ interface StaticSelectInteraction {
   unmount(): void;
   setOpen(value: boolean): void;
   isOpen(): boolean;
+  setSelected(options: string[], value: boolean): void;
+  isSelected(options: string[]): boolean;
 }
 
 const ownAttribute = 'data-ui-agent-id';
-const styleProperties = ['color', 'backgroundColor', 'fontSize', 'fontWeight', 'display', 'flexDirection', 'gap', 'padding', 'margin', 'border', 'borderRadius', 'width', 'height'] as const;
-const safeContextAttributes = new Set(['aria-label', 'aria-selected', 'aria-expanded', 'role', 'type', 'placeholder', 'title', 'href', 'data-ui-component']);
+const styleProperties = [
+  'color', 'backgroundColor', 'fontSize', 'fontWeight', 'display', 'flexDirection', 'gap',
+  'padding', 'margin', 'border', 'borderRadius', 'width', 'height', 'gridTemplateColumns',
+  'alignItems', 'justifyContent'
+] as const;
+const safeContextAttributes = new Set([
+  'aria-label', 'aria-selected', 'aria-expanded', 'aria-checked', 'aria-disabled', 'disabled', 'role', 'type',
+  'placeholder', 'title', 'href', 'data-ui-component', 'data-ui-agent-variant',
+  'data-ui-agent-options', 'data-ui-agent-selected-options'
+]);
 const forbiddenCloneTags = new Set(['SCRIPT', 'STYLE', 'IFRAME', 'OBJECT', 'EMBED']);
 
 export class DomEngine {
@@ -107,7 +117,8 @@ export class DomEngine {
       addedTrees: [...this.addedIds]
         .map(id => this.elements.get(id))
         .filter((element): element is HTMLElement => Boolean(element?.isConnected) && element !== this.selected && treeBudget.remaining > 0)
-        .map(element => this.describeTree(element, 0, treeBudget))
+        .map(element => this.describeTree(element, 0, treeBudget)),
+      elementFacts: this.collectElementFacts(this.factScopeRoot(localScopeRoot))
     };
     return this.lastContext;
   }
@@ -131,6 +142,12 @@ export class DomEngine {
       operationReceipts.forEach((receipt, index) => {
         const operation = plan.operations[index];
         receipt.verified = Boolean(operation && this.verifyAppliedOperation(operation, resultRefs));
+        if (operation?.type === 'cloneSubtree' || operation?.type === 'addComponent') {
+          const resultRef = operation.type === 'cloneSubtree'
+            ? operation.resultRef
+            : operation.resultRef ?? `operation:${operation.operationId}`;
+          receipt.resultElementId = resultRefs.get(resultRef)?.getAttribute(ownAttribute) ?? undefined;
+        }
       });
     } catch (error) {
       for (const action of [...applied].reverse()) {
@@ -222,6 +239,17 @@ export class DomEngine {
     return element.closest<HTMLElement>('tr,[role="row"],li') ?? element;
   }
 
+  private factScopeRoot(element: HTMLElement): HTMLElement {
+    let scope = element;
+    for (let depth = 0; depth < 2; depth += 1) {
+      const parent = scope.parentElement;
+      if (!parent || parent === document.body || parent === document.documentElement) break;
+      scope = parent;
+      if (scope.children.length > 1) break;
+    }
+    return scope;
+  }
+
   private findReusableRoots(scope: HTMLElement): HTMLElement[] {
     if (scope.matches('tr,[role="row"],li')) return [];
     const rows = [...scope.querySelectorAll<HTMLElement>('tr,[role="row"]')];
@@ -237,6 +265,10 @@ export class DomEngine {
         .filter(attribute => safeContextAttributes.has(attribute.name))
         .map(attribute => [attribute.name, attribute.value.slice(0, 300)])
     );
+    if (!attributes['data-ui-component']) {
+      const inferredComponent = this.inferComponent(element);
+      if (inferredComponent) attributes['data-ui-component'] = inferredComponent;
+    }
     const directText = [...element.childNodes]
       .filter(node => node.nodeType === Node.TEXT_NODE)
       .map(node => node.textContent ?? '')
@@ -260,6 +292,52 @@ export class DomEngine {
       attributes,
       children
     };
+  }
+
+  private inferComponent(element: HTMLElement): string | undefined {
+    if (element.classList.contains('ant-tag')) return 'tag';
+    if (element.classList.contains('ant-alert')) return 'alert';
+    if (element.classList.contains('ant-select')) return 'select';
+    if (element.classList.contains('ant-btn')) return 'button';
+    return undefined;
+  }
+
+  private collectElementFacts(root: HTMLElement) {
+    const facts: NonNullable<SelectedContext['elementFacts']> = [];
+    const visit = (element: HTMLElement, parentId?: string) => {
+      if (facts.length >= 120) return;
+      const id = this.ensureId(element);
+      const resolvedParentId = parentId
+        ?? (element.parentElement && !element.parentElement.hasAttribute('data-ui-agent-overlay')
+          ? this.ensureId(element.parentElement)
+          : undefined);
+      const rect = element.getBoundingClientRect();
+      const style = getComputedStyle(element);
+      facts.push({
+        id,
+        tag: element.tagName.toLowerCase(),
+        parentId: resolvedParentId,
+        index: element.parentElement ? [...element.parentElement.children].indexOf(element) : 0,
+        semanticRole: element.getAttribute('data-ui-component') ?? this.inferComponent(element),
+        text: (element.innerText || element.getAttribute('aria-label') || element.getAttribute('placeholder') || '').trim().slice(0, 300),
+        rect: { x: rect.x, y: rect.y, width: rect.width, height: rect.height },
+        layout: {
+          display: style.display,
+          flexDirection: style.flexDirection,
+          gridTemplateColumns: style.gridTemplateColumns,
+          gap: style.gap
+        }
+      });
+      for (const child of [...element.children]) {
+        if (child instanceof HTMLElement && !child.hasAttribute('data-ui-agent-overlay')) visit(child, id);
+      }
+    };
+    visit(root);
+    for (const id of this.addedIds) {
+      const element = this.elements.get(id);
+      if (element?.isConnected && !root.contains(element) && facts.length < 120) visit(element);
+    }
+    return facts;
   }
 
   private describe(element: HTMLElement, knownId?: string): ElementRef {
@@ -292,7 +370,16 @@ export class DomEngine {
 
   private verifyAppliedOperation(operation: UIChangeOperation, resultRefs: Map<string, HTMLElement>): boolean {
     try {
-      if (operation.type === 'cloneSubtree') return Boolean(resultRefs.get(operation.resultRef)?.isConnected);
+      if (operation.type === 'cloneSubtree') {
+        const clone = resultRefs.get(operation.resultRef);
+        if (!clone?.isConnected) return false;
+        const placement = this.normalizeClonePlacement(
+          this.resolve(operation.source, resultRefs),
+          this.resolve(operation.anchor, resultRefs),
+          operation.position
+        );
+        return this.isAtPlacement(clone, placement.anchor, placement.position);
+      }
       if (operation.type === 'addComponent') {
         return Boolean(resultRefs.get(operation.resultRef ?? `operation:${operation.operationId}`)?.isConnected);
       }
@@ -312,7 +399,7 @@ export class DomEngine {
       if (operation.type === 'removeElement') return !node.isConnected;
       if (operation.type === 'moveElement') return node.isConnected;
       if (operation.state === 'disabled') return node.hasAttribute('disabled') === operation.value;
-      if (operation.state === 'selected') return node.getAttribute('aria-selected') === String(operation.value);
+      if (operation.state === 'selected') return this.isVisualSelectionApplied(node, operation.options ?? [], operation.value);
       const selectInteraction = this.findSelectInteraction(node);
       if (selectInteraction) return selectInteraction.isOpen() === operation.value;
       const expandedNode = node.matches('[aria-expanded]') ? node : node.querySelector<HTMLElement>('[aria-expanded]');
@@ -377,11 +464,7 @@ export class DomEngine {
       : anchor.parentElement != null && parents.has(anchor.parentElement.tagName);
     if (structurallyValid) return { anchor, position };
 
-    const sourceParent = source.parentElement;
-    if (!sourceParent || !parents.has(sourceParent.tagName)) {
-      throw new Error(`无法为 ${source.tagName.toLowerCase()} 找到合法的克隆插入位置`);
-    }
-    return { anchor: source, position: 'after' };
+    throw new Error(`${source.tagName.toLowerCase()} 无法按计划插入到 ${anchor.tagName.toLowerCase()} 的 ${position}，需要重新规划合法锚点`);
   }
 
   private sanitizeClonedTree(root: HTMLElement): void {
@@ -401,10 +484,13 @@ export class DomEngine {
 
   private addAction(operation: Extract<UIChangeOperation, { type: 'addComponent' }>, resultRefs: Map<string, HTMLElement>): Action {
     const target = this.resolve(operation.anchor, resultRefs);
-    const template = this.findComponentTemplate(target, operation.component);
+    const template = operation.component === 'tag' && operation.props.label
+      ? undefined
+      : this.findComponentTemplate(target, operation.component);
     const node = template
       ? this.cloneComponentTemplate(template, operation.component, operation.props)
       : this.createComponent(operation.component, operation.props);
+    this.applyComponentVariant(node, operation.component, operation.props.variant);
     if (!template) this.reuseNearbyStyle(node, target, operation.component);
     const insertion = template && target.contains(template)
       ? { target: template, position: 'after' as const }
@@ -440,7 +526,8 @@ export class DomEngine {
 
   private createStaticSelectInteraction(root: HTMLElement, options: string[]): StaticSelectInteraction {
     const control = root.matches('.ant-select') ? root : root.querySelector<HTMLElement>('.ant-select');
-    const display = root.querySelector<HTMLElement>('.ant-select-selection-placeholder, .ant-select-selection-item');
+    const display = this.findSelectDisplay(root);
+    const selectedOptions = new Set<string>();
     let panel: HTMLDivElement | undefined;
 
     const position = () => {
@@ -494,7 +581,9 @@ export class DomEngine {
         item.className = 'ant-select-item ant-select-item-option';
         item.setAttribute('data-ui-agent-option', option);
         item.setAttribute('role', 'option');
-        item.setAttribute('aria-selected', 'false');
+        const selected = selectedOptions.has(option);
+        item.setAttribute('aria-selected', String(selected));
+        item.classList.toggle('ant-select-item-option-selected', selected);
         const content = document.createElement('div');
         content.className = 'ant-select-item-option-content';
         content.textContent = option;
@@ -544,7 +633,25 @@ export class DomEngine {
         document.removeEventListener('click', outside);
       },
       setOpen: value => { if (value) open(); else close(); },
-      isOpen: () => Boolean(panel)
+      isOpen: () => Boolean(panel),
+      setSelected: (values, value) => {
+        for (const option of values) {
+          if (value) selectedOptions.add(option);
+          else selectedOptions.delete(option);
+          const item = [...(panel?.querySelectorAll<HTMLElement>('[data-ui-agent-option]') ?? [])]
+            .find(candidate => candidate.getAttribute('data-ui-agent-option') === option);
+          item?.setAttribute('aria-selected', String(value));
+          item?.classList.toggle('ant-select-item-option-selected', value);
+        }
+        const selected = [...selectedOptions][0];
+        root.setAttribute('data-ui-agent-selected-options', JSON.stringify([...selectedOptions]));
+        if (display && selected) {
+          display.textContent = selected;
+          display.classList.remove('ant-select-selection-placeholder');
+          display.classList.add('ant-select-selection-item');
+        }
+      },
+      isSelected: values => values.every(value => selectedOptions.has(value))
     };
   }
 
@@ -552,10 +659,15 @@ export class DomEngine {
     const semanticType = component === 'select' ? 'select'
       : component === 'input' ? 'input'
         : component === 'button' ? 'button'
+          : component === 'tag' ? 'tag'
+            : component === 'alert' ? 'alert'
           : undefined;
     if (!semanticType) return undefined;
     const fieldSelector = `[data-ui-component="form-field-${semanticType}"]`;
-    const componentSelector = `[data-ui-component$="${semanticType}"]`;
+    const classSelector = component === 'tag' ? '.ant-tag'
+      : component === 'alert' ? '.ant-alert'
+        : '';
+    const componentSelector = `[data-ui-component$="${semanticType}"]${classSelector ? `,${classSelector}` : ''}`;
     const scopes = [target, target.parentElement, target.closest<HTMLElement>('form'), document.body]
       .filter((scope, index, values): scope is HTMLElement => Boolean(scope) && values.indexOf(scope) === index);
     for (const scope of scopes) {
@@ -572,7 +684,7 @@ export class DomEngine {
   private cloneComponentTemplate(
     template: HTMLElement,
     component: string,
-    props: { label?: string; text?: string; placeholder?: string; options?: string[]; href?: string }
+    props: { label?: string; text?: string; placeholder?: string; options?: string[]; href?: string; variant?: string }
   ): HTMLElement {
     const clone = template.cloneNode(true) as HTMLElement;
     this.sanitizeClonedTree(clone);
@@ -583,10 +695,13 @@ export class DomEngine {
     }
     if (component === 'select') {
       const placeholder = props.placeholder ?? (props.label ? `请选择${props.label}` : '请选择');
-      const display = clone.querySelector<HTMLElement>('.ant-select-selection-placeholder, .ant-select-selection-item');
+      const display = this.findSelectDisplay(clone);
       if (display) display.textContent = placeholder;
       const input = clone.querySelector<HTMLInputElement>('input[role="combobox"], input');
-      if (input) input.setAttribute('aria-label', props.label ?? placeholder);
+      if (input) {
+        input.setAttribute('aria-label', props.label ?? placeholder);
+        input.setAttribute('placeholder', placeholder);
+      }
       clone.setAttribute('data-ui-agent-options', JSON.stringify(props.options ?? []));
     } else if (component === 'input') {
       const input = clone.matches('input') ? clone as HTMLInputElement : clone.querySelector<HTMLInputElement>('input, textarea');
@@ -594,6 +709,11 @@ export class DomEngine {
     } else if (component === 'button') {
       const label = clone.querySelector<HTMLElement>('span') ?? clone;
       label.textContent = props.text ?? '按钮';
+    } else if (component === 'tag') {
+      clone.textContent = props.text ?? '标签';
+    } else if (component === 'alert') {
+      const message = clone.querySelector<HTMLElement>('.ant-alert-message') ?? clone;
+      message.textContent = props.text ?? '提示';
     }
     return clone;
   }
@@ -633,8 +753,42 @@ export class DomEngine {
       return { apply: () => node.toggleAttribute('disabled', operation.value), revert: () => node.toggleAttribute('disabled', previous) };
     }
     if (operation.state === 'selected') {
-      const previous = node.getAttribute('aria-selected');
-      return { apply: () => node.setAttribute('aria-selected', String(operation.value)), revert: () => previous === null ? node.removeAttribute('aria-selected') : node.setAttribute('aria-selected', previous) };
+      const values = operation.options ?? [];
+      const interaction = this.findSelectInteraction(node);
+      if (interaction) {
+        const previous = interaction.isSelected(values);
+        return {
+          apply: () => interaction.setSelected(values, operation.value),
+          revert: () => interaction.setSelected(values, previous)
+        };
+      }
+      const candidates = this.findOptionElements(node, values);
+      const previous = candidates.map(candidate => ({
+        candidate,
+        ariaSelected: candidate.getAttribute('aria-selected'),
+        input: candidate.querySelector<HTMLInputElement>('input'),
+        checked: candidate.querySelector<HTMLInputElement>('input')?.checked
+      }));
+      const set = (value: boolean) => {
+        for (const candidate of candidates) {
+          candidate.setAttribute('aria-selected', String(value));
+          candidate.classList.toggle('ant-select-item-option-selected', value);
+          const input = candidate.matches('input') ? candidate as HTMLInputElement : candidate.querySelector<HTMLInputElement>('input');
+          if (input) {
+            input.checked = value;
+            input.setAttribute('aria-checked', String(value));
+          }
+        }
+      };
+      return {
+        apply: () => set(operation.value),
+        revert: () => previous.forEach(item => {
+          if (item.ariaSelected === null) item.candidate.removeAttribute('aria-selected');
+          else item.candidate.setAttribute('aria-selected', item.ariaSelected);
+          item.candidate.classList.toggle('ant-select-item-option-selected', item.ariaSelected === 'true');
+          if (item.input && item.checked !== undefined) item.input.checked = item.checked;
+        })
+      };
     }
     const existingInteraction = this.findSelectInteraction(node);
     if (existingInteraction) {
@@ -684,7 +838,37 @@ export class DomEngine {
     return control ? this.selectInteractions.get(control) : undefined;
   }
 
-  private createComponent(component: string, props: { label?: string; text?: string; placeholder?: string; options?: string[]; href?: string }): HTMLElement {
+  private findSelectDisplay(root: HTMLElement): HTMLElement | null {
+    if (root.matches('.ant-select-selection-placeholder, .ant-select-selection-item')) return root;
+    return root.querySelector<HTMLElement>(
+      '.ant-select-selection-placeholder, .ant-select-selection-item, [class*="ant-select-selection-placeholder"], [class*="ant-select-selection-item"]'
+    );
+  }
+
+  private findOptionElements(node: HTMLElement, values: string[]): HTMLElement[] {
+    if (values.length === 0) return [node];
+    const candidates = [node, ...node.querySelectorAll<HTMLElement>('label,[role="option"],.ant-select-item-option,input')];
+    return candidates.filter(candidate => {
+      const text = (candidate.getAttribute('data-ui-agent-option') ?? candidate.textContent ?? '').replace(/\s+/g, ' ').trim();
+      return values.includes(text);
+    });
+  }
+
+  private isVisualSelectionApplied(node: HTMLElement, values: string[], expected: boolean): boolean {
+    const interaction = this.findSelectInteraction(node);
+    if (interaction) return interaction.isSelected(values) === expected;
+    const candidates = this.findOptionElements(node, values);
+    if (candidates.length === 0) return false;
+    return candidates.every(candidate => {
+      const input = candidate.matches('input') ? candidate as HTMLInputElement : candidate.querySelector<HTMLInputElement>('input');
+      const selected = input?.checked
+        ?? (candidate.getAttribute('aria-selected') === 'true'
+          || candidate.classList.contains('ant-select-item-option-selected'));
+      return selected === expected;
+    });
+  }
+
+  private createComponent(component: string, props: { label?: string; text?: string; placeholder?: string; options?: string[]; href?: string; variant?: string }): HTMLElement {
     const common = { height: '32px', boxSizing: 'border-box', font: '14px -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif' };
     if (component === 'button') {
       const node = document.createElement('button'); node.type = 'button'; node.textContent = props.text ?? '按钮';
@@ -701,7 +885,82 @@ export class DomEngine {
       const wrapper = document.createElement('span'); Object.assign(wrapper.style, { display: 'inline-flex', gap: '12px', alignItems: 'center' });
       for (const [index, value] of (props.options ?? []).entries()) { const label = document.createElement('label'); const input = document.createElement('input'); input.type = component === 'checkboxGroup' ? 'checkbox' : 'radio'; input.name = `ui-agent-${component}-${index}`; label.append(input, document.createTextNode(` ${value}`)); wrapper.appendChild(label); } return wrapper;
     }
+    if (component === 'tag') {
+      const tag = document.createElement('span');
+      tag.className = 'ant-tag';
+      tag.textContent = props.text ?? '标签';
+      if (!props.label) return tag;
+      const wrapper = document.createElement('div');
+      wrapper.setAttribute('data-ui-component', 'labeled-tag');
+      const label = document.createElement('span');
+      label.className = 'ant-typography ant-typography-secondary';
+      label.textContent = props.label;
+      const value = document.createElement('div');
+      Object.assign(value.style, { marginTop: '4px' });
+      value.appendChild(tag);
+      wrapper.append(label, value);
+      return wrapper;
+    }
+    if (component === 'alert') {
+      const node = document.createElement('div');
+      node.className = 'ant-alert ant-alert-no-icon';
+      node.setAttribute('role', 'alert');
+      const content = document.createElement('div');
+      content.className = 'ant-alert-content';
+      const message = document.createElement('div');
+      message.className = 'ant-alert-message';
+      message.textContent = props.text ?? '提示';
+      content.appendChild(message);
+      node.appendChild(content);
+      return node;
+    }
     const node = document.createElement('span'); node.textContent = props.text ?? '说明文字'; return node;
+  }
+
+  private applyComponentVariant(node: HTMLElement, component: string, variant?: string): void {
+    if (!variant) return;
+    node.setAttribute('data-ui-agent-variant', variant);
+    if (component === 'button' && variant === 'danger') {
+      node.classList.add('ant-btn-dangerous');
+      node.classList.remove('ant-btn-default', 'ant-btn-variant-outlined');
+      Object.assign(node.style, {
+        color: '#fff',
+        backgroundColor: '#ff4d4f',
+        borderColor: '#ff4d4f'
+      });
+      return;
+    }
+    if (component === 'tag') {
+      const tag = node.matches('.ant-tag') ? node : node.querySelector<HTMLElement>('.ant-tag');
+      if (!tag) return;
+      const palette = variant === 'danger'
+        ? { color: '#cf1322', backgroundColor: '#fff1f0', borderColor: '#ffa39e' }
+        : variant === 'success'
+          ? { color: '#389e0d', backgroundColor: '#f6ffed', borderColor: '#b7eb8f' }
+          : { color: '#0958d9', backgroundColor: '#e6f4ff', borderColor: '#91caff' };
+      Object.assign(tag.style, palette);
+      return;
+    }
+    if (component === 'alert') {
+      node.classList.remove('ant-alert-warning', 'ant-alert-error', 'ant-alert-info', 'ant-alert-success');
+      const alertType = variant === 'danger' ? 'error' : variant === 'success' ? 'success' : variant === 'warning' ? 'warning' : 'info';
+      node.classList.add(`ant-alert-${alertType}`);
+      const palette = alertType === 'error'
+        ? { backgroundColor: '#fff2f0', borderColor: '#ffccc7' }
+        : alertType === 'success'
+          ? { backgroundColor: '#f6ffed', borderColor: '#b7eb8f' }
+          : alertType === 'warning'
+            ? { backgroundColor: '#fffbe6', borderColor: '#ffe58f' }
+            : { backgroundColor: '#e6f4ff', borderColor: '#91caff' };
+      Object.assign(node.style, {
+        ...palette,
+        display: 'block',
+        padding: '8px 12px',
+        borderWidth: '1px',
+        borderStyle: 'solid',
+        borderRadius: '6px'
+      });
+    }
   }
 
   private reuseNearbyStyle(node: HTMLElement, target: HTMLElement, component: string): void {
@@ -729,6 +988,17 @@ export class DomEngine {
     else if (position === 'after') target.after(node);
     else if (position === 'insideStart') target.prepend(node);
     else target.append(node);
+  }
+
+  private isAtPlacement(
+    node: HTMLElement,
+    target: HTMLElement,
+    position: 'before' | 'after' | 'insideStart' | 'insideEnd'
+  ): boolean {
+    if (position === 'before') return node.nextElementSibling === target;
+    if (position === 'after') return node.previousElementSibling === target;
+    if (position === 'insideStart') return target.firstElementChild === node;
+    return target.lastElementChild === node;
   }
 
   private showOverlay(element: HTMLElement) {

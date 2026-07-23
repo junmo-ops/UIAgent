@@ -1,4 +1,13 @@
-import { PROTOCOL_VERSION, type AgentTurnResponse, type ChangePlan, type ExecutionSubmission, type StartTurnRequest, type VerificationResult } from '@ui-agent/contracts';
+import {
+  PROTOCOL_VERSION,
+  type AgentTurnResponse,
+  type ChangePlan,
+  type DomTreeNode,
+  type ExecutionSubmission,
+  type StartTurnRequest,
+  type UiGoal,
+  type VerificationResult
+} from '@ui-agent/contracts';
 import type { AgentRuntime } from '@ui-agent/agent-runtime';
 
 interface PendingTurn {
@@ -9,6 +18,154 @@ interface PendingTurn {
 
 function check(code: string, passed: boolean, message: string) {
   return { code, passed, message };
+}
+
+function indexObservationTrees(submission: ExecutionSubmission): Map<string, DomTreeNode> {
+  const nodes = new Map<string, DomTreeNode>();
+  const visit = (node: DomTreeNode) => {
+    nodes.set(node.id, node);
+    node.children.forEach(visit);
+  };
+  visit(submission.observation.selectedTree);
+  submission.observation.addedTrees.forEach(visit);
+  return nodes;
+}
+
+function producerForResult(plan: ChangePlan, resultRef: string) {
+  return plan.operations.find(operation =>
+    (operation.type === 'cloneSubtree' || operation.type === 'addComponent')
+    && operation.resultRef === resultRef
+  );
+}
+
+function resolveTargetNodeId(
+  target: UiGoal['target'],
+  resultRef: string | undefined,
+  plan: ChangePlan,
+  submission: ExecutionSubmission
+): string | undefined {
+  if (target?.kind === 'node') return target.nodeId;
+  const resolvedResultRef = resultRef ?? (target?.kind === 'result' ? target.resultRef : undefined);
+  if (!resolvedResultRef) return undefined;
+  const producer = producerForResult(plan, resolvedResultRef);
+  if (!producer) return undefined;
+  return submission.receipt.operations.find(item => item.operationId === producer.operationId)?.resultElementId;
+}
+
+function resolveGoalNodeId(goal: UiGoal, plan: ChangePlan, submission: ExecutionSubmission): string | undefined {
+  return resolveTargetNodeId(goal.target, goal.resultRef, plan, submission);
+}
+
+function treeText(node: DomTreeNode): string {
+  return [node.text, ...node.children.map(treeText)].filter(Boolean).join(' ');
+}
+
+function treeAttributes(node: DomTreeNode): Record<string, string>[] {
+  return [node.attributes, ...node.children.flatMap(treeAttributes)];
+}
+
+function hasSemanticRole(node: DomTreeNode, role: UiGoal['role']): boolean {
+  if (role === 'row') return node.tag === 'tr' || node.role === 'row';
+  if (role === 'field' || role === 'container') return true;
+  const semantic = treeAttributes(node).map(attributes => attributes['data-ui-component']).filter(Boolean);
+  if (semantic.some(value => value === role || value?.endsWith(`-${role}`) || value === `labeled-${role}`)) return true;
+  if (role === 'text') return treeText(node).trim().length > 0;
+  if (role === 'button') return node.tag === 'button' || node.children.some(child => hasSemanticRole(child, role));
+  if (role === 'link') return node.tag === 'a' || node.children.some(child => hasSemanticRole(child, role));
+  if (role === 'input') return node.tag === 'input' || node.children.some(child => hasSemanticRole(child, role));
+  if (role === 'select') return node.tag === 'select' || node.role === 'combobox' || node.children.some(child => hasSemanticRole(child, role));
+  if (role === 'checkboxGroup') {
+    return treeAttributes(node).some(attributes => attributes.type === 'checkbox')
+      || node.children.some(child => hasSemanticRole(child, role));
+  }
+  if (role === 'radioGroup') {
+    return treeAttributes(node).some(attributes => attributes.type === 'radio')
+      || node.children.some(child => hasSemanticRole(child, role));
+  }
+  return false;
+}
+
+function placementSatisfied(goal: UiGoal, nodeId: string, plan: ChangePlan, submission: ExecutionSubmission): boolean {
+  if (!goal.placement) return true;
+  const facts = submission.observation.elementFacts ?? [];
+  const node = facts.find(fact => fact.id === nodeId);
+  const anchorId = resolveTargetNodeId(goal.placement.anchor, undefined, plan, submission);
+  const resolvedAnchor = facts.find(fact => fact.id === anchorId);
+  if (!node || !resolvedAnchor) return false;
+  const relation = goal.placement.relation;
+  const strict = goal.placement.strict;
+  const structurallyPlaced = relation === 'before'
+    ? node.parentId === resolvedAnchor.parentId && (strict ? node.index + 1 === resolvedAnchor.index : node.index < resolvedAnchor.index)
+    : relation === 'after'
+      ? node.parentId === resolvedAnchor.parentId && (strict ? node.index === resolvedAnchor.index + 1 : node.index > resolvedAnchor.index)
+      : relation === 'insideStart'
+        ? node.parentId === resolvedAnchor.id && node.index === 0
+        : node.parentId === resolvedAnchor.id
+          && node.index === Math.max(...facts.filter(fact => fact.parentId === resolvedAnchor.id).map(fact => fact.index));
+  if (!structurallyPlaced) return false;
+  if (!goal.placement.sameRow) return true;
+  const overlap = Math.min(node.rect.y + node.rect.height, resolvedAnchor.rect.y + resolvedAnchor.rect.height)
+    - Math.max(node.rect.y, resolvedAnchor.rect.y);
+  return overlap > 0;
+}
+
+function verifyIntentGoals(plan: ChangePlan, submission: ExecutionSubmission) {
+  if (!plan.intent) return [];
+  const nodes = indexObservationTrees(submission);
+  const allText = treeText(submission.observation.selectedTree)
+    + submission.observation.addedTrees.map(treeText).join(' ')
+    + submission.observation.siblings.map(sibling => sibling.text).join(' ')
+    + (submission.observation.elementFacts ?? []).map(fact => fact.text ?? '').join(' ');
+  return plan.intent.goals.flatMap(goal => {
+    const nodeId = resolveGoalNodeId(goal, plan, submission);
+    const node = nodeId ? nodes.get(nodeId) : undefined;
+    const checks = [];
+    if (goal.action !== 'remove') {
+      checks.push(check(`GOAL_${goal.goalId}_TARGET`, Boolean(node), `目标 ${goal.goalId} 的结果元素存在`));
+    }
+    if (node) {
+      const text = treeText(node);
+      checks.push(check(`GOAL_${goal.goalId}_ROLE`, hasSemanticRole(node, goal.role), `目标 ${goal.goalId} 保留 ${goal.role} 组件语义`));
+      for (const [field, value] of Object.entries(goal.content)) {
+        if (value === undefined) continue;
+        const passed = field === 'variant'
+          ? treeAttributes(node).some(attributes => attributes['data-ui-agent-variant'] === value)
+          : field === 'options'
+            ? (value as string[]).every(option => text.includes(option)
+              || treeAttributes(node).some(attributes => attributes['data-ui-agent-options']?.includes(option)))
+            : text.includes(String(value))
+              || treeAttributes(node).some(attributes => Object.values(attributes).includes(String(value)));
+        checks.push(check(`GOAL_${goal.goalId}_CONTENT_${field.toUpperCase()}`, passed, `目标 ${goal.goalId} 的 ${field} 达到预期`));
+      }
+      checks.push(check(
+        `GOAL_${goal.goalId}_PLACEMENT`,
+        placementSatisfied(goal, nodeId!, plan, submission),
+        `目标 ${goal.goalId} 的严格相对位置达到预期`
+      ));
+      if (goal.state) {
+        const attrs = treeAttributes(node);
+        const passed = goal.state.name === 'disabled'
+          ? attrs.some(attributes => attributes.disabled === String(goal.state?.value) || attributes['aria-disabled'] === String(goal.state?.value))
+          : goal.state.name === 'open'
+            ? attrs.some(attributes => attributes['aria-expanded'] === String(goal.state?.value))
+            : (goal.state.options ?? []).every(option =>
+              text.includes(option)
+              && attrs.some(attributes => attributes['aria-selected'] === String(goal.state?.value)
+                || attributes['aria-checked'] === String(goal.state?.value)
+                || attributes['data-ui-agent-selected-options']?.includes(option))
+            );
+        checks.push(check(`GOAL_${goal.goalId}_STATE`, passed, `目标 ${goal.goalId} 的 ${goal.state.name} 状态达到预期`));
+      }
+    }
+    for (const preserveText of goal.preserveTexts) {
+      checks.push(check(
+        `GOAL_${goal.goalId}_PRESERVE`,
+        allText.includes(preserveText),
+        `保持约束中的“${preserveText}”仍然存在`
+      ));
+    }
+    return checks;
+  });
 }
 
 export function verifyExecution(plan: ChangePlan, submission: ExecutionSubmission): VerificationResult {
@@ -28,13 +185,15 @@ export function verifyExecution(plan: ChangePlan, submission: ExecutionSubmissio
           && submission.observation.pageRevision === submission.receipt.pageRevision
         : submission.receipt.pageRevision === submission.beforePageRevision,
       '页面版本与事务结果一致'
-    )
+    ),
+    ...verifyIntentGoals(plan, submission)
   ];
   const passed = checks.every(item => item.passed);
   if (passed) return { status: 'passed', summary: `已验证 ${plannedIds.length} 个原子操作，页面结果与执行回执一致`, checks };
   const identitySafe = checks.find(item => item.code === 'PLAN_ID')?.passed
     && checks.find(item => item.code === 'SELECTION_VERSION')?.passed;
-  const repairable = Boolean(identitySafe && !submission.receipt.success);
+  const preserveFailed = checks.some(item => item.code.endsWith('_PRESERVE') && !item.passed);
+  const repairable = Boolean(identitySafe && !preserveFailed);
   return {
     status: repairable ? 'repairable' : 'failed',
     summary: checks.filter(item => !item.passed).map(item => item.message).join('；'),

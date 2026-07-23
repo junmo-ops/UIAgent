@@ -8,8 +8,10 @@ import {
   type ChangePlan,
   type PlannerResult,
   type StartTurnRequest,
-  type UIChangeOperation
+  type UIChangeOperation,
+  type UiIntent
 } from '@ui-agent/contracts';
+import { compilePlanFromIntent, intentFromOperations, IntentCompilationError } from '@ui-agent/domain';
 
 export interface Planner {
   plan(request: StartTurnRequest, conversation?: ConversationTurn[]): Promise<PlannerResult>;
@@ -52,14 +54,18 @@ export type RuntimeTraceObserver = (event: RuntimeTraceEvent) => void;
 
 const plannerRules = [
   '你是 UI Change Planner，只能返回指定结构的 JSON。',
-  '把业务需求拆解为 Schema 中的通用 DOM 原子操作，不要创造订单行、卡片等业务操作类型。',
+  '先把用户需求表达成 plan.intent.goals，再为每个目标生成通用 DOM 原子操作；目标描述最终页面事实，操作只描述实现手段。',
+  '每个 create goal 必须设置 resultRef，并与一个 addComponent 或 cloneSubtree 操作的 resultRef 一致。',
+  'goal.content 表达组件内容和语义变体；goal.placement 表达严格相对位置和同行约束；goal.state 表达展开、选中或禁用状态；preserveTexts 表达必须保持的页面内容。',
+  '操作计划必须忠实实现 intent，不允许通过降低组件语义、改变位置或忽略状态来简化目标。',
+  '把业务需求拆解为 Schema 中的通用 DOM 原子操作，不要创造订单行、筛选栏等业务操作类型。',
   'selectedTree 是选区局部结构；reusableTrees 是从选区内识别出的可复用结构模板。二者均可读取、复制和作为插入锚点。',
   '只有 selected.id、addedTrees 和计划内结果可直接修改。相邻元素只能读取。',
-  '有现成重复结构时优先使用 cloneSubtree，再用 resultRef 和 path 修改复制节点。path 是相对克隆根节点的元素子节点索引路径。',
-  '向重复列表末尾追加模板副本时，cloneSubtree 的 source 和 anchor 应指向同一个最后模板节点，position 使用 after；不要把 tr 插入 div，也不要把 li 插入非列表容器。',
-  '如果 selectedTree 或 reusableTrees 已明确包含 tr、row、li 等结构，不要再向用户确认 DOM 结构，直接基于可见结构生成计划。',
+  '有现成重复结构时优先使用 cloneSubtree，再用 resultRef 和 path 修改复制节点。锚点必须是能严格表达最终相对位置且符合 HTML 父子约束的实际节点。',
+  '如果 selectedTree 或 reusableTrees 已明确包含重复结构，不要再向用户确认 DOM 结构，直接基于可见结构生成计划。',
   '用户要求随机生成、使用默认值或由你决定时，应自行生成合理的静态示例文案，不要继续追问字段值。',
-  '使用 addComponent 新增表单控件时，从用户指令提取字段名称并填写 props.label；例如“增加付款方式，选项为...”的 label 是“付款方式”。',
+  '组件角色由基础能力目录约束：button、text、link、input、select、checkboxGroup、radioGroup、tag、alert；结构复制使用 field、row 或 container 目标。',
+  '组件的 label、placeholder、options、variant 和 state 必须同时写入 intent；执行操作中的 props 由目标编译器统一校准。',
   '不要通过向一个容器追加纯文本来伪造表格行、列表项或其他结构。',
   '不输出 HTML、JavaScript、选择器、网络请求、导航或事件处理器。',
   '删除已有选中元素时 requiresConfirmation 必须为 true。',
@@ -95,33 +101,23 @@ function extractAddedLabel(input: string): string | undefined {
 }
 
 function createPlan(request: StartTurnRequest, operations: UIChangeOperation[], summary: string): PlannerResult {
-  const removesExisting = operations.some(operation => operation.type === 'removeElement' && operation.target.kind === 'node');
-  const plan: ChangePlan = {
+  const normalizedOperations = operations.map(operation =>
+    operation.type === 'addComponent' && !operation.resultRef
+      ? { ...operation, resultRef: `result-${operation.operationId}` }
+      : operation
+  );
+  const removesExisting = normalizedOperations.some(operation => operation.type === 'removeElement' && operation.target.kind === 'node');
+  const plan: ChangePlan & { intent: UiIntent } = {
     protocolVersion: PROTOCOL_VERSION,
     planId: id('plan'),
     selectionVersion: request.context.selectionVersion,
     pageRevision: request.context.pageRevision,
     summary,
+    intent: intentFromOperations(summary, normalizedOperations),
     requiresConfirmation: removesExisting,
-    operations
+    operations: normalizedOperations
   };
-  return { kind: 'plan', plan };
-}
-
-function findContextNode(request: StartTurnRequest, nodeId: string) {
-  const visit = (node: StartTurnRequest['context']['selectedTree']): typeof node | undefined => {
-    if (node.id === nodeId) return node;
-    for (const child of node.children) {
-      const found = visit(child);
-      if (found) return found;
-    }
-    return undefined;
-  };
-  for (const tree of [request.context.selectedTree, ...request.context.reusableTrees, ...request.context.addedTrees]) {
-    const found = visit(tree);
-    if (found) return found;
-  }
-  return undefined;
+  return { kind: 'plan', plan: compilePlanFromIntent(plan, request.context) };
 }
 
 /**
@@ -129,32 +125,9 @@ function findContextNode(request: StartTurnRequest, nodeId: string) {
  * page explicitly exposes a semantic component template, collapse a fragile
  * clone-and-edit sequence into the controlled component macro.
  */
-export function normalizeTemplatePlan(request: StartTurnRequest, result: PlannerResult): PlannerResult {
-  if (result.kind !== 'plan' || !/筛选|下拉|选择器|选项/.test(request.instruction)) return result;
-  const clone = result.plan.operations.find(
-    (operation): operation is Extract<UIChangeOperation, { type: 'cloneSubtree' }> => operation.type === 'cloneSubtree' && operation.source.kind === 'node'
-  );
-  if (!clone || clone.source.kind !== 'node') return result;
-  const template = findContextNode(request, clone.source.nodeId);
-  if (template?.attributes['data-ui-component'] !== 'form-field-select') return result;
-  const label = extractAddedLabel(request.instruction);
-  const options = extractQuotedValues(request.instruction);
-  return {
-    kind: 'plan',
-    plan: {
-      ...result.plan,
-      requiresConfirmation: false,
-      operations: [{
-        operationId: clone.operationId,
-        type: 'addComponent',
-        anchor: clone.anchor,
-        component: 'select',
-        position: clone.position,
-        resultRef: clone.resultRef,
-        props: { label, placeholder: label ? `请选择${label}` : '请选择', options }
-      }]
-    }
-  };
+export function compilePlannerResult(request: StartTurnRequest, result: PlannerResult): PlannerResult {
+  if (result.kind !== 'plan') return result;
+  return { kind: 'plan', plan: compilePlanFromIntent(result.plan, request.context) };
 }
 
 export class MockPlanner implements Planner {
@@ -230,7 +203,7 @@ export class AiSdkPlanner implements Planner {
       prompt: createPlannerPrompt(request, conversation)
     });
     if (!output) throw new Error('模型没有返回结构化结果');
-    return normalizeTemplatePlan(request, plannerResultSchema.parse(output));
+    return compilePlannerResult(request, plannerResultSchema.parse(output));
   }
 }
 
@@ -250,8 +223,15 @@ export class DeepSeekPlanner implements Planner {
     try {
       return await this.generatePlan(request, conversation);
     } catch (error) {
-      if (!NoObjectGeneratedError.isInstance(error) && !(error instanceof ZodError)) throw error;
-      return this.generatePlan(request, conversation, '上一次响应不是有效的目标 JSON。请重新生成，只返回一个符合 Schema 的 JSON 对象。');
+      if (!NoObjectGeneratedError.isInstance(error) && !(error instanceof ZodError) && !(error instanceof IntentCompilationError)) throw error;
+      const reason = error instanceof IntentCompilationError
+        ? `上一次 Intent 与操作计划不一致：${error.message}`
+        : '上一次响应不是有效的目标 JSON。';
+      return this.generatePlan(
+        request,
+        conversation,
+        `${reason} 请重新生成，确保每个 Goal 都有可执行操作，只返回一个符合 Schema 的 JSON 对象。`
+      );
     }
   }
 
@@ -269,7 +249,7 @@ export class DeepSeekPlanner implements Planner {
       prompt: createPlannerPrompt(request, conversation)
     });
     if (!output) throw new Error('DeepSeek 没有返回 JSON 结果');
-    return normalizeTemplatePlan(request, plannerResultSchema.parse(output));
+    return compilePlannerResult(request, plannerResultSchema.parse(output));
   }
 }
 

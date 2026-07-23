@@ -24,6 +24,8 @@ describe('agent service', () => {
     const startResult = await response.json() as AgentTurnResponse;
     expect(startResult).toMatchObject({ kind: 'execution', plan: { requiresConfirmation: false }, repairCount: 0 });
     if (startResult.kind !== 'execution') throw new Error('expected execution plan');
+    const createOperation = startResult.plan.operations.find(operation => operation.type === 'addComponent');
+    if (!createOperation) throw new Error('expected add component operation');
 
     const submission: ExecutionSubmission = {
       protocolVersion: PROTOCOL_VERSION, editSessionId: 's', turnId: 't', traceId: 'trace',
@@ -31,9 +33,37 @@ describe('agent service', () => {
       receipt: {
         protocolVersion: PROTOCOL_VERSION, planId: startResult.plan.planId, success: true, pageRevision: 1,
         appliedOperationIds: startResult.plan.operations.map(operation => operation.operationId),
-        operations: startResult.plan.operations.map(operation => ({ operationId: operation.operationId, status: 'applied' as const, verified: true }))
+        operations: startResult.plan.operations.map(operation => ({
+          operationId: operation.operationId,
+          status: 'applied' as const,
+          verified: true,
+          ...(operation.operationId === createOperation.operationId && { resultElementId: 'added-refresh' })
+        }))
       },
-      observation: { ...request.context, pageRevision: 1 }
+      observation: {
+        ...request.context,
+        pageRevision: 1,
+        addedElements: [{
+          id: 'added-refresh', tag: 'button', text: '刷新',
+          rect: { x: 90, y: 1, width: 80, height: 32 }
+        }],
+        addedTrees: [{
+          id: 'added-refresh', tag: 'button', text: '刷新',
+          attributes: { 'data-ui-component': 'button' }, children: []
+        }],
+        elementFacts: [
+          {
+            id: 'selected', parentId: 'parent', index: 0, text: '查询',
+            rect: { x: 1, y: 1, width: 80, height: 32 },
+            layout: { display: 'inline-flex', flexDirection: 'row', gridTemplateColumns: 'none', gap: '0px' }
+          },
+          {
+            id: 'added-refresh', parentId: 'parent', index: 1, semanticRole: 'button', text: '刷新',
+            rect: { x: 90, y: 1, width: 80, height: 32 },
+            layout: { display: 'inline-flex', flexDirection: 'row', gridTemplateColumns: 'none', gap: '0px' }
+          }
+        ]
+      }
     };
     const completionResponse = await app.request('/v1/turns/t/execution', {
       method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(submission)
