@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { PROTOCOL_VERSION, type StartTurnRequest } from '@ui-agent/contracts';
+import { PROTOCOL_VERSION, type AgentTurnResponse, type ExecutionSubmission, type StartTurnRequest } from '@ui-agent/contracts';
 import { createApp } from './app';
 import { TurnLogStore } from './log-store';
 
@@ -21,7 +21,24 @@ describe('agent service', () => {
     };
     const response = await app.request('/v1/turns', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(request) });
     expect(response.status).toBe(200);
-    expect(await response.json()).toMatchObject({ kind: 'plan', plan: { requiresConfirmation: false } });
+    const startResult = await response.json() as AgentTurnResponse;
+    expect(startResult).toMatchObject({ kind: 'execution', plan: { requiresConfirmation: false }, repairCount: 0 });
+    if (startResult.kind !== 'execution') throw new Error('expected execution plan');
+
+    const submission: ExecutionSubmission = {
+      protocolVersion: PROTOCOL_VERSION, editSessionId: 's', turnId: 't', traceId: 'trace',
+      planId: startResult.plan.planId, beforePageRevision: 0,
+      receipt: {
+        protocolVersion: PROTOCOL_VERSION, planId: startResult.plan.planId, success: true, pageRevision: 1,
+        appliedOperationIds: startResult.plan.operations.map(operation => operation.operationId),
+        operations: startResult.plan.operations.map(operation => ({ operationId: operation.operationId, status: 'applied' as const, verified: true }))
+      },
+      observation: { ...request.context, pageRevision: 1 }
+    };
+    const completionResponse = await app.request('/v1/turns/t/execution', {
+      method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(submission)
+    });
+    expect(await completionResponse.json()).toMatchObject({ kind: 'completed', verification: { status: 'passed' } });
 
     const logsResponse = await app.request('/v1/logs');
     const logs = await logsResponse.json();
@@ -32,7 +49,8 @@ describe('agent service', () => {
     expect(await detailResponse.json()).toMatchObject({
       request: { editSessionId: 's', instruction: '添加一个“刷新”按钮' },
       conversation: [],
-      result: { kind: 'plan' }
+      result: { kind: 'plan' },
+      executions: [expect.objectContaining({ response: expect.objectContaining({ kind: 'completed' }) })]
     });
 
     const pageResponse = await app.request('/logs');

@@ -1,6 +1,6 @@
 import { appendFileSync, existsSync, mkdirSync, readFileSync, renameSync, statSync, writeFileSync } from 'node:fs';
 import { dirname, resolve } from 'node:path';
-import type { PlannerResult, StartTurnRequest } from '@ui-agent/contracts';
+import type { AgentTurnResponse, ExecutionSubmission, PlannerResult, StartTurnRequest } from '@ui-agent/contracts';
 import type { ConversationTurn, RuntimeTraceEvent } from '@ui-agent/agent-runtime';
 
 export interface TurnLogEntry {
@@ -14,6 +14,7 @@ export interface TurnLogEntry {
   result?: PlannerResult;
   error?: string;
   durationMs?: number;
+  executions?: Array<{ timestamp: string; submission: ExecutionSubmission; response: AgentTurnResponse }>;
 }
 
 export interface TurnLogSummary {
@@ -113,6 +114,16 @@ export class TurnLogStore {
 
   get(id: string): TurnLogEntry | undefined {
     return this.entries.find(entry => entry.id === id);
+  }
+
+  recordExecution(submission: ExecutionSubmission, response: AgentTurnResponse): void {
+    const entry = [...this.entries].reverse().find(item => item.request.turnId === submission.turnId);
+    if (!entry) return;
+    const timestamp = new Date().toISOString();
+    entry.updatedAt = timestamp;
+    entry.executions ??= [];
+    entry.executions.push(redact({ timestamp, submission, response }) as NonNullable<TurnLogEntry['executions']>[number]);
+    this.persist(entry);
   }
 
   private load(): void {

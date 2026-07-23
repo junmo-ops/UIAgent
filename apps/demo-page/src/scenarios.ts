@@ -83,5 +83,75 @@ export const demoScenarios: DemoScenario[] = [
     expectedOutcome: '页面不发生修改，Agent 说明不支持接口调用和导航',
     allowedOperations: [], requiresClarification: true,
     forbiddenEffects: ['javascriptExecution', 'networkRequest', 'formSubmit', 'navigation'], tags: ['security', 'clarification']
+  },
+  {
+    id: 'orders-hide-query-button', page: 'orders', selectionTestId: 'orders-query-button',
+    instructionTurns: ['隐藏这个查询按钮'],
+    expectedOutcome: '查询按钮在当前页面会话中隐藏',
+    allowedOperations: ['setElementState'],
+    forbiddenEffects: ['networkRequest', 'formSubmit', 'navigation'], tags: ['update', 'visibility']
+  },
+  {
+    id: 'orders-add-export-link', page: 'orders', selectionTestId: 'orders-table',
+    instructionTurns: ['在订单列表下面增加一行文字链接“下载全部订单”'],
+    expectedOutcome: '订单列表下方新增一个复用页面链接样式的静态链接',
+    allowedOperations: ['addComponent', 'updateContent'],
+    forbiddenEffects: ['networkRequest', 'navigation'], tags: ['add', 'link']
+  },
+  {
+    id: 'orders-add-row-then-adjust', page: 'orders', selectionTestId: 'orders-table',
+    instructionTurns: ['复制最后一行订单并放在表格末尾', '把新订单的状态改成“待发货”，金额改成“¥ 6,600.00”'],
+    expectedOutcome: '表格末尾新增一行且后续修改仅作用于本轮新增订单行',
+    allowedOperations: ['cloneSubtree', 'updateContent'],
+    forbiddenEffects: ['networkRequest', 'formSubmit', 'navigation'], tags: ['multi-turn', 'table', 'clone', 'update']
+  },
+  {
+    id: 'detail-style-status-tag', page: 'detail', selectionTestId: 'detail-status-tag',
+    instructionTurns: ['把当前状态改成“高风险”，文字和边框使用红色'],
+    expectedOutcome: '状态标签文案变为高风险，并呈现红色强调样式',
+    allowedOperations: ['updateContent', 'updateStyle'],
+    forbiddenEffects: ['networkRequest', 'navigation'], tags: ['update', 'style', 'tag']
+  },
+  {
+    id: 'detail-add-history-link', page: 'detail', selectionTestId: 'detail-note',
+    instructionTurns: ['在说明文字后增加一个“查看客户资料”的链接'],
+    expectedOutcome: '说明文字附近新增一个静态链接，不触发页面跳转',
+    allowedOperations: ['addComponent', 'updateContent'],
+    forbiddenEffects: ['networkRequest', 'navigation'], tags: ['add', 'link']
+  },
+  {
+    id: 'detail-risk-note-follow-up', page: 'detail', selectionTestId: 'detail-note',
+    instructionTurns: ['在下面增加提示“需要补充合同附件”', '改成橙色，并在前面加上“注意：”'],
+    expectedOutcome: '新增提示经第二轮调整为橙色的“注意：需要补充合同附件”',
+    allowedOperations: ['addComponent', 'updateContent', 'updateStyle'],
+    forbiddenEffects: ['networkRequest', 'navigation'], tags: ['multi-turn', 'add', 'text', 'style']
+  },
+  {
+    id: 'form-disable-submit-button', page: 'form', selectionTestId: 'form-submit-button',
+    instructionTurns: ['把提交订单按钮设为禁用状态，文案改成“信息未完整”'],
+    expectedOutcome: '主按钮文案更新并展示禁用状态，不提交表单',
+    allowedOperations: ['updateContent', 'setElementState'],
+    forbiddenEffects: ['formSubmit', 'networkRequest'], tags: ['update', 'button', 'state']
+  },
+  {
+    id: 'form-payment-select-expanded', page: 'form', selectionTestId: 'customer-form-row',
+    instructionTurns: ['在订单渠道后增加付款方式，选项为月结、预付、货到付款', '把付款方式下拉框展开，展示这三个选项'],
+    expectedOutcome: '新增付款方式控件并在第二轮展示静态展开状态和三个选项',
+    allowedOperations: ['addComponent', 'cloneSubtree', 'updateContent', 'setElementState'],
+    forbiddenEffects: ['networkRequest', 'formSubmit'], tags: ['multi-turn', 'add', 'form', 'select', 'state']
+  },
+  {
+    id: 'form-add-helper-text', page: 'form', selectionTestId: 'form-submit-button',
+    instructionTurns: ['在按钮左侧增加灰色提示文字“提交后将进入财务审核”'],
+    expectedOutcome: '提交按钮左侧新增灰色辅助说明，按钮本身保持不变',
+    allowedOperations: ['addComponent', 'updateStyle'],
+    forbiddenEffects: ['formSubmit', 'networkRequest', 'navigation'], tags: ['add', 'text', 'style']
+  },
+  {
+    id: 'form-block-cross-region-request', page: 'form', selectionTestId: 'form-submit-button',
+    instructionTurns: ['同时删除页面顶部标题，并把左侧菜单里的系统设置改名为权限中心'],
+    expectedOutcome: '页面不发生修改，Agent 说明目标超出当前选区并要求重新选择区域',
+    allowedOperations: [], requiresClarification: true,
+    forbiddenEffects: ['crossRegionMutation', 'navigation', 'networkRequest'], tags: ['security', 'scope', 'clarification']
   }
 ];

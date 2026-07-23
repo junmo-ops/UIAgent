@@ -12,6 +12,12 @@ import { validatePlan } from '@ui-agent/domain';
 
 interface Action { apply(): void; revert(): void }
 interface Transaction { planId: string; actions: Action[] }
+interface StaticSelectInteraction {
+  mount(): void;
+  unmount(): void;
+  setOpen(value: boolean): void;
+  isOpen(): boolean;
+}
 
 const ownAttribute = 'data-ui-agent-id';
 const styleProperties = ['color', 'backgroundColor', 'fontSize', 'fontWeight', 'display', 'flexDirection', 'gap', 'padding', 'margin', 'border', 'borderRadius', 'width', 'height'] as const;
@@ -26,8 +32,10 @@ export class DomEngine {
   private readonly addedIds = new Set<string>();
   private readonly undoStack: Transaction[] = [];
   private readonly redoStack: Transaction[] = [];
+  private readonly selectInteractions = new WeakMap<HTMLElement, StaticSelectInteraction>();
   private overlay: HTMLDivElement;
   private overlayEnabled = false;
+  private lastContext: SelectedContext | null = null;
 
   constructor() {
     // 插件重新加载会销毁旧 Content Script，但其 DOM 浮层可能仍留在页面中。
@@ -56,6 +64,15 @@ export class DomEngine {
 
   context(): SelectedContext {
     if (!this.selected) throw new Error('请先选择页面元素');
+    if (!this.selected.isConnected) {
+      if (!this.lastContext) throw new Error('选中元素已失效，请重新选择');
+      this.lastContext = {
+        ...this.lastContext,
+        pageRevision: this.pageRevision,
+        page: { title: document.title, url: location.href, viewportWidth: innerWidth, viewportHeight: innerHeight }
+      };
+      return this.lastContext;
+    }
     const selected = this.reference(this.selected);
     const parent = this.selected.parentElement;
     if (!parent) throw new Error('选中元素没有可编辑父容器');
@@ -72,7 +89,7 @@ export class DomEngine {
       .filter(node => node !== this.selected && node instanceof HTMLElement && !node.hasAttribute('data-ui-agent-overlay'))
       .slice(0, 8)
       .map(node => this.describe(node as HTMLElement));
-    return {
+    this.lastContext = {
       protocolVersion: PROTOCOL_VERSION,
       selectionVersion: this.selectionVersion,
       pageRevision: this.pageRevision,
@@ -92,6 +109,7 @@ export class DomEngine {
         .filter((element): element is HTMLElement => Boolean(element?.isConnected) && element !== this.selected && treeBudget.remaining > 0)
         .map(element => this.describeTree(element, 0, treeBudget))
     };
+    return this.lastContext;
   }
 
   applyPlan(plan: ChangePlan, confirmedExistingRemoval: boolean): ExecutionReceipt {
@@ -99,16 +117,45 @@ export class DomEngine {
     validatePlan(plan, context);
     if (plan.requiresConfirmation && !confirmedExistingRemoval) throw new Error('删除已有元素前必须由用户确认');
     const applied: Action[] = [];
+    const operationReceipts: ExecutionReceipt['operations'] = [];
     const resultRefs = new Map<string, HTMLElement>();
+    let currentOperation: UIChangeOperation | undefined;
     try {
       for (const operation of plan.operations) {
+        currentOperation = operation;
         const action = this.actionFor(operation, resultRefs);
-        action.apply();
         applied.push(action);
+        action.apply();
+        operationReceipts.push({ operationId: operation.operationId, status: 'applied', verified: false });
       }
+      operationReceipts.forEach((receipt, index) => {
+        const operation = plan.operations[index];
+        receipt.verified = Boolean(operation && this.verifyAppliedOperation(operation, resultRefs));
+      });
     } catch (error) {
-      for (const action of applied.reverse()) action.revert();
-      throw error;
+      for (const action of [...applied].reverse()) {
+        try { action.revert(); } catch { /* Preserve the original execution error. */ }
+      }
+      operationReceipts.forEach(receipt => { receipt.status = 'rolledBack'; });
+      if (currentOperation && !operationReceipts.some(receipt => receipt.operationId === currentOperation?.operationId)) {
+        operationReceipts.push({
+          operationId: currentOperation.operationId,
+          status: 'failed',
+          verified: false,
+          errorCode: 'EXECUTION_ERROR',
+          errorMessage: error instanceof Error ? error.message : 'DOM 操作失败'
+        });
+      }
+      this.refreshOverlay();
+      return {
+        protocolVersion: PROTOCOL_VERSION,
+        planId: plan.planId,
+        success: false,
+        pageRevision: this.pageRevision,
+        appliedOperationIds: [],
+        operations: operationReceipts,
+        error: error instanceof Error ? error.message : 'DOM 操作失败'
+      };
     }
     const transaction = { planId: plan.planId, actions: applied };
     this.undoStack.push(transaction);
@@ -117,7 +164,8 @@ export class DomEngine {
     this.refreshOverlay();
     return {
       protocolVersion: PROTOCOL_VERSION, planId: plan.planId, success: true, pageRevision: this.pageRevision,
-      appliedOperationIds: plan.operations.map(operation => operation.operationId)
+      appliedOperationIds: plan.operations.map(operation => operation.operationId),
+      operations: operationReceipts
     };
   }
 
@@ -242,6 +290,38 @@ export class DomEngine {
     }
   }
 
+  private verifyAppliedOperation(operation: UIChangeOperation, resultRefs: Map<string, HTMLElement>): boolean {
+    try {
+      if (operation.type === 'cloneSubtree') return Boolean(resultRefs.get(operation.resultRef)?.isConnected);
+      if (operation.type === 'addComponent') {
+        return Boolean(resultRefs.get(operation.resultRef ?? `operation:${operation.operationId}`)?.isConnected);
+      }
+      const node = this.resolve(operation.target, resultRefs);
+      if (operation.type === 'updateContent') {
+        const actual = node instanceof HTMLInputElement || node instanceof HTMLTextAreaElement ? node.value : node.textContent ?? '';
+        return actual === operation.text;
+      }
+      if (operation.type === 'updateStyle') {
+        return Object.entries(operation.styles).every(([property, value]) => {
+          const cssProperty = this.cssName(property);
+          const probe = document.createElement('div');
+          probe.style.setProperty(cssProperty, value);
+          return node.style.getPropertyValue(cssProperty) === probe.style.getPropertyValue(cssProperty);
+        });
+      }
+      if (operation.type === 'removeElement') return !node.isConnected;
+      if (operation.type === 'moveElement') return node.isConnected;
+      if (operation.state === 'disabled') return node.hasAttribute('disabled') === operation.value;
+      if (operation.state === 'selected') return node.getAttribute('aria-selected') === String(operation.value);
+      const selectInteraction = this.findSelectInteraction(node);
+      if (selectInteraction) return selectInteraction.isOpen() === operation.value;
+      const expandedNode = node.matches('[aria-expanded]') ? node : node.querySelector<HTMLElement>('[aria-expanded]');
+      return expandedNode?.getAttribute('aria-expanded') === String(operation.value);
+    } catch {
+      return false;
+    }
+  }
+
   private resolve(target: NodeTarget, resultRefs: Map<string, HTMLElement>): HTMLElement {
     if (target.kind === 'node') return this.find(target.nodeId);
     let element = resultRefs.get(target.resultRef);
@@ -332,6 +412,11 @@ export class DomEngine {
     const staticInteraction = template && operation.component === 'select'
       ? this.createStaticSelectInteraction(node, operation.props.options ?? [])
       : undefined;
+    if (staticInteraction) {
+      this.selectInteractions.set(node, staticInteraction);
+      const control = node.matches('.ant-select') ? node : node.querySelector<HTMLElement>('.ant-select');
+      if (control) this.selectInteractions.set(control, staticInteraction);
+    }
     const newId = `added-${crypto.randomUUID()}`;
     node.setAttribute(ownAttribute, newId);
     node.setAttribute('data-ui-agent-added', 'true');
@@ -339,7 +424,7 @@ export class DomEngine {
       this.insertAt(node, insertion.target, insertion.position);
       this.elements.set(newId, node);
       this.addedIds.add(newId);
-      if (operation.resultRef) resultRefs.set(operation.resultRef, node);
+      resultRefs.set(operation.resultRef ?? `operation:${operation.operationId}`, node);
       staticInteraction?.mount();
     };
     return {
@@ -348,41 +433,74 @@ export class DomEngine {
         staticInteraction?.unmount();
         node.remove();
         this.addedIds.delete(newId);
-        if (operation.resultRef) resultRefs.delete(operation.resultRef);
+        resultRefs.delete(operation.resultRef ?? `operation:${operation.operationId}`);
       }
     };
   }
 
-  private createStaticSelectInteraction(root: HTMLElement, options: string[]) {
+  private createStaticSelectInteraction(root: HTMLElement, options: string[]): StaticSelectInteraction {
     const control = root.matches('.ant-select') ? root : root.querySelector<HTMLElement>('.ant-select');
     const display = root.querySelector<HTMLElement>('.ant-select-selection-placeholder, .ant-select-selection-item');
     let panel: HTMLDivElement | undefined;
 
+    const position = () => {
+      if (!control || !panel) return;
+      const rect = control.getBoundingClientRect();
+      const width = Math.max(rect.width, 160);
+      panel.style.width = `${width}px`;
+      const panelRect = panel.getBoundingClientRect();
+      const viewportPadding = 8;
+      const maxLeft = Math.max(viewportPadding, innerWidth - width - viewportPadding);
+      const left = Math.min(Math.max(rect.left, viewportPadding), maxLeft);
+      const openAbove = rect.bottom + 4 + panelRect.height > innerHeight - viewportPadding
+        && rect.top - panelRect.height - 4 >= viewportPadding;
+      const top = openAbove ? rect.top - panelRect.height - 4 : rect.bottom + 4;
+      panel.style.left = `${left}px`;
+      panel.style.top = `${Math.max(viewportPadding, top)}px`;
+      panel.classList.toggle('ant-select-dropdown-placement-topLeft', openAbove);
+      panel.classList.toggle('ant-select-dropdown-placement-bottomLeft', !openAbove);
+    };
     const close = () => {
       panel?.remove();
       panel = undefined;
       control?.classList.remove('ant-select-open');
       control?.setAttribute('aria-expanded', 'false');
+      window.removeEventListener('resize', position);
+      window.removeEventListener('scroll', position, true);
     };
     const open = () => {
       if (!control || panel || options.length === 0) return;
-      const rect = control.getBoundingClientRect();
       panel = document.createElement('div');
-      panel.className = 'ant-select-dropdown ui-agent-static-select-dropdown';
+      panel.className = 'ant-select-dropdown ant-select-dropdown-placement-bottomLeft ui-agent-static-select-dropdown';
+      const themeClasses = [...control.classList].filter(className =>
+        className === 'ant-select-css-var'
+        || className.startsWith('css-var-')
+        || className.startsWith('css-dev-only-do-not-override-')
+      );
+      panel.classList.add(...themeClasses);
       panel.setAttribute('data-ui-agent-static-interaction', 'true');
       Object.assign(panel.style, {
-        position: 'fixed', left: `${rect.left}px`, top: `${rect.bottom + 4}px`,
-        width: `${Math.max(rect.width, 160)}px`, zIndex: '2147483646', padding: '4px',
-        background: '#fff', borderRadius: '8px', boxShadow: '0 6px 16px rgba(0,0,0,.12)'
+        position: 'fixed', zIndex: '2147483646'
       });
+      const virtualList = document.createElement('div');
+      virtualList.className = 'rc-virtual-list';
+      const holder = document.createElement('div');
+      holder.className = 'rc-virtual-list-holder';
+      const optionList = document.createElement('div');
+      optionList.className = 'rc-virtual-list-holder-inner';
+      optionList.setAttribute('role', 'listbox');
       for (const option of options) {
         const item = document.createElement('div');
         item.className = 'ant-select-item ant-select-item-option';
         item.setAttribute('data-ui-agent-option', option);
-        item.textContent = option;
-        Object.assign(item.style, { padding: '5px 12px', lineHeight: '22px', borderRadius: '4px', cursor: 'pointer' });
-        item.addEventListener('mouseenter', () => { item.style.background = 'rgba(0,0,0,.04)'; });
-        item.addEventListener('mouseleave', () => { item.style.background = ''; });
+        item.setAttribute('role', 'option');
+        item.setAttribute('aria-selected', 'false');
+        const content = document.createElement('div');
+        content.className = 'ant-select-item-option-content';
+        content.textContent = option;
+        item.appendChild(content);
+        item.addEventListener('mouseenter', () => item.classList.add('ant-select-item-option-active'));
+        item.addEventListener('mouseleave', () => item.classList.remove('ant-select-item-option-active'));
         item.addEventListener('click', event => {
           event.preventDefault();
           event.stopPropagation();
@@ -393,9 +511,15 @@ export class DomEngine {
           }
           close();
         });
-        panel.appendChild(item);
+        optionList.appendChild(item);
       }
+      holder.appendChild(optionList);
+      virtualList.appendChild(holder);
+      panel.appendChild(virtualList);
       document.body.appendChild(panel);
+      position();
+      window.addEventListener('resize', position);
+      window.addEventListener('scroll', position, true);
       control.classList.add('ant-select-open');
       control.setAttribute('aria-expanded', 'true');
     };
@@ -418,7 +542,9 @@ export class DomEngine {
         close();
         control?.removeEventListener('click', toggle);
         document.removeEventListener('click', outside);
-      }
+      },
+      setOpen: value => { if (value) open(); else close(); },
+      isOpen: () => Boolean(panel)
     };
   }
 
@@ -510,6 +636,27 @@ export class DomEngine {
       const previous = node.getAttribute('aria-selected');
       return { apply: () => node.setAttribute('aria-selected', String(operation.value)), revert: () => previous === null ? node.removeAttribute('aria-selected') : node.setAttribute('aria-selected', previous) };
     }
+    const existingInteraction = this.findSelectInteraction(node);
+    if (existingInteraction) {
+      const previous = existingInteraction.isOpen();
+      return {
+        apply: () => existingInteraction.setOpen(operation.value),
+        revert: () => existingInteraction.setOpen(previous)
+      };
+    }
+    const selectControl = node.matches('.ant-select') ? node : node.querySelector<HTMLElement>('.ant-select');
+    if (selectControl) {
+      const interaction = this.createStaticSelectInteraction(node, operation.options ?? []);
+      this.selectInteractions.set(node, interaction);
+      this.selectInteractions.set(selectControl, interaction);
+      return {
+        apply: () => {
+          interaction.mount();
+          interaction.setOpen(operation.value);
+        },
+        revert: () => interaction.unmount()
+      };
+    }
     const panel = document.createElement('div');
     panel.setAttribute('data-ui-agent-added', 'true');
     const panelId = `added-${crypto.randomUUID()}`;
@@ -523,6 +670,18 @@ export class DomEngine {
       apply: () => { if (operation.value) { node.insertAdjacentElement('afterend', panel); this.elements.set(panelId, panel); this.addedIds.add(panelId); } },
       revert: () => { panel.remove(); this.addedIds.delete(panelId); }
     };
+  }
+
+  private findSelectInteraction(node: HTMLElement): StaticSelectInteraction | undefined {
+    const own = this.selectInteractions.get(node);
+    if (own) return own;
+    const addedRoot = node.closest<HTMLElement>('[data-ui-agent-added]');
+    if (addedRoot) {
+      const interaction = this.selectInteractions.get(addedRoot);
+      if (interaction) return interaction;
+    }
+    const control = node.matches('.ant-select') ? node : node.querySelector<HTMLElement>('.ant-select');
+    return control ? this.selectInteractions.get(control) : undefined;
   }
 
   private createComponent(component: string, props: { label?: string; text?: string; placeholder?: string; options?: string[]; href?: string }): HTMLElement {

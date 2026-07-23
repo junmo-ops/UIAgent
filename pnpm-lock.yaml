@@ -35,6 +35,9 @@ importers:
       '@ui-agent/contracts':
         specifier: workspace:*
         version: link:../../packages/ui-change-contracts
+      '@ui-agent/ui-change-agent':
+        specifier: workspace:*
+        version: link:../../packages/ui-change-agent
       hono:
         specifier: ^4.9.0
         version: 4.12.31
@@ -146,6 +149,19 @@ importers:
       zod:
         specifier: ^4.0.0
         version: 4.4.3
+    devDependencies:
+      typescript:
+        specifier: ^5.9.0
+        version: 5.9.3
+
+  packages/ui-change-agent:
+    dependencies:
+      '@ui-agent/agent-runtime':
+        specifier: workspace:*
+        version: link:../agent-runtime
+      '@ui-agent/contracts':
+        specifier: workspace:*
+        version: link:../ui-change-contracts
     devDependencies:
       typescript:
         specifier: ^5.9.0

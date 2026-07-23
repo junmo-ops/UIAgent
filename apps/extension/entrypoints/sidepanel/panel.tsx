@@ -4,7 +4,8 @@ import { useMachine } from '@xstate/react';
 import { storage } from 'wxt/utils/storage';
 import {
   PROTOCOL_VERSION,
-  plannerResultSchema,
+  agentTurnResponseSchema,
+  executionSubmissionSchema,
   startTurnRequestSchema,
   type ChangePlan,
   type ContentCommand,
@@ -21,6 +22,7 @@ const editorClientId = crypto.randomUUID();
 browser.runtime.connect({ name: `ui-agent-editor:${editorClientId}` });
 
 interface ChatEntry { id: string; role: 'user' | 'assistant'; text: string }
+interface ActiveTurn { turnId: string; traceId: string }
 
 async function command(value: ContentCommand): Promise<Extract<ContentCommandResult, { ok: true }>> {
   const result = await sendMessage('browserCommand', { editorClientId, command: value });
@@ -30,11 +32,12 @@ async function command(value: ContentCommand): Promise<Extract<ContentCommandRes
 
 export function SidePanelApp() {
   const [state, send] = useMachine(sessionMachine);
-  const [instruction, setInstruction] = useState('在它右侧增加一个筛选项，选项包括“全部”“待审核”“已通过”');
+  const [instruction, setInstruction] = useState('');
   const [chat, setChat] = useState<ChatEntry[]>([]);
   const [serviceUrl, setServiceUrl] = useState('http://127.0.0.1:8787');
   const [editSessionId, setEditSessionId] = useState(() => crypto.randomUUID());
-  const busy = state.matches('planning') || state.matches('applying');
+  const [activeTurn, setActiveTurn] = useState<ActiveTurn>();
+  const busy = state.matches('planning') || state.matches('applying') || state.matches('verifying') || state.matches('repairing');
 
   useEffect(() => { serviceUrlItem.getValue().then(setServiceUrl); }, []);
   useEffect(() => {
@@ -50,6 +53,7 @@ export function SidePanelApp() {
   }, []);
   useEffect(() => onMessage('selectionChanged', message => {
     setEditSessionId(crypto.randomUUID());
+    setActiveTurn(undefined);
     setChat([]);
     send({ type: 'SELECTION_FOUND', selection: message.data });
   }), [send]);
@@ -73,30 +77,68 @@ export function SidePanelApp() {
     setInstruction(''); send({ type: 'SUBMIT' });
     try {
       const context = await refreshContext();
+      const turn = { turnId: crypto.randomUUID(), traceId: crypto.randomUUID() };
       const request = startTurnRequestSchema.parse({
         protocolVersion: PROTOCOL_VERSION, editSessionId,
-        turnId: crypto.randomUUID(), traceId: crypto.randomUUID(), instruction: text, context
+        ...turn, instruction: text, context
       });
       const response = await fetch(`${serviceUrl}/v1/turns`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(request) });
       if (!response.ok) throw new Error(`Agent Service 返回 ${response.status}`);
-      const result = plannerResultSchema.parse(await response.json());
+      const result = agentTurnResponseSchema.parse(await response.json());
       if (result.kind === 'clarification') {
         const message = result.clarification.question;
         setChat(entries => [...entries, { id: crypto.randomUUID(), role: 'assistant', text: message }]);
         send({ type: 'CLARIFY', message }); return;
       }
+      if (result.kind !== 'execution') throw new Error(result.kind === 'failed' ? result.message : 'Agent 没有返回可执行计划');
+      setActiveTurn(turn);
       setChat(entries => [...entries, { id: crypto.randomUUID(), role: 'assistant', text: result.plan.summary }]);
       if (result.plan.requiresConfirmation) send({ type: 'NEEDS_CONFIRMATION', plan: result.plan });
-      else await apply(result.plan, false);
+      else await apply(result.plan, false, turn);
     } catch (error) { fail(error); }
   };
 
-  const apply = async (plan: ChangePlan, confirmed: boolean) => {
+  const apply = async (plan: ChangePlan, confirmed: boolean, turn: ActiveTurn | undefined = activeTurn) => {
     send({ type: 'BEGIN_APPLY', plan });
     try {
+      if (!turn) throw new Error('当前 Agent Turn 已失效，请重新提交指令');
       const result = await command({ type: 'applyPlan', plan, confirmedExistingRemoval: confirmed });
-      const context = await refreshContext().catch(() => state.context.selection);
-      send({ type: 'APPLIED', message: '页面示意已更新', selection: context, canUndo: result.canUndo ?? true, canRedo: result.canRedo ?? false });
+      if (!result.receipt) throw new Error('页面没有返回执行回执');
+      const context = await refreshContext();
+      send({ type: 'BEGIN_VERIFY' });
+      const submission = executionSubmissionSchema.parse({
+        protocolVersion: PROTOCOL_VERSION,
+        editSessionId,
+        ...turn,
+        planId: plan.planId,
+        beforePageRevision: plan.pageRevision,
+        receipt: result.receipt,
+        observation: context
+      });
+      const response = await fetch(`${serviceUrl}/v1/turns/${turn.turnId}/execution`, {
+        method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(submission)
+      });
+      if (!response.ok) throw new Error(`Agent Service 验证接口返回 ${response.status}`);
+      const outcome = agentTurnResponseSchema.parse(await response.json());
+      if (outcome.kind === 'completed') {
+        setChat(entries => [...entries, { id: crypto.randomUUID(), role: 'assistant', text: outcome.verification.summary }]);
+        setActiveTurn(undefined);
+        send({ type: 'APPLIED', message: '页面示意已更新并通过执行后验证', selection: context, canUndo: result.canUndo ?? true, canRedo: result.canRedo ?? false });
+        return;
+      }
+      if (outcome.kind === 'execution') {
+        setChat(entries => [...entries, { id: crypto.randomUUID(), role: 'assistant', text: `检查发现执行结果需要修正：${outcome.verification?.summary ?? '执行未达到预期'}。正在进行一次安全修正。` }]);
+        send({ type: 'BEGIN_REPAIR' });
+        if (outcome.plan.requiresConfirmation) send({ type: 'NEEDS_CONFIRMATION', plan: outcome.plan });
+        else await apply(outcome.plan, false, turn);
+        return;
+      }
+      if (outcome.kind === 'clarification') {
+        setChat(entries => [...entries, { id: crypto.randomUUID(), role: 'assistant', text: outcome.clarification.question }]);
+        send({ type: 'CLARIFY', message: outcome.clarification.question });
+        return;
+      }
+      throw new Error(`[${outcome.code}] ${outcome.message}`);
     } catch (error) { fail(error); }
   };
 
@@ -122,7 +164,7 @@ export function SidePanelApp() {
       <section className="chat-list">
         {chat.length === 0 && <div className="empty-tip">示例：在它右侧添加一个筛选项，包含“全部”“待审核”“已通过”</div>}
         {chat.map(entry => <div key={entry.id} className={`bubble ${entry.role}`}>{entry.text}</div>)}
-        {busy && <div className="bubble assistant"><Spin size="small" /> 正在生成受控修改方案…</div>}
+        {busy && <div className="bubble assistant"><Spin size="small" /> {state.matches('verifying') ? '正在验证页面结果…' : state.matches('repairing') ? '正在生成一次安全修正…' : state.matches('applying') ? '正在执行受控页面修改…' : '正在生成受控修改方案…'}</div>}
       </section>
 
       {state.context.message && <Alert type="info" showIcon message={state.context.message} closable />}

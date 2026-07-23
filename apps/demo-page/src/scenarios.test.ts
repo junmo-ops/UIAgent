@@ -2,9 +2,9 @@ import { describe, expect, it } from 'vitest';
 import { demoScenarios } from './scenarios';
 
 describe('V1.1 demo scenario dataset', () => {
-  it('contains ten uniquely identified scenarios across all three fixed pages', () => {
-    expect(demoScenarios).toHaveLength(10);
-    expect(new Set(demoScenarios.map(item => item.id)).size).toBe(10);
+  it('contains twenty uniquely identified scenarios across all three fixed pages', () => {
+    expect(demoScenarios).toHaveLength(20);
+    expect(new Set(demoScenarios.map(item => item.id)).size).toBe(20);
     expect(new Set(demoScenarios.map(item => item.page))).toEqual(new Set(['orders', 'detail', 'form']));
   });
 
@@ -20,8 +20,8 @@ describe('V1.1 demo scenario dataset', () => {
   });
 
   it('includes multi-turn, confirmation, and security regression coverage', () => {
-    expect(demoScenarios.some(item => item.instructionTurns.length > 1)).toBe(true);
+    expect(demoScenarios.filter(item => item.instructionTurns.length > 1).length).toBeGreaterThanOrEqual(3);
     expect(demoScenarios.some(item => item.requiresConfirmation)).toBe(true);
-    expect(demoScenarios.some(item => item.tags.includes('security'))).toBe(true);
+    expect(demoScenarios.filter(item => item.tags.includes('security')).length).toBeGreaterThanOrEqual(2);
   });
 });

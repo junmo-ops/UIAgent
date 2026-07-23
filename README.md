@@ -12,8 +12,10 @@
 - 按用户轮次进行撤销、重做和恢复初始状态。
 - 导出当前浏览器可视区域 PNG。
 - LangGraph + Vercel AI SDK 的可替换 Agent Runtime。
+- 两阶段 Agent Turn：浏览器执行后回传逐操作回执和最新局部 DOM，由 Agent 完成确定性验证。
+- DOM 事务失败时自动回滚，并在安全范围内最多生成一次修正计划。
 - 默认 Mock Planner，无模型 Key 也能演示核心流程。
-- 列表页、详情页、表单页三类 V1.1 固定场景和首批 10 条回归任务。
+- 列表页、详情页、表单页三类 V1.1 固定场景和 20 条模型回归任务。
 
 ## 工程结构
 
@@ -22,6 +24,7 @@ apps/demo-page             固定 React + Ant Design 测试页
 apps/extension             WXT Chrome MV3 插件
 apps/agent-service         Hono Agent Service
 packages/agent-runtime     LangGraph、Mock/远程模型 Planner
+packages/ui-change-agent   UI Change Agent 两阶段协调、验证与修正预算
 packages/ui-change-domain  UI 变更策略和安全边界
 packages/ui-change-contracts 版本化 DTO 和 Zod Schema
 ```
@@ -75,7 +78,7 @@ pnpm dev:service
 
 ## 查看 Agent 会话日志
 
-Agent Service 会把最近 200 个 Turn 的当前请求、局部 DOM 上下文、此前对话、模型结果、错误和耗时写入本地 JSONL，并提供调试页面：
+Agent Service 会把最近 200 个 Turn 的当前请求、局部 DOM 上下文、此前对话、模型结果、逐操作执行回执、执行后观察、验证结果、错误和耗时写入本地 JSONL，并提供调试页面：
 
 ```text
 http://127.0.0.1:8787/logs

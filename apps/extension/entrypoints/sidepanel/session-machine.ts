@@ -16,6 +16,8 @@ type SessionEvent =
   | { type: 'SUBMIT' }
   | { type: 'NEEDS_CONFIRMATION'; plan: ChangePlan }
   | { type: 'BEGIN_APPLY'; plan?: ChangePlan }
+  | { type: 'BEGIN_VERIFY' }
+  | { type: 'BEGIN_REPAIR' }
   | { type: 'APPLIED'; message: string; selection?: SelectedContext; canUndo: boolean; canRedo: boolean }
   | { type: 'CLARIFY'; message: string }
   | { type: 'HISTORY'; canUndo: boolean; canRedo: boolean; selection?: SelectedContext }
@@ -48,7 +50,9 @@ export const sessionMachine = setup({
     ready: { on: { START_SELECTION: 'selecting', SUBMIT: 'planning' } },
     planning: { on: { NEEDS_CONFIRMATION: { target: 'confirming', actions: 'setPlan' }, BEGIN_APPLY: 'applying', CLARIFY: { target: 'ready', actions: 'setClarification' } } },
     confirming: { on: { BEGIN_APPLY: 'applying', DISMISS: { target: 'ready', actions: 'clearError' } } },
-    applying: { on: { APPLIED: { target: 'ready', actions: 'setApplied' } } },
+    applying: { on: { BEGIN_VERIFY: 'verifying' } },
+    verifying: { on: { APPLIED: { target: 'ready', actions: 'setApplied' }, BEGIN_REPAIR: 'repairing', CLARIFY: { target: 'ready', actions: 'setClarification' } } },
+    repairing: { on: { BEGIN_APPLY: 'applying', NEEDS_CONFIRMATION: { target: 'confirming', actions: 'setPlan' }, CLARIFY: { target: 'ready', actions: 'setClarification' } } },
     error: { on: { DISMISS: { target: 'ready', actions: 'clearError' }, START_SELECTION: 'selecting' } }
   }
 });

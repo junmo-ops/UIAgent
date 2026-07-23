@@ -60,7 +60,8 @@ describe('DomEngine generic operations', () => {
       ]
     };
 
-    engine.applyPlan(plan, false);
+    const receipt = engine.applyPlan(plan, false);
+    expect(receipt.operations.every(operation => operation.status === 'applied' && operation.verified)).toBe(true);
     expect([...document.querySelectorAll('tbody > tr')]).toHaveLength(2);
     expect(document.querySelectorAll('tr')[1]?.textContent).toContain('SO002');
     expect(document.querySelectorAll('tr')[1]?.textContent).toContain('随机客户');
@@ -117,7 +118,7 @@ describe('DomEngine generic operations', () => {
     const document = installDom(`<!doctype html><html><body><form><div data-testid="row">
       <div class="grid-column" data-ui-component="form-field-select">
         <div class="ant-form-item"><div class="ant-form-item-label"><label>订单渠道</label></div>
-          <div class="ant-select"><span class="ant-select-selection-placeholder">请选择渠道</span><input role="combobox"></div>
+          <div class="ant-select css-var-root ant-select-css-var css-dev-only-do-not-override-test"><span class="ant-select-selection-placeholder">请选择渠道</span><input role="combobox"></div>
         </div>
       </div>
     </div></form></body></html>`);
@@ -144,11 +145,99 @@ describe('DomEngine generic operations', () => {
     expect(document.querySelectorAll('select')).toHaveLength(0);
 
     const control = added.querySelector('.ant-select') as unknown as HTMLElement;
+    control.getBoundingClientRect = () => ({
+      x: 120, y: 200, width: 240, height: 32, top: 200, right: 360, bottom: 232, left: 120,
+      toJSON: () => ({})
+    });
     control.dispatchEvent(new document.defaultView!.Event('click', { bubbles: true }));
     expect(document.querySelectorAll('[data-ui-agent-option]')).toHaveLength(3);
+    const clickPanel = document.querySelector('[data-ui-agent-static-interaction]') as unknown as HTMLElement;
+    expect(clickPanel.style.left).toBe('120px');
+    expect(clickPanel.style.top).toBe('236px');
+    expect(clickPanel.classList.contains('css-var-root')).toBe(true);
+    expect(clickPanel.classList.contains('ant-select-css-var')).toBe(true);
+    expect(clickPanel.classList.contains('css-dev-only-do-not-override-test')).toBe(true);
+    expect(clickPanel.querySelector('.rc-virtual-list-holder-inner')).not.toBeNull();
+    expect(clickPanel.querySelector('.ant-select-item-option-content')?.textContent).toBe('月结');
     const prepaid = document.querySelector('[data-ui-agent-option="预付"]') as unknown as HTMLElement;
     prepaid.dispatchEvent(new document.defaultView!.Event('click', { bubbles: true }));
     expect(added.querySelector('.ant-select-selection-item')?.textContent).toBe('预付');
     expect(document.querySelector('[data-ui-agent-static-interaction]')).toBeNull();
+
+    const openPlan: ChangePlan = {
+      protocolVersion: PROTOCOL_VERSION, planId: 'open-payment-select',
+      selectionVersion: context.selectionVersion, pageRevision: 1,
+      summary: '展开付款方式', requiresConfirmation: false,
+      operations: [{
+        operationId: 'open', type: 'setVisualState',
+        target: { kind: 'node', nodeId: added.getAttribute('data-ui-agent-id')! },
+        state: 'open', value: true, options: ['月结', '预付', '货到付款']
+      }]
+    };
+    const openReceipt = engine.applyPlan(openPlan, false);
+    expect(openReceipt.operations[0]).toMatchObject({ status: 'applied', verified: true });
+    const explicitPanel = document.querySelector('[data-ui-agent-static-interaction]') as unknown as HTMLElement;
+    expect(explicitPanel.style.left).toBe('120px');
+    expect(explicitPanel.style.top).toBe('236px');
+    expect(control.getAttribute('aria-expanded')).toBe('true');
+
+    control.getBoundingClientRect = () => ({
+      x: 160, y: 260, width: 240, height: 32, top: 260, right: 400, bottom: 292, left: 160,
+      toJSON: () => ({})
+    });
+    document.defaultView!.dispatchEvent(new document.defaultView!.Event('scroll'));
+    expect(explicitPanel.style.left).toBe('160px');
+    expect(explicitPanel.style.top).toBe('296px');
+    engine.undo();
+    expect(document.querySelector('[data-ui-agent-static-interaction]')).toBeNull();
+  });
+
+  it('returns an execution observation after the selected element itself is removed', () => {
+    const document = installDom('<!doctype html><html><body><main><button>删除我</button></main></body></html>');
+    const engine = new DomEngine();
+    const button = document.querySelector('button') as unknown as HTMLElement;
+    const context = engine.select(button);
+    const removePlan: ChangePlan = {
+      protocolVersion: PROTOCOL_VERSION, planId: 'remove-selected',
+      selectionVersion: context.selectionVersion, pageRevision: context.pageRevision,
+      summary: '删除按钮', requiresConfirmation: true,
+      operations: [{ operationId: 'remove', type: 'removeElement', target: { kind: 'node', nodeId: context.selected.id } }]
+    };
+    const receipt = engine.applyPlan(removePlan, true);
+    expect(receipt.success).toBe(true);
+    expect(document.querySelector('button')).toBeNull();
+    expect(engine.context()).toMatchObject({ selectionVersion: context.selectionVersion, pageRevision: 1 });
+  });
+
+  it('rolls back earlier operations and returns a structured failed receipt when a later operation fails', () => {
+    const document = installDom('<!doctype html><html><body><main><button>查询</button></main></body></html>');
+    const engine = new DomEngine();
+    const button = document.querySelector('button') as unknown as HTMLElement;
+    const context = engine.select(button);
+    const failingPlan: ChangePlan = {
+      protocolVersion: PROTOCOL_VERSION, planId: 'rollback-plan',
+      selectionVersion: context.selectionVersion, pageRevision: context.pageRevision,
+      summary: '新增后触发无效路径', requiresConfirmation: false,
+      operations: [
+        {
+          operationId: 'add', type: 'addComponent', component: 'button',
+          anchor: { kind: 'node', nodeId: context.selected.id }, position: 'after', resultRef: 'new-button', props: { text: '新增' }
+        },
+        {
+          operationId: 'invalid-edit', type: 'updateContent',
+          target: { kind: 'result', resultRef: 'new-button', path: [99] }, text: '不会成功'
+        }
+      ]
+    };
+    const receipt = engine.applyPlan(failingPlan, false);
+    expect(receipt).toMatchObject({
+      success: false, pageRevision: 0, appliedOperationIds: [],
+      operations: [
+        { operationId: 'add', status: 'rolledBack', verified: false },
+        { operationId: 'invalid-edit', status: 'failed', verified: false, errorCode: 'EXECUTION_ERROR' }
+      ]
+    });
+    expect([...document.querySelectorAll('button')]).toHaveLength(1);
+    expect(engine.historyState().canUndo).toBe(false);
   });
 });

@@ -145,8 +145,53 @@ export const executionReceiptSchema = z.object({
   success: z.boolean(),
   pageRevision: z.number().int().nonnegative(),
   appliedOperationIds: z.array(z.string()),
+  operations: z.array(z.object({
+    operationId: z.string(),
+    status: z.enum(['applied', 'failed', 'rolledBack']),
+    verified: z.boolean(),
+    errorCode: z.string().optional(),
+    errorMessage: z.string().optional()
+  })),
   error: z.string().optional()
 });
+
+export const executionSubmissionSchema = z.object({
+  protocolVersion: z.literal(PROTOCOL_VERSION),
+  editSessionId: z.string(),
+  turnId: z.string(),
+  traceId: z.string(),
+  planId: z.string(),
+  beforePageRevision: z.number().int().nonnegative(),
+  receipt: executionReceiptSchema,
+  observation: selectedContextSchema
+});
+
+export const verificationResultSchema = z.object({
+  status: z.enum(['passed', 'repairable', 'failed']),
+  summary: z.string(),
+  checks: z.array(z.object({
+    code: z.string(),
+    passed: z.boolean(),
+    message: z.string()
+  }))
+});
+
+export const agentTurnResponseSchema = z.discriminatedUnion('kind', [
+  z.object({ kind: z.literal('clarification'), clarification: clarificationSchema }),
+  z.object({
+    kind: z.literal('execution'),
+    plan: changePlanSchema,
+    repairCount: z.number().int().min(0).max(1),
+    verification: verificationResultSchema.optional()
+  }),
+  z.object({ kind: z.literal('completed'), verification: verificationResultSchema }),
+  z.object({
+    kind: z.literal('failed'),
+    code: z.string(),
+    message: z.string(),
+    verification: verificationResultSchema.optional()
+  })
+]);
 
 export type ElementRef = z.infer<typeof elementRefSchema>;
 export type NodeTarget = z.infer<typeof nodeTargetSchema>;
@@ -156,6 +201,10 @@ export type ChangePlan = z.infer<typeof changePlanSchema>;
 export type PlannerResult = z.infer<typeof plannerResultSchema>;
 export type StartTurnRequest = z.infer<typeof startTurnRequestSchema>;
 export type ExecutionReceipt = z.infer<typeof executionReceiptSchema>;
+export type OperationReceipt = ExecutionReceipt['operations'][number];
+export type ExecutionSubmission = z.infer<typeof executionSubmissionSchema>;
+export type VerificationResult = z.infer<typeof verificationResultSchema>;
+export type AgentTurnResponse = z.infer<typeof agentTurnResponseSchema>;
 
 export const extensionErrorCodeSchema = z.enum([
   'NO_ACTIVE_TAB',

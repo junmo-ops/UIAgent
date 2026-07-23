@@ -15,6 +15,10 @@ export interface Planner {
   plan(request: StartTurnRequest, conversation?: ConversationTurn[]): Promise<PlannerResult>;
 }
 
+export interface AgentRuntime {
+  invoke(request: StartTurnRequest): Promise<PlannerResult>;
+}
+
 export interface ConversationTurn {
   instruction: string;
   result: PlannerResult;
@@ -278,7 +282,7 @@ const GraphState = Annotation.Root({
   })
 });
 
-export function createAgentRuntime(planner: Planner, observe?: RuntimeTraceObserver) {
+export function createAgentRuntime(planner: Planner, observe?: RuntimeTraceObserver): AgentRuntime {
   const emit = (event: RuntimeTraceEvent) => {
     try { observe?.(event); }
     catch (error) { console.error('[agent-runtime] trace observer failed', error); }
