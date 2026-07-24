@@ -20,6 +20,7 @@ V1.1 不以继续堆叠业务操作类型为目标，而是把 Demo 提升为可
 | 一次补充或自动修正后的成功率 | 不低于 90% |
 | 越权操作阻断率 | 100% |
 | 一轮 Agent 自动修正次数 | 最多 1 次 |
+| 单 Turn 模型规划总轮数 | 最多 5 轮，包含上下文补充与执行后修正 |
 | 正常网络下单轮响应时间 | P90 不超过 15 秒，最终以实测校准 |
 | 端到端核心流程 | 全部自动化回归通过 |
 
@@ -60,6 +61,8 @@ flowchart LR
     U["产品经理 / Side Panel"] --> O["编辑会话协调器"]
     O --> A["UI Change Agent"]
     A --> P["Plan：生成受控计划"]
+    P -->|"页面事实不足"| X["ContextRequest：申请必要上下文"]
+    X --> O
     P --> V1["Validate：Schema 与领域策略"]
     V1 -->|"计划可执行"| B["浏览器 Controlled DOM Engine"]
     B --> R["ExecutionReceipt + AfterContext"]
@@ -128,14 +131,15 @@ Agent Graph 负责领域流程和决策，不拥有浏览器执行能力。
 
 建议节点：
 
-1. `assembleContext`：组装当前指令、会话摘要、最近对话和最新页面快照。
-2. `plan`：生成 `Clarification` 或 `ChangePlan`。
-3. `validatePlan`：执行 Schema 和领域策略校验。
-4. `awaitExecution`：持久化待执行状态，等待浏览器回执。
-5. `verifyExecution`：根据计划预期、执行回执和最新 DOM 上下文验证结果。
-6. `repairPlan`：只针对明确失败项生成一次增量修正计划。
-7. `commitMemory`：将实际完成的修改写入结构化会话事实。
-8. `complete` / `clarify` / `fail`：进入明确终态。
+1. `assembleContext`：先组装当前指令、会话摘要和 L0 基础页面上下文。
+2. `plan`：生成 `ContextRequest`、`Clarification` 或 `ChangePlan`。
+3. `expandContext`：浏览器按 `ContextRequest.scopes` 补充页面事实后恢复同一 Turn。
+4. `validatePlan`：执行 Schema 和领域策略校验。
+5. `awaitExecution`：持久化待执行状态，等待浏览器回执。
+6. `verifyExecution`：根据计划预期、执行回执和最新 DOM 上下文验证结果。
+7. `repairPlan`：只针对明确失败项生成一次增量修正计划。
+8. `commitMemory`：将实际完成的修改写入结构化会话事实。
+9. `complete` / `clarify` / `fail`：进入明确终态。
 
 V1.1 不采用开放式 ReAct，也不向 Agent 注册点击、输入、导航、请求接口或执行 JavaScript 的工具。
 
@@ -145,7 +149,7 @@ V1.1 不采用开放式 ReAct，也不向 Agent 注册点击、输入、导航�
 
 - `ThreadRuntime`：启动、恢复、取消和查询 Thread。
 - `InterruptAdapter`：等待浏览器执行或用户确认。
-- `LoopBudget`：规划 1 次、Schema 修复 1 次、页面修正 1 次、总超时限制。
+- `LoopBudget`：单 Turn 最多 5 轮模型规划，Schema 修复、上下文补充和页面修正共享总预算。
 - `ContextBudget`：消息数量、字符数和 DOM 节点预算。
 - `RuntimeError`：统一错误分类及 `retryable` 标记。
 - `StepObserver`：记录节点开始、结束、耗时、输入摘要和输出摘要。
@@ -352,6 +356,44 @@ selectionVersion     当前选区版本
 7. 历史摘要。
 
 页面刷新、标签页关闭或用户重新选择区域后结束原选区记忆，不做跨页面长期记忆。
+
+### 6.1 渐进式页面上下文
+
+首次规划不再固定发送完整局部 DOM，而是从最小可用上下文开始：
+
+| 层级 | 内容 | 发送时机 |
+| --- | --- | --- |
+| L0 基础上下文 | 选中元素、最多两层最小子树、直接父级、页面与版本信息 | 每次首轮必带 |
+| L1 关系上下文 | `siblings`、`visibleStyles` | 模型需要判断相邻位置或详细样式时 |
+| L2 结构上下文 | `reusableStructures`、`elementFacts`、`sessionChanges` | 复制结构、复杂布局或引用本会话新增元素时 |
+
+Planner 在页面事实不足时返回受控的 `ContextRequest`：
+
+```text
+ContextRequest
+├── reason：为什么当前事实不足
+└── scopes：
+    ├── siblings
+    ├── visibleStyles
+    ├── reusableStructures
+    ├── elementFacts
+    └── sessionChanges
+```
+
+Side Panel 累积已申请的 scope，从 Content Script 重新采集，并使用相同 `turnId` 恢复规划。服务端执行以下循环保护：
+
+- 模型规划总轮数最多 5 轮，首轮和执行后修正均计入。
+- 重复提交同一上下文时返回已有 `ContextRequest`，不重复调用模型。
+- 模型重复申请已经提供的 scope 时以 `CONTEXT_NO_PROGRESS` 停止。
+- 第 5 轮仍要求补充上下文时以 `CONTEXT_ROUND_LIMIT` 停止。
+- Context Script 只响应枚举内的 scope，不能借此扩大到当前局部安全边界之外。
+
+上下文去重规则：
+
+- L0 不携带兄弟节点、完整样式和 `elementFacts`。
+- 请求 `elementFacts` 时不再重复发送 `siblings`；结构事实已经覆盖相邻关系。
+- 容器型 `elementFacts` 默认只保留直接文本；只有叶子或有明确组件语义的节点保留聚合可见文本，避免祖先节点逐层重复同一段内容。
+- 会话历史保存目标和结果，不复制旧页面快照。
 
 ## 7. 执行后验证与自动修正
 
@@ -573,3 +615,12 @@ M3 后续仍需实现模型计划自动评分、Promptfoo 回归配置和失败�
 - 创建操作回传真实结果元素 ID，执行后上下文补充父子索引、局部坐标、布局和组件角色事实。
 - Agent 直接根据 GoalSpec 验证最终语义；操作成功但角色、内容、位置、状态或保持约束失败时不能通过。
 - 基础组件目录仍包含 `tag`、`alert` 和语义变体，但它们通过能力注册表接入，不与 C 组用例绑定。
+
+### 2026-07-24：渐进式上下文完成
+
+- 首轮模型请求改为 L0 基础上下文，不再固定发送相邻元素、完整样式、可复用结构和 `elementFacts`。
+- Planner 协议新增 `contextRequest`，可按需申请五类受控页面事实。
+- Side Panel 在同一 `turnId` 中累积 scope 并继续规划，无需用户重新提交指令。
+- UI Change Agent 增加最多 5 轮规划、幂等恢复、重复 scope 和无进展保护；执行后修正共享总轮数预算。
+- DOM 上下文对结构事实和相邻元素去重，并减少容器可见文本的逐层重复。
+- 单元测试覆盖基础上下文、按需扩展、重复请求幂等、无进展终止和五轮硬上限。

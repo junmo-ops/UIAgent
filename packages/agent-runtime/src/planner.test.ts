@@ -202,6 +202,36 @@ describe('intent-driven plan compilation', () => {
 });
 
 describe('agent conversation memory', () => {
+  it('does not persist internal context expansion as a user conversation turn', async () => {
+    const observedLengths: number[] = [];
+    let calls = 0;
+    const planner: Planner = {
+      async plan(_request, conversation = []) {
+        observedLengths.push(conversation.length);
+        calls += 1;
+        return calls === 1
+          ? {
+              kind: 'contextRequest',
+              contextRequest: {
+                protocolVersion: PROTOCOL_VERSION,
+                reason: '需要相邻元素',
+                scopes: ['siblings']
+              }
+            }
+          : {
+              kind: 'clarification',
+              clarification: { protocolVersion: PROTOCOL_VERSION, reason: 'test', question: 'test' }
+            };
+      }
+    };
+    const runtime = createAgentRuntime(planner);
+
+    await runtime.invoke({ ...request, turnId: 'context-1' });
+    await runtime.invoke({ ...request, turnId: 'context-2', context: { ...request.context, contextScopes: ['siblings'] } });
+
+    expect(observedLengths).toEqual([0, 0]);
+  });
+
   it('passes previous turns to the planner in the same edit session', async () => {
     const observedHistory: ConversationTurn[][] = [];
     const clarification = {

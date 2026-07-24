@@ -2,6 +2,7 @@ import {
   PROTOCOL_VERSION,
   type AgentTurnResponse,
   type ChangePlan,
+  type ContextScope,
   type DomTreeNode,
   type ExecutionSubmission,
   type StartTurnRequest,
@@ -14,6 +15,25 @@ interface PendingTurn {
   request: StartTurnRequest;
   plan: ChangePlan;
   repairCount: number;
+  planningRound: number;
+}
+
+interface PlanningTurn {
+  request: StartTurnRequest;
+  planningRound: number;
+  providedScopeKey: string;
+  requestedScopes: ContextScope[];
+  response: Extract<AgentTurnResponse, { kind: 'contextRequest' }>;
+}
+
+const MAX_PLANNING_ROUNDS = 5;
+
+function scopeKey(request: StartTurnRequest): string {
+  return [
+    request.context.selectionVersion,
+    request.context.pageRevision,
+    [...(request.context.contextScopes ?? [])].sort().join(',')
+  ].join(':');
 }
 
 function check(code: string, passed: boolean, message: string) {
@@ -203,6 +223,7 @@ export function verifyExecution(plan: ChangePlan, submission: ExecutionSubmissio
 
 export class UiChangeAgent {
   private readonly pending = new Map<string, PendingTurn>();
+  private readonly planning = new Map<string, PlanningTurn>();
   private readonly finals = new Map<string, AgentTurnResponse>();
 
   constructor(private readonly runtime: AgentRuntime) {}
@@ -212,13 +233,56 @@ export class UiChangeAgent {
     if (final) return final;
     const existing = this.pending.get(request.turnId);
     if (existing) return { kind: 'execution', plan: existing.plan, repairCount: existing.repairCount };
+    const planning = this.planning.get(request.turnId);
+    if (planning) {
+      if (planning.request.editSessionId !== request.editSessionId || planning.request.traceId !== request.traceId) {
+        return { kind: 'failed', code: 'TURN_MISMATCH', message: '补充上下文与当前编辑会话不匹配' };
+      }
+      const nextScopeKey = scopeKey(request);
+      if (nextScopeKey === planning.providedScopeKey) return planning.response;
+      const provided = new Set(request.context.contextScopes ?? []);
+      if (!planning.requestedScopes.every(scope => provided.has(scope))) return planning.response;
+    }
+    const planningRound = (planning?.planningRound ?? 0) + 1;
     const result = await this.runtime.invoke(request);
+    if (result.kind === 'contextRequest') {
+      const provided = new Set(request.context.contextScopes ?? []);
+      const requestedScopes = [...new Set(result.contextRequest.scopes)]
+        .filter(scope => !provided.has(scope));
+      if (requestedScopes.length === 0 || planningRound >= MAX_PLANNING_ROUNDS) {
+        const response: AgentTurnResponse = {
+          kind: 'failed',
+          code: requestedScopes.length === 0 ? 'CONTEXT_NO_PROGRESS' : 'CONTEXT_ROUND_LIMIT',
+          message: requestedScopes.length === 0
+            ? 'Agent 重复申请已提供的页面上下文，已停止本轮规划'
+            : `Agent 在 ${MAX_PLANNING_ROUNDS} 轮内仍无法生成可靠计划`
+        };
+        this.planning.delete(request.turnId);
+        this.finals.set(request.turnId, response);
+        return response;
+      }
+      const response: Extract<AgentTurnResponse, { kind: 'contextRequest' }> = {
+        kind: 'contextRequest',
+        contextRequest: { ...result.contextRequest, scopes: requestedScopes },
+        planningRound
+      };
+      this.planning.set(request.turnId, {
+        request,
+        planningRound,
+        providedScopeKey: scopeKey(request),
+        requestedScopes,
+        response
+      });
+      return response;
+    }
     if (result.kind === 'clarification') {
       const response: AgentTurnResponse = result;
+      this.planning.delete(request.turnId);
       this.finals.set(request.turnId, response);
       return response;
     }
-    this.pending.set(request.turnId, { request, plan: result.plan, repairCount: 0 });
+    this.planning.delete(request.turnId);
+    this.pending.set(request.turnId, { request, plan: result.plan, repairCount: 0, planningRound });
     return { kind: 'execution', plan: result.plan, repairCount: 0 };
   }
 
@@ -237,10 +301,14 @@ export class UiChangeAgent {
       this.finals.set(submission.turnId, response);
       return response;
     }
-    if (verification.status !== 'repairable' || pending.repairCount >= 1) {
+    if (verification.status !== 'repairable' || pending.repairCount >= 1 || pending.planningRound >= MAX_PLANNING_ROUNDS) {
       const response: AgentTurnResponse = {
         kind: 'failed', code: 'VERIFICATION_ERROR',
-        message: pending.repairCount >= 1 ? `自动修正后仍未通过验证：${verification.summary}` : verification.summary,
+        message: pending.repairCount >= 1
+          ? `自动修正后仍未通过验证：${verification.summary}`
+          : pending.planningRound >= MAX_PLANNING_ROUNDS
+            ? `已达到 ${MAX_PLANNING_ROUNDS} 轮规划上限：${verification.summary}`
+            : verification.summary,
         verification
       };
       this.pending.delete(submission.turnId);
@@ -260,13 +328,28 @@ export class UiChangeAgent {
       context: submission.observation
     };
     const repair = await this.runtime.invoke(repairRequest);
+    if (repair.kind === 'contextRequest') {
+      const response: AgentTurnResponse = {
+        kind: 'failed',
+        code: 'REPAIR_CONTEXT_REQUIRED',
+        message: `安全修正还需要额外页面上下文：${repair.contextRequest.reason}`
+      };
+      this.pending.delete(submission.turnId);
+      this.finals.set(submission.turnId, response);
+      return response;
+    }
     if (repair.kind === 'clarification') {
       const response: AgentTurnResponse = repair;
       this.pending.delete(submission.turnId);
       this.finals.set(submission.turnId, response);
       return response;
     }
-    this.pending.set(submission.turnId, { ...pending, plan: repair.plan, repairCount: 1 });
+    this.pending.set(submission.turnId, {
+      ...pending,
+      plan: repair.plan,
+      repairCount: 1,
+      planningRound: pending.planningRound + 1
+    });
     return { kind: 'execution', plan: repair.plan, repairCount: 1, verification };
   }
 }

@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react';
-import { Alert, Button, Card, Divider, Input, Modal, Space, Spin, Tag, Typography } from 'antd';
+import { Alert, Button, Input, Modal, Spin, Tooltip } from 'antd';
 import { useMachine } from '@xstate/react';
 import { storage } from 'wxt/utils/storage';
 import {
@@ -7,9 +7,11 @@ import {
   agentTurnResponseSchema,
   executionSubmissionSchema,
   startTurnRequestSchema,
+  type AgentTurnResponse,
   type ChangePlan,
   type ContentCommand,
   type ContentCommandResult,
+  type ContextScope,
   type SelectedContext
 } from '@ui-agent/contracts';
 import { onMessage, sendMessage } from '../../src/messaging';
@@ -23,6 +25,21 @@ browser.runtime.connect({ name: `ui-agent-editor:${editorClientId}` });
 
 interface ChatEntry { id: string; role: 'user' | 'assistant'; text: string }
 interface ActiveTurn { turnId: string; traceId: string }
+type IconName = 'sparkle' | 'target' | 'edit' | 'undo' | 'redo' | 'reset' | 'download' | 'arrow';
+
+function UiIcon({ name }: { name: IconName }) {
+  const paths: Record<IconName, React.ReactNode> = {
+    sparkle: <><path d="M12 2.8c.5 4.6 2.6 6.7 7.2 7.2-4.6.5-6.7 2.6-7.2 7.2-.5-4.6-2.6-6.7-7.2-7.2 4.6-.5 6.7-2.6 7.2-7.2Z" /><path d="M18.5 16.5c.2 1.8 1 2.6 2.7 2.8-1.7.2-2.5 1-2.7 2.7-.2-1.7-1-2.5-2.7-2.7 1.7-.2 2.5-1 2.7-2.8Z" /></>,
+    target: <><circle cx="12" cy="12" r="7" /><circle cx="12" cy="12" r="2.5" /><path d="M12 2v3M12 19v3M2 12h3M19 12h3" /></>,
+    edit: <><path d="M4 20h4l11-11a2.8 2.8 0 0 0-4-4L4 16v4Z" /><path d="m13.5 6.5 4 4" /></>,
+    undo: <><path d="m9 7-5 5 5 5" /><path d="M5 12h8a6 6 0 0 1 6 6" /></>,
+    redo: <><path d="m15 7 5 5-5 5" /><path d="M19 12h-8a6 6 0 0 0-6 6" /></>,
+    reset: <><path d="M4.8 8A8 8 0 1 1 4 15" /><path d="M4 4v5h5" /></>,
+    download: <><path d="M12 3v12" /><path d="m7.5 11 4.5 4.5 4.5-4.5" /><path d="M5 21h14" /></>,
+    arrow: <><path d="M12 19V5" /><path d="m6.5 10.5 5.5-5.5 5.5 5.5" /></>
+  };
+  return <svg className="ui-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">{paths[name]}</svg>;
+}
 
 async function command(value: ContentCommand): Promise<Extract<ContentCommandResult, { ok: true }>> {
   const result = await sendMessage('browserCommand', { editorClientId, command: value });
@@ -63,8 +80,8 @@ export function SidePanelApp() {
     catch (error) { fail(error); }
   };
 
-  const refreshContext = async (): Promise<SelectedContext> => {
-    const result = await command({ type: 'getContext' });
+  const refreshContext = async (scopes?: ContextScope[]): Promise<SelectedContext> => {
+    const result = await command({ type: 'getContext', scopes });
     if (!result.context) throw new Error('页面没有返回选区上下文');
     send({ type: 'HISTORY', canUndo: result.canUndo ?? false, canRedo: result.canRedo ?? false, selection: result.context });
     return result.context;
@@ -76,15 +93,26 @@ export function SidePanelApp() {
     setChat(entries => [...entries, { id: crypto.randomUUID(), role: 'user', text }]);
     setInstruction(''); send({ type: 'SUBMIT' });
     try {
-      const context = await refreshContext();
       const turn = { turnId: crypto.randomUUID(), traceId: crypto.randomUUID() };
-      const request = startTurnRequestSchema.parse({
-        protocolVersion: PROTOCOL_VERSION, editSessionId,
-        ...turn, instruction: text, context
-      });
-      const response = await fetch(`${serviceUrl}/v1/turns`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(request) });
-      if (!response.ok) throw new Error(`Agent Service 返回 ${response.status}`);
-      const result = agentTurnResponseSchema.parse(await response.json());
+      let scopes: ContextScope[] = [];
+      let context = await refreshContext(scopes);
+      let result: AgentTurnResponse;
+      while (true) {
+        const request = startTurnRequestSchema.parse({
+          protocolVersion: PROTOCOL_VERSION, editSessionId,
+          ...turn, instruction: text, context
+        });
+        const response = await fetch(`${serviceUrl}/v1/turns`, {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify(request)
+        });
+        if (!response.ok) throw new Error(`Agent Service 返回 ${response.status}`);
+        result = agentTurnResponseSchema.parse(await response.json());
+        if (result.kind !== 'contextRequest') break;
+        scopes = [...new Set([...scopes, ...result.contextRequest.scopes])];
+        context = await refreshContext(scopes);
+      }
       if (result.kind === 'clarification') {
         const message = result.clarification.question;
         setChat(entries => [...entries, { id: crypto.randomUUID(), role: 'assistant', text: message }]);
@@ -138,6 +166,9 @@ export function SidePanelApp() {
         send({ type: 'CLARIFY', message: outcome.clarification.question });
         return;
       }
+      if (outcome.kind === 'contextRequest') {
+        throw new Error(`执行后修正需要补充页面上下文：${outcome.contextRequest.reason}`);
+      }
       throw new Error(`[${outcome.code}] ${outcome.message}`);
     } catch (error) { fail(error); }
   };
@@ -152,36 +183,105 @@ export function SidePanelApp() {
 
   const exportScreenshot = async () => { try { await command({ type: 'exportScreenshot' }); } catch (error) { fail(error); } };
   const fail = (error: unknown) => send({ type: 'FAIL', error: error instanceof Error ? error.message : '操作失败' });
+  const selection = state.context.selection;
+  const examples = ['把按钮文案改成“确定”', '在右侧增加一个筛选项'];
 
   return (
     <main className="panel">
-      <div className="panel-header"><div><Typography.Title level={4}>UI 需求示意助手</Typography.Title><Typography.Text type="secondary">选择页面元素，然后描述想要的改动</Typography.Text></div><Tag color="blue">Demo</Tag></div>
-      <Card size="small" className="selection-card">
-        {state.context.selection ? <Space direction="vertical" size={2}><Typography.Text strong>当前选区</Typography.Text><Typography.Text>{state.context.selection.selected.tag} · {state.context.selection.selected.text || '无文本'}</Typography.Text><Typography.Text type="secondary">版本 {state.context.selection.selectionVersion} / 页面 {state.context.selection.pageRevision}</Typography.Text></Space> : <Typography.Text type="secondary">尚未选择页面区域</Typography.Text>}
-        <Button block type={state.matches('selecting') ? 'primary' : 'default'} onClick={startSelection} className="select-button">{state.matches('selecting') ? '请在页面中点击元素…' : '重新选择页面元素'}</Button>
-      </Card>
+      <header className="panel-header">
+        <div className="brand">
+          <span className="brand-mark"><UiIcon name="sparkle" /></span>
+          <div>
+            <div className="brand-title">UI 示意助手</div>
+            <div className="brand-subtitle">用对话快速表达页面改动</div>
+          </div>
+        </div>
+        <Tooltip title={`Agent Service：${serviceUrl}`}>
+          <span className="service-status"><i />已连接</span>
+        </Tooltip>
+      </header>
 
-      <section className="chat-list">
-        {chat.length === 0 && <div className="empty-tip">示例：在它右侧添加一个筛选项，包含“全部”“待审核”“已通过”</div>}
-        {chat.map(entry => <div key={entry.id} className={`bubble ${entry.role}`}>{entry.text}</div>)}
-        {busy && <div className="bubble assistant"><Spin size="small" /> {state.matches('verifying') ? '正在验证页面结果…' : state.matches('repairing') ? '正在生成一次安全修正…' : state.matches('applying') ? '正在执行受控页面修改…' : '正在生成受控修改方案…'}</div>}
+      <section className="workspace">
+        <div className="conversation-header">
+          <span>新建 UI 示意</span>
+          <span className="demo-badge">DEMO</span>
+        </div>
+
+        <div className={`selection-strip ${selection ? 'has-selection' : ''}`}>
+          <span className="selection-symbol"><UiIcon name="target" /></span>
+          <div className="selection-copy">
+            <span className="selection-label">{selection ? '当前选区' : '还没有选择区域'}</span>
+            <span className="selection-value">
+              {selection ? `${selection.selected.tag} · ${selection.selected.text || '无文本内容'}` : '先在页面中选择需要调整的元素'}
+            </span>
+          </div>
+          <Button
+            type="text"
+            className="selection-action"
+            icon={<UiIcon name="edit" />}
+            onClick={startSelection}
+          >
+            {state.matches('selecting') ? '选择中…' : selection ? '重选' : '选择'}
+          </Button>
+        </div>
+
+        <section className="chat-list">
+          {chat.length === 0 && (
+            <div className="empty-tip">
+              <span className="empty-icon"><UiIcon name="sparkle" /></span>
+              <strong>描述你想看到的页面效果</strong>
+              <p>选中页面元素后，可以修改内容、样式、布局，或添加新的基础组件。</p>
+              <div className="example-list">
+                {examples.map(example => <button key={example} type="button" onClick={() => setInstruction(example)}>{example}</button>)}
+              </div>
+            </div>
+          )}
+          {chat.map(entry => <div key={entry.id} className={`bubble ${entry.role}`}>{entry.text}</div>)}
+          {busy && (
+            <div className="bubble assistant working">
+              <Spin size="small" />
+              <span>{state.matches('verifying') ? '正在验证页面结果…' : state.matches('repairing') ? '正在生成安全修正…' : state.matches('applying') ? '正在更新页面示意…' : '正在理解并生成方案…'}</span>
+            </div>
+          )}
+          {state.context.message && <Alert className="inline-alert" type="info" showIcon message={state.context.message} closable />}
+          {state.context.error && <Alert className="inline-alert" type="error" showIcon message={state.context.error} closable onClose={() => send({ type: 'DISMISS' })} />}
+        </section>
+
+        <footer className="composer-shell">
+          <Input.TextArea
+            value={instruction}
+            variant="borderless"
+            onChange={event => setInstruction(event.target.value)}
+            autoSize={{ minRows: 2, maxRows: 5 }}
+            placeholder={selection ? '描述你想怎样修改这个区域…' : '请先选择一个页面区域'}
+            onPressEnter={event => { if (!event.shiftKey) { event.preventDefault(); void submit(); } }}
+          />
+          <div className="composer-toolbar">
+            <div className="history-actions">
+              <Tooltip title="撤销"><Button type="text" shape="circle" aria-label="撤销" disabled={!state.context.canUndo || busy} icon={<UiIcon name="undo" />} onClick={() => history('undo')} /></Tooltip>
+              <Tooltip title="重做"><Button type="text" shape="circle" aria-label="重做" disabled={!state.context.canRedo || busy} icon={<UiIcon name="redo" />} onClick={() => history('redo')} /></Tooltip>
+              <Tooltip title="恢复初始"><Button type="text" shape="circle" aria-label="恢复初始" disabled={!state.context.canUndo || busy} icon={<UiIcon name="reset" />} onClick={() => history('reset')} /></Tooltip>
+              <span className="toolbar-divider" />
+              <Tooltip title="导出当前可视区域"><Button type="text" shape="circle" aria-label="导出截图" disabled={busy} icon={<UiIcon name="download" />} onClick={exportScreenshot} /></Tooltip>
+            </div>
+            <Tooltip title={!selection ? '请先选择页面区域' : '生成示意'}>
+              <Button
+                className="send-button"
+                type="primary"
+                shape="circle"
+                aria-label="生成示意"
+                disabled={!selection || busy || !instruction.trim()}
+                loading={busy}
+                icon={!busy && <UiIcon name="arrow" />}
+                onClick={submit}
+              />
+            </Tooltip>
+          </div>
+        </footer>
       </section>
 
-      {state.context.message && <Alert type="info" showIcon message={state.context.message} closable />}
-      {state.context.error && <Alert type="error" showIcon message={state.context.error} closable onClose={() => send({ type: 'DISMISS' })} />}
-
-      <div className="composer"><Input.TextArea value={instruction} onChange={event => setInstruction(event.target.value)} autoSize={{ minRows: 2, maxRows: 5 }} placeholder="描述要添加、修改或删除的 UI…" onPressEnter={event => { if (!event.shiftKey) { event.preventDefault(); void submit(); } }} /><Button type="primary" disabled={!state.context.selection || busy || !instruction.trim()} loading={busy} onClick={submit}>生成示意</Button></div>
-      <Divider />
-      <Space wrap>
-        <Button disabled={!state.context.canUndo || busy} onClick={() => history('undo')}>撤销</Button>
-        <Button disabled={!state.context.canRedo || busy} onClick={() => history('redo')}>重做</Button>
-        <Button disabled={!state.context.canUndo || busy} onClick={() => history('reset')}>恢复初始</Button>
-        <Button disabled={busy} onClick={exportScreenshot}>导出截图</Button>
-      </Space>
-      <div className="service-url">Agent Service：{serviceUrl}</div>
-
       <Modal open={state.matches('confirming')} title="确认删除页面已有元素" okText="确认删除" okButtonProps={{ danger: true }} cancelText="取消" onCancel={() => send({ type: 'DISMISS' })} onOk={() => state.context.pendingPlan && apply(state.context.pendingPlan, true)}>
-        <p>拟删除：<strong>{state.context.selection?.selected.text || state.context.selection?.selected.tag}</strong></p>
+        <p>拟删除：<strong>{selection?.selected.text || selection?.selected.tag}</strong></p>
         <p>该操作只影响当前页面会话，之后仍可撤销。</p>
       </Modal>
     </main>

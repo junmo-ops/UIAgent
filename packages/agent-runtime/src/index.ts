@@ -60,6 +60,10 @@ const plannerRules = [
   '操作计划必须忠实实现 intent，不允许通过降低组件语义、改变位置或忽略状态来简化目标。',
   '把业务需求拆解为 Schema 中的通用 DOM 原子操作，不要创造订单行、筛选栏等业务操作类型。',
   'selectedTree 是选区局部结构；reusableTrees 是从选区内识别出的可复用结构模板。二者均可读取、复制和作为插入锚点。',
+  'currentContext.contextScopes 表示本轮已经提供的扩展上下文。基础上下文始终包含选中元素、最小子树和直接父级。',
+  '如果生成可靠计划确实需要尚未提供的相邻元素、可复用结构、详细布局事实、完整可见样式或本会话新增结构，返回 contextRequest，并只申请必要 scopes。',
+  '可申请的 scopes 为 siblings、visibleStyles、reusableStructures、elementFacts、sessionChanges。不得重复申请 currentContext.contextScopes 已包含的 scope。',
+  '缺少页面结构时优先申请 contextRequest；只有缺少用户业务意图或输入内容时才返回 clarification。',
   '只有 selected.id、addedTrees 和计划内结果可直接修改。相邻元素只能读取。',
   '有现成重复结构时优先使用 cloneSubtree，再用 resultRef 和 path 修改复制节点。锚点必须是能严格表达最终相对位置且符合 HTML 父子约束的实际节点。',
   '如果 selectedTree 或 reusableTrees 已明确包含重复结构，不要再向用户确认 DOM 结构，直接基于可见结构生成计划。',
@@ -277,7 +281,13 @@ export function createAgentRuntime(planner: Planner, observe?: RuntimeTraceObser
           type: 'turn.completed', timestamp: new Date().toISOString(), request: state.request,
           conversation: state.conversation, result, durationMs: Date.now() - startedAt
         });
-        return { result, conversation: [{ instruction: state.request.instruction, result }] };
+        return {
+          result,
+          // Context expansion is an internal planning step, not a user conversation turn.
+          conversation: result.kind === 'contextRequest'
+            ? []
+            : [{ instruction: state.request.instruction, result }]
+        };
       } catch (error) {
         emit({
           type: 'turn.failed', timestamp: new Date().toISOString(), request: state.request,

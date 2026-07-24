@@ -1,6 +1,7 @@
 import {
   PROTOCOL_VERSION,
   type ChangePlan,
+  type ContextScope,
   type DomTreeNode,
   type ElementRef,
   type ExecutionReceipt,
@@ -72,7 +73,7 @@ export class DomEngine {
     this.showOverlay(element);
   }
 
-  context(): SelectedContext {
+  context(scopes?: ContextScope[]): SelectedContext {
     if (!this.selected) throw new Error('请先选择页面元素');
     if (!this.selected.isConnected) {
       if (!this.lastContext) throw new Error('选中元素已失效，请重新选择');
@@ -89,16 +90,29 @@ export class DomEngine {
     const parentStyle = getComputedStyle(parent);
     const selectedStyle = getComputedStyle(this.selected);
     const visibleStyle = Object.fromEntries(styleProperties.map(name => [name, selectedStyle[name]]));
-    const treeBudget = { remaining: 80 };
+    const requestedScopes = new Set(scopes ?? [
+      'siblings', 'visibleStyles', 'reusableStructures', 'elementFacts', 'sessionChanges'
+    ] satisfies ContextScope[]);
+    const progressive = scopes !== undefined;
+    const treeBudget = { remaining: progressive ? 30 : 80 };
     const localScopeRoot = this.localScopeRoot(this.selected);
-    const reusableTrees = this.findReusableRoots(localScopeRoot)
-      .slice(0, 3)
-      .map(element => this.describeTree(element, 0, treeBudget));
-    const selectedTree = this.describeTree(localScopeRoot, 0, treeBudget);
-    const siblings = [...parent.children]
-      .filter(node => node !== this.selected && node instanceof HTMLElement && !node.hasAttribute('data-ui-agent-overlay'))
-      .slice(0, 8)
-      .map(node => this.describe(node as HTMLElement));
+    const reusableTrees = requestedScopes.has('reusableStructures')
+      ? this.findReusableRoots(localScopeRoot)
+        .slice(0, 3)
+        .map(element => this.describeTree(element, 0, treeBudget))
+      : [];
+    const selectedTree = this.describeTree(
+      progressive ? this.selected : localScopeRoot,
+      0,
+      treeBudget,
+      progressive ? 2 : 5
+    );
+    const siblings = requestedScopes.has('siblings') && !requestedScopes.has('elementFacts')
+      ? [...parent.children]
+        .filter(node => node !== this.selected && node instanceof HTMLElement && !node.hasAttribute('data-ui-agent-overlay'))
+        .slice(0, 8)
+        .map(node => this.describe(node as HTMLElement))
+      : [];
     this.lastContext = {
       protocolVersion: PROTOCOL_VERSION,
       selectionVersion: this.selectionVersion,
@@ -109,16 +123,23 @@ export class DomEngine {
       reusableTrees,
       parent: { tag: parent.tagName.toLowerCase(), display: parentStyle.display, flexDirection: parentStyle.flexDirection, gap: parentStyle.gap },
       siblings,
-      visibleStyle,
-      addedElements: [...this.addedIds]
-        .map(id => this.elements.get(id))
-        .filter((element): element is HTMLElement => Boolean(element?.isConnected))
-        .map(element => this.describe(element, element.getAttribute(ownAttribute) ?? undefined)),
-      addedTrees: [...this.addedIds]
-        .map(id => this.elements.get(id))
-        .filter((element): element is HTMLElement => Boolean(element?.isConnected) && element !== this.selected && treeBudget.remaining > 0)
-        .map(element => this.describeTree(element, 0, treeBudget)),
-      elementFacts: this.collectElementFacts(this.factScopeRoot(localScopeRoot))
+      visibleStyle: requestedScopes.has('visibleStyles') ? visibleStyle : {},
+      addedElements: requestedScopes.has('sessionChanges')
+        ? [...this.addedIds]
+          .map(id => this.elements.get(id))
+          .filter((element): element is HTMLElement => Boolean(element?.isConnected))
+          .map(element => this.describe(element, element.getAttribute(ownAttribute) ?? undefined))
+        : [],
+      addedTrees: requestedScopes.has('sessionChanges')
+        ? [...this.addedIds]
+          .map(id => this.elements.get(id))
+          .filter((element): element is HTMLElement => Boolean(element?.isConnected) && element !== this.selected && treeBudget.remaining > 0)
+          .map(element => this.describeTree(element, 0, treeBudget))
+        : [],
+      elementFacts: requestedScopes.has('elementFacts')
+        ? this.collectElementFacts(this.factScopeRoot(localScopeRoot))
+        : undefined,
+      contextScopes: [...requestedScopes]
     };
     return this.lastContext;
   }
@@ -258,7 +279,7 @@ export class DomEngine {
     return listItems.length > 1 ? [listItems.at(-1)!] : [];
   }
 
-  private describeTree(element: HTMLElement, depth: number, budget: { remaining: number }): DomTreeNode {
+  private describeTree(element: HTMLElement, depth: number, budget: { remaining: number }, maxDepth = 5): DomTreeNode {
     budget.remaining = Math.max(0, budget.remaining - 1);
     const attributes = Object.fromEntries(
       [...element.attributes]
@@ -276,11 +297,11 @@ export class DomEngine {
       .replace(/\s+/g, ' ')
       .trim();
     const children: DomTreeNode[] = [];
-    if (depth < 5) {
+    if (depth < maxDepth) {
       for (const child of [...element.children]) {
         if (budget.remaining <= 0) break;
         if (child instanceof HTMLElement && !child.hasAttribute('data-ui-agent-overlay')) {
-          children.push(this.describeTree(child, depth + 1, budget));
+          children.push(this.describeTree(child, depth + 1, budget, maxDepth));
         }
       }
     }
@@ -313,13 +334,24 @@ export class DomEngine {
           : undefined);
       const rect = element.getBoundingClientRect();
       const style = getComputedStyle(element);
+      const semanticRole = element.getAttribute('data-ui-component') ?? this.inferComponent(element);
+      const directText = [...element.childNodes]
+        .filter(node => node.nodeType === Node.TEXT_NODE)
+        .map(node => node.textContent ?? '')
+        .join(' ')
+        .replace(/\s+/g, ' ')
+        .trim();
+      const descriptiveText = directText
+        || (element.children.length === 0 || semanticRole
+          ? element.innerText || element.getAttribute('aria-label') || element.getAttribute('placeholder') || ''
+          : '');
       facts.push({
         id,
         tag: element.tagName.toLowerCase(),
         parentId: resolvedParentId,
         index: element.parentElement ? [...element.parentElement.children].indexOf(element) : 0,
-        semanticRole: element.getAttribute('data-ui-component') ?? this.inferComponent(element),
-        text: (element.innerText || element.getAttribute('aria-label') || element.getAttribute('placeholder') || '').trim().slice(0, 300),
+        semanticRole,
+        text: descriptiveText.trim().slice(0, 300),
         rect: { x: rect.x, y: rect.y, width: rect.width, height: rect.height },
         layout: {
           display: style.display,

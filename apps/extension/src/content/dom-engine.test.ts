@@ -40,6 +40,35 @@ function findTreeIdByText(
 describe('DomEngine generic operations', () => {
   afterEach(() => vi.unstubAllGlobals());
 
+  it('builds a minimal base context and adds requested scopes progressively', () => {
+    const document = installDom(`<!doctype html><html><body>
+      <div class="actions"><button data-ui-component="query-button"><span>查询</span></button><button>重置</button></div>
+    </body></html>`);
+    const engine = new DomEngine();
+    const button = document.querySelector('[data-ui-component="query-button"]') as unknown as HTMLElement;
+    engine.select(button);
+
+    const base = engine.context([]);
+    expect(base.contextScopes).toEqual([]);
+    expect(base.selectedTree.tag).toBe('button');
+    expect(base.selectedTree.children[0]?.text).toBe('查询');
+    expect(base.siblings).toEqual([]);
+    expect(base.visibleStyle).toEqual({});
+    expect(base.reusableTrees).toEqual([]);
+    expect(base.elementFacts).toBeUndefined();
+    expect(JSON.stringify(base).length).toBeLessThan(JSON.stringify(engine.context()).length);
+
+    const enriched = engine.context(['siblings', 'visibleStyles']);
+    expect(enriched.contextScopes).toEqual(['siblings', 'visibleStyles']);
+    expect(enriched.siblings).toHaveLength(1);
+    expect(enriched.visibleStyle).toHaveProperty('display');
+    expect(enriched.elementFacts).toBeUndefined();
+
+    const structural = engine.context(['siblings', 'elementFacts']);
+    expect(structural.siblings).toEqual([]);
+    expect(structural.elementFacts?.length).toBeGreaterThan(1);
+  });
+
   it('clones a table row, edits descendants through a result reference, and supports undo/redo', () => {
     const document = installDom(`<!doctype html><html><head><title>订单</title></head><body>
       <div class="table-wrapper"><table><tbody><tr class="order-row"><td><a href="#old">SO001</a></td><td>旧客户</td><td>¥ 100.00</td></tr></tbody></table></div>

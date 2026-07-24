@@ -59,7 +59,11 @@ export default defineContentScript({
           if (!target) throw new Error(`测试页不存在选区 ${command.testId}`);
           return { ok: true, context: engine.select(target), ...engine.historyState() } satisfies ContentCommandResult;
         }
-        if (command.type === 'getContext') return { ok: true, context: engine.context(), ...engine.historyState() } satisfies ContentCommandResult;
+        if (command.type === 'getContext') return {
+          ok: true,
+          context: engine.context(command.scopes),
+          ...engine.historyState()
+        } satisfies ContentCommandResult;
         if (command.type === 'applyPlan') {
           const plan = changePlanSchema.parse(command.plan);
           return { ok: true, receipt: engine.applyPlan(plan, command.confirmedExistingRemoval), ...engine.historyState() } satisfies ContentCommandResult;

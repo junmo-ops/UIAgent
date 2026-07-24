@@ -72,6 +72,91 @@ describe('UI Change Agent two-phase turn', () => {
   });
 });
 
+describe('UI Change Agent progressive context loop', () => {
+  it('requests missing context once and continues the same turn after enrichment', async () => {
+    let calls = 0;
+    const runtime: AgentRuntime = {
+      invoke: async () => {
+        calls += 1;
+        return calls === 1
+          ? {
+              kind: 'contextRequest',
+              contextRequest: {
+                protocolVersion: PROTOCOL_VERSION,
+                reason: '需要相邻元素确定插入位置',
+                scopes: ['siblings']
+              }
+            }
+          : { kind: 'plan', plan: plan() };
+      }
+    };
+    const agent = new UiChangeAgent(runtime);
+    const first = await agent.start({ ...request, context: { ...request.context, contextScopes: [] } });
+    expect(first).toMatchObject({
+      kind: 'contextRequest',
+      planningRound: 1,
+      contextRequest: { scopes: ['siblings'] }
+    });
+    await expect(agent.start({ ...request, context: { ...request.context, contextScopes: [] } }))
+      .resolves.toEqual(first);
+    expect(calls).toBe(1);
+
+    await expect(agent.start({
+      ...request,
+      context: { ...request.context, contextScopes: ['siblings'] }
+    })).resolves.toMatchObject({ kind: 'execution', plan: { planId: 'plan-1' } });
+    expect(calls).toBe(2);
+  });
+
+  it('stops when the planner repeats an already provided scope', async () => {
+    const runtime: AgentRuntime = {
+      invoke: async () => ({
+        kind: 'contextRequest',
+        contextRequest: {
+          protocolVersion: PROTOCOL_VERSION,
+          reason: '仍然申请相邻元素',
+          scopes: ['siblings']
+        }
+      })
+    };
+    const agent = new UiChangeAgent(runtime);
+    await expect(agent.start({
+      ...request,
+      context: { ...request.context, contextScopes: ['siblings'] }
+    })).resolves.toMatchObject({ kind: 'failed', code: 'CONTEXT_NO_PROGRESS' });
+  });
+
+  it('enforces five total planning rounds', async () => {
+    const scopes = ['siblings', 'visibleStyles', 'reusableStructures', 'elementFacts', 'sessionChanges'] as const;
+    let calls = 0;
+    const runtime: AgentRuntime = {
+      invoke: async () => ({
+        kind: 'contextRequest',
+        contextRequest: {
+          protocolVersion: PROTOCOL_VERSION,
+          reason: '继续补充上下文',
+          scopes: [scopes[calls++]!]
+        }
+      })
+    };
+    const agent = new UiChangeAgent(runtime);
+    const provided: (typeof scopes)[number][] = [];
+    for (let round = 1; round <= 4; round += 1) {
+      const response = await agent.start({
+        ...request,
+        context: { ...request.context, contextScopes: [...provided] }
+      });
+      expect(response).toMatchObject({ kind: 'contextRequest', planningRound: round });
+      if (response.kind === 'contextRequest') provided.push(...response.contextRequest.scopes);
+    }
+    await expect(agent.start({
+      ...request,
+      context: { ...request.context, contextScopes: provided }
+    })).resolves.toMatchObject({ kind: 'failed', code: 'CONTEXT_ROUND_LIMIT' });
+    expect(calls).toBe(5);
+  });
+});
+
 describe('verifyExecution', () => {
   it('rejects receipts for a different plan', () => {
     const changePlan = plan();

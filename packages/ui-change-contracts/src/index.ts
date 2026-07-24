@@ -44,6 +44,14 @@ export const domTreeNodeSchema: z.ZodType<DomTreeNode> = z.lazy(() => z.object({
   children: z.array(domTreeNodeSchema)
 }));
 
+export const contextScopeSchema = z.enum([
+  'siblings',
+  'visibleStyles',
+  'reusableStructures',
+  'elementFacts',
+  'sessionChanges'
+]);
+
 export const selectedContextSchema = z.object({
   protocolVersion: z.literal(PROTOCOL_VERSION),
   selectionVersion: z.number().int().nonnegative(),
@@ -57,7 +65,8 @@ export const selectedContextSchema = z.object({
   visibleStyle: z.record(z.string(), z.string()),
   addedElements: z.array(elementRefSchema),
   addedTrees: z.array(domTreeNodeSchema),
-  elementFacts: z.array(domElementFactSchema).max(120).optional()
+  elementFacts: z.array(domElementFactSchema).max(120).optional(),
+  contextScopes: z.array(contextScopeSchema).max(5).optional()
 });
 
 export const componentTypeSchema = z.enum([
@@ -183,9 +192,16 @@ export const clarificationSchema = z.object({
   question: z.string()
 });
 
+export const contextRequestSchema = z.object({
+  protocolVersion: z.literal(PROTOCOL_VERSION),
+  reason: z.string().min(1).max(500),
+  scopes: z.array(contextScopeSchema).min(1).max(5)
+});
+
 export const plannerResultSchema = z.discriminatedUnion('kind', [
   z.object({ kind: z.literal('plan'), plan: changePlanSchema.extend({ intent: uiIntentSchema }) }),
-  z.object({ kind: z.literal('clarification'), clarification: clarificationSchema })
+  z.object({ kind: z.literal('clarification'), clarification: clarificationSchema }),
+  z.object({ kind: z.literal('contextRequest'), contextRequest: contextRequestSchema })
 ]);
 
 export const startTurnRequestSchema = z.object({
@@ -238,6 +254,11 @@ export const verificationResultSchema = z.object({
 export const agentTurnResponseSchema = z.discriminatedUnion('kind', [
   z.object({ kind: z.literal('clarification'), clarification: clarificationSchema }),
   z.object({
+    kind: z.literal('contextRequest'),
+    contextRequest: contextRequestSchema,
+    planningRound: z.number().int().min(1).max(5)
+  }),
+  z.object({
     kind: z.literal('execution'),
     plan: changePlanSchema,
     repairCount: z.number().int().min(0).max(1),
@@ -254,6 +275,7 @@ export const agentTurnResponseSchema = z.discriminatedUnion('kind', [
 
 export type ElementRef = z.infer<typeof elementRefSchema>;
 export type DomElementFact = z.infer<typeof domElementFactSchema>;
+export type ContextScope = z.infer<typeof contextScopeSchema>;
 export type NodeTarget = z.infer<typeof nodeTargetSchema>;
 export type UiGoal = z.infer<typeof uiGoalSchema>;
 export type UiIntent = z.infer<typeof uiIntentSchema>;
@@ -261,6 +283,7 @@ export type SelectedContext = z.infer<typeof selectedContextSchema>;
 export type UIChangeOperation = z.infer<typeof uiChangeOperationSchema>;
 export type ChangePlan = z.infer<typeof changePlanSchema>;
 export type PlannerResult = z.infer<typeof plannerResultSchema>;
+export type ContextRequest = z.infer<typeof contextRequestSchema>;
 export type StartTurnRequest = z.infer<typeof startTurnRequestSchema>;
 export type ExecutionReceipt = z.infer<typeof executionReceiptSchema>;
 export type OperationReceipt = ExecutionReceipt['operations'][number];
@@ -291,7 +314,7 @@ export type ContentCommand =
   | { type: 'deactivateEditor' }
   | { type: 'startSelection' }
   | { type: 'selectFixture'; testId: string }
-  | { type: 'getContext' }
+  | { type: 'getContext'; scopes?: ContextScope[] }
   | { type: 'applyPlan'; plan: ChangePlan; confirmedExistingRemoval: boolean }
   | { type: 'undo' }
   | { type: 'redo' }
