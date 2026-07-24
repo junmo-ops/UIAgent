@@ -28,6 +28,12 @@ const styleProperties = [
   'padding', 'margin', 'border', 'borderRadius', 'width', 'height', 'gridTemplateColumns',
   'alignItems', 'justifyContent'
 ] as const;
+const appearanceStyleProperties = [
+  'color', 'backgroundColor', 'fontSize', 'fontWeight', 'fontFamily', 'lineHeight',
+  'letterSpacing', 'textDecoration', 'textAlign', 'verticalAlign', 'display',
+  'padding', 'margin', 'border', 'borderRadius', 'boxShadow', 'opacity',
+  'height', 'minHeight', 'minWidth'
+] as const;
 const safeContextAttributes = new Set([
   'aria-label', 'aria-selected', 'aria-expanded', 'aria-checked', 'aria-disabled', 'disabled', 'role', 'type',
   'placeholder', 'title', 'href', 'data-ui-component', 'data-ui-agent-variant',
@@ -73,7 +79,7 @@ export class DomEngine {
     this.showOverlay(element);
   }
 
-  context(scopes?: ContextScope[]): SelectedContext {
+  context(scopes?: ContextScope[], targetNodeIds: string[] = []): SelectedContext {
     if (!this.selected) throw new Error('请先选择页面元素');
     if (!this.selected.isConnected) {
       if (!this.lastContext) throw new Error('选中元素已失效，请重新选择');
@@ -96,6 +102,8 @@ export class DomEngine {
     const progressive = scopes !== undefined;
     const treeBudget = { remaining: progressive ? 30 : 80 };
     const localScopeRoot = this.localScopeRoot(this.selected);
+    const factScopeRoot = this.factScopeRoot(localScopeRoot);
+    const elementIndex = this.collectElementIndex(factScopeRoot);
     const reusableTrees = requestedScopes.has('reusableStructures')
       ? this.findReusableRoots(localScopeRoot)
         .slice(0, 3)
@@ -137,9 +145,14 @@ export class DomEngine {
           .map(element => this.describeTree(element, 0, treeBudget))
         : [],
       elementFacts: requestedScopes.has('elementFacts')
-        ? this.collectElementFacts(this.factScopeRoot(localScopeRoot))
+        ? this.collectElementFacts(factScopeRoot)
         : undefined,
-      contextScopes: [...requestedScopes]
+      contextScopes: [...requestedScopes],
+      elementIndex,
+      elementStyles: requestedScopes.has('visibleStyles') && targetNodeIds.length > 0
+        ? this.collectElementStyles(factScopeRoot, targetNodeIds)
+        : undefined,
+      contextTargetIds: [...new Set(targetNodeIds)].slice(0, 8)
     };
     return this.lastContext;
   }
@@ -372,6 +385,67 @@ export class DomEngine {
     return facts;
   }
 
+  private collectElementIndex(root: HTMLElement) {
+    const entries: NonNullable<SelectedContext['elementIndex']> = [];
+    const visit = (element: HTMLElement, parentId?: string) => {
+      if (entries.length >= 40) return;
+      const id = this.ensureId(element);
+      const semanticRole = element.getAttribute('data-ui-component') ?? this.inferComponent(element);
+      const directText = [...element.childNodes]
+        .filter(node => node.nodeType === Node.TEXT_NODE)
+        .map(node => node.textContent ?? '')
+        .join(' ')
+        .replace(/\s+/g, ' ')
+        .trim();
+      const text = directText
+        || (element.children.length === 0 || semanticRole
+          ? element.innerText || element.getAttribute('aria-label') || element.getAttribute('placeholder') || ''
+          : '');
+      const isSessionAdded = this.addedIds.has(id) || element.hasAttribute('data-ui-agent-added');
+      const interactive = ['A', 'BUTTON', 'INPUT', 'SELECT', 'TEXTAREA'].includes(element.tagName);
+      const meaningful = element === root
+        || element === this.selected
+        || Boolean(semanticRole)
+        || Boolean(directText)
+        || interactive
+        || isSessionAdded;
+      if (meaningful) {
+        entries.push({
+          id,
+          tag: element.tagName.toLowerCase(),
+          parentId,
+          semanticRole,
+          text: text.trim().slice(0, 120),
+          isSessionAdded
+        });
+      }
+      const indexedParentId = meaningful ? id : parentId;
+      for (const child of [...element.children]) {
+        if (child instanceof HTMLElement && !child.hasAttribute('data-ui-agent-overlay')) visit(child, indexedParentId);
+      }
+    };
+    visit(root);
+    for (const id of this.addedIds) {
+      const element = this.elements.get(id);
+      if (element?.isConnected && !root.contains(element) && entries.length < 60) visit(element);
+    }
+    return entries;
+  }
+
+  private collectElementStyles(root: HTMLElement, targetNodeIds: string[]) {
+    const requested = [...new Set(targetNodeIds)].slice(0, 8);
+    return requested.flatMap(id => {
+      const element = this.elements.get(id);
+      const allowed = element?.isConnected && (root.contains(element) || this.addedIds.has(id));
+      if (!element || !allowed) return [];
+      const computed = getComputedStyle(element);
+      return [{
+        id,
+        styles: Object.fromEntries(appearanceStyleProperties.map(property => [property, computed[property]]))
+      }];
+    });
+  }
+
   private describe(element: HTMLElement, knownId?: string): ElementRef {
     const rect = element.getBoundingClientRect();
     return {
@@ -394,6 +468,10 @@ export class DomEngine {
       case 'addComponent': return this.addAction(operation, resultRefs);
       case 'updateContent': return this.contentAction(this.resolve(operation.target, resultRefs), operation.text);
       case 'updateStyle': return this.styleAction(this.resolve(operation.target, resultRefs), operation.styles);
+      case 'copyStyles': return this.copyStylesAction(
+        this.resolve(operation.source, resultRefs),
+        this.resolve(operation.target, resultRefs)
+      );
       case 'removeElement': return this.removeAction(this.resolve(operation.target, resultRefs));
       case 'moveElement': return this.moveAction(this.resolve(operation.target, resultRefs), this.resolve(operation.anchor, resultRefs), operation.position);
       case 'setVisualState': return this.visualStateAction(operation, this.resolve(operation.target, resultRefs));
@@ -427,6 +505,12 @@ export class DomEngine {
           probe.style.setProperty(cssProperty, value);
           return node.style.getPropertyValue(cssProperty) === probe.style.getPropertyValue(cssProperty);
         });
+      }
+      if (operation.type === 'copyStyles') {
+        const sourceStyle = getComputedStyle(this.resolve(operation.source, resultRefs));
+        return appearanceStyleProperties.every(property =>
+          node.style.getPropertyValue(this.cssName(property)) === sourceStyle[property]
+        );
       }
       if (operation.type === 'removeElement') return !node.isConnected;
       if (operation.type === 'moveElement') return node.isConnected;
@@ -763,6 +847,11 @@ export class DomEngine {
     const previous = Object.fromEntries(Object.keys(styles).map(property => [property, node.style.getPropertyValue(this.cssName(property))]));
     const set = (values: Record<string, string>) => Object.entries(values).forEach(([property, value]) => node.style.setProperty(this.cssName(property), value));
     return { apply: () => set(styles), revert: () => set(previous) };
+  }
+
+  private copyStylesAction(source: HTMLElement, target: HTMLElement): Action {
+    const styles = Object.fromEntries(appearanceStyleProperties.map(property => [property, getComputedStyle(source)[property]]));
+    return this.styleAction(target, styles);
   }
 
   private removeAction(node: HTMLElement): Action {

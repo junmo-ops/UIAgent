@@ -47,6 +47,21 @@ async function command(value: ContentCommand): Promise<Extract<ContentCommandRes
   return result;
 }
 
+async function serviceResponseError(response: Response, fallback: string): Promise<Error> {
+  try {
+    const payload = await response.json() as { message?: unknown; traceId?: unknown };
+    const message = typeof payload.message === 'string' ? payload.message : undefined;
+    const traceId = typeof payload.traceId === 'string' ? payload.traceId : undefined;
+    return new Error([
+      `${fallback} ${response.status}`,
+      message,
+      traceId ? `traceId=${traceId}` : undefined
+    ].filter(Boolean).join('：'));
+  } catch {
+    return new Error(`${fallback} ${response.status}`);
+  }
+}
+
 export function SidePanelApp() {
   const [state, send] = useMachine(sessionMachine);
   const [instruction, setInstruction] = useState('');
@@ -80,8 +95,8 @@ export function SidePanelApp() {
     catch (error) { fail(error); }
   };
 
-  const refreshContext = async (scopes?: ContextScope[]): Promise<SelectedContext> => {
-    const result = await command({ type: 'getContext', scopes });
+  const refreshContext = async (scopes?: ContextScope[], targetNodeIds?: string[]): Promise<SelectedContext> => {
+    const result = await command({ type: 'getContext', scopes, targetNodeIds });
     if (!result.context) throw new Error('页面没有返回选区上下文');
     send({ type: 'HISTORY', canUndo: result.canUndo ?? false, canRedo: result.canRedo ?? false, selection: result.context });
     return result.context;
@@ -95,7 +110,8 @@ export function SidePanelApp() {
     try {
       const turn = { turnId: crypto.randomUUID(), traceId: crypto.randomUUID() };
       let scopes: ContextScope[] = [];
-      let context = await refreshContext(scopes);
+      let targetNodeIds: string[] = [];
+      let context = await refreshContext(scopes, targetNodeIds);
       let result: AgentTurnResponse;
       while (true) {
         const request = startTurnRequestSchema.parse({
@@ -107,11 +123,12 @@ export function SidePanelApp() {
           headers: { 'content-type': 'application/json' },
           body: JSON.stringify(request)
         });
-        if (!response.ok) throw new Error(`Agent Service 返回 ${response.status}`);
+        if (!response.ok) throw await serviceResponseError(response, 'Agent Service 返回');
         result = agentTurnResponseSchema.parse(await response.json());
         if (result.kind !== 'contextRequest') break;
         scopes = [...new Set([...scopes, ...result.contextRequest.scopes])];
-        context = await refreshContext(scopes);
+        targetNodeIds = [...new Set([...targetNodeIds, ...(result.contextRequest.targetNodeIds ?? [])])];
+        context = await refreshContext(scopes, targetNodeIds);
       }
       if (result.kind === 'clarification') {
         const message = result.clarification.question;
@@ -146,7 +163,7 @@ export function SidePanelApp() {
       const response = await fetch(`${serviceUrl}/v1/turns/${turn.turnId}/execution`, {
         method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(submission)
       });
-      if (!response.ok) throw new Error(`Agent Service 验证接口返回 ${response.status}`);
+      if (!response.ok) throw await serviceResponseError(response, 'Agent Service 验证接口返回');
       const outcome = agentTurnResponseSchema.parse(await response.json());
       if (outcome.kind === 'completed') {
         setChat(entries => [...entries, { id: crypto.randomUUID(), role: 'assistant', text: outcome.verification.summary }]);
@@ -188,23 +205,15 @@ export function SidePanelApp() {
 
   return (
     <main className="panel">
-      <header className="panel-header">
-        <div className="brand">
-          <span className="brand-mark"><UiIcon name="sparkle" /></span>
-          <div>
-            <div className="brand-title">UI 示意助手</div>
-            <div className="brand-subtitle">用对话快速表达页面改动</div>
-          </div>
-        </div>
-        <Tooltip title={`Agent Service：${serviceUrl}`}>
-          <span className="service-status"><i />已连接</span>
-        </Tooltip>
-      </header>
-
       <section className="workspace">
         <div className="conversation-header">
           <span>新建 UI 示意</span>
-          <span className="demo-badge">DEMO</span>
+          <div className="conversation-meta">
+            <Tooltip title={`Agent Service：${serviceUrl}`}>
+              <span className="service-status"><i />已连接</span>
+            </Tooltip>
+            <span className="demo-badge">DEMO</span>
+          </div>
         </div>
 
         <div className={`selection-strip ${selection ? 'has-selection' : ''}`}>
@@ -261,8 +270,7 @@ export function SidePanelApp() {
               <Tooltip title="撤销"><Button type="text" shape="circle" aria-label="撤销" disabled={!state.context.canUndo || busy} icon={<UiIcon name="undo" />} onClick={() => history('undo')} /></Tooltip>
               <Tooltip title="重做"><Button type="text" shape="circle" aria-label="重做" disabled={!state.context.canRedo || busy} icon={<UiIcon name="redo" />} onClick={() => history('redo')} /></Tooltip>
               <Tooltip title="恢复初始"><Button type="text" shape="circle" aria-label="恢复初始" disabled={!state.context.canUndo || busy} icon={<UiIcon name="reset" />} onClick={() => history('reset')} /></Tooltip>
-              <span className="toolbar-divider" />
-              <Tooltip title="导出当前可视区域"><Button type="text" shape="circle" aria-label="导出截图" disabled={busy} icon={<UiIcon name="download" />} onClick={exportScreenshot} /></Tooltip>
+              <Tooltip title="导出当前可视区域"><Button className="export-action" type="text" shape="circle" aria-label="导出截图" disabled={busy} icon={<UiIcon name="download" />} onClick={exportScreenshot} /></Tooltip>
             </div>
             <Tooltip title={!selection ? '请先选择页面区域' : '生成示意'}>
               <Button

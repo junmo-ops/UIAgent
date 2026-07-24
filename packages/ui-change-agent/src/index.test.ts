@@ -84,7 +84,8 @@ describe('UI Change Agent progressive context loop', () => {
               contextRequest: {
                 protocolVersion: PROTOCOL_VERSION,
                 reason: '需要相邻元素确定插入位置',
-                scopes: ['siblings']
+                scopes: ['visibleStyles'],
+                targetNodeIds: ['edit-link']
               }
             }
           : { kind: 'plan', plan: plan() };
@@ -95,7 +96,7 @@ describe('UI Change Agent progressive context loop', () => {
     expect(first).toMatchObject({
       kind: 'contextRequest',
       planningRound: 1,
-      contextRequest: { scopes: ['siblings'] }
+      contextRequest: { scopes: ['visibleStyles'], targetNodeIds: ['edit-link'] }
     });
     await expect(agent.start({ ...request, context: { ...request.context, contextScopes: [] } }))
       .resolves.toEqual(first);
@@ -103,7 +104,12 @@ describe('UI Change Agent progressive context loop', () => {
 
     await expect(agent.start({
       ...request,
-      context: { ...request.context, contextScopes: ['siblings'] }
+      context: {
+        ...request.context,
+        contextScopes: ['visibleStyles'],
+        contextTargetIds: ['edit-link'],
+        elementStyles: [{ id: 'edit-link', styles: { color: 'rgb(22, 119, 255)' } }]
+      }
     })).resolves.toMatchObject({ kind: 'execution', plan: { planId: 'plan-1' } });
     expect(calls).toBe(2);
   });

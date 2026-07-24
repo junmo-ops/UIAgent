@@ -35,6 +35,20 @@ export const domElementFactSchema = z.object({
   })
 });
 
+export const elementIndexEntrySchema = z.object({
+  id: z.string().min(1),
+  tag: z.string().min(1),
+  parentId: z.string().optional(),
+  semanticRole: z.string().optional(),
+  text: z.string().max(120),
+  isSessionAdded: z.boolean().optional()
+});
+
+export const elementStyleFactSchema = z.object({
+  id: z.string().min(1),
+  styles: z.record(z.string(), z.string())
+});
+
 export const domTreeNodeSchema: z.ZodType<DomTreeNode> = z.lazy(() => z.object({
   id: z.string().min(1),
   tag: z.string().min(1),
@@ -66,7 +80,10 @@ export const selectedContextSchema = z.object({
   addedElements: z.array(elementRefSchema),
   addedTrees: z.array(domTreeNodeSchema),
   elementFacts: z.array(domElementFactSchema).max(120).optional(),
-  contextScopes: z.array(contextScopeSchema).max(5).optional()
+  contextScopes: z.array(contextScopeSchema).max(5).optional(),
+  elementIndex: z.array(elementIndexEntrySchema).max(60).optional(),
+  elementStyles: z.array(elementStyleFactSchema).max(8).optional(),
+  contextTargetIds: z.array(z.string().min(1)).max(8).optional()
 });
 
 export const componentTypeSchema = z.enum([
@@ -114,6 +131,10 @@ export const uiGoalSchema = z.object({
     value: z.boolean(),
     options: z.array(z.string().max(80)).max(12).optional()
   }).optional(),
+  appearance: z.object({
+    mode: z.literal('match'),
+    source: nodeTargetSchema
+  }).optional(),
   preserveTexts: z.array(z.string().max(200)).max(12).default([])
 });
 
@@ -157,6 +178,11 @@ export const uiChangeOperationSchema = z.discriminatedUnion('type', [
     styles: z.record(z.string(), z.string())
   }),
   operationBase.extend({
+    type: z.literal('copyStyles'),
+    source: nodeTargetSchema,
+    target: nodeTargetSchema
+  }),
+  operationBase.extend({
     type: z.literal('removeElement'),
     target: nodeTargetSchema
   }),
@@ -195,7 +221,8 @@ export const clarificationSchema = z.object({
 export const contextRequestSchema = z.object({
   protocolVersion: z.literal(PROTOCOL_VERSION),
   reason: z.string().min(1).max(500),
-  scopes: z.array(contextScopeSchema).min(1).max(5)
+  scopes: z.array(contextScopeSchema).min(1).max(5),
+  targetNodeIds: z.array(z.string().min(1)).max(8).optional()
 });
 
 export const plannerResultSchema = z.discriminatedUnion('kind', [
@@ -275,6 +302,8 @@ export const agentTurnResponseSchema = z.discriminatedUnion('kind', [
 
 export type ElementRef = z.infer<typeof elementRefSchema>;
 export type DomElementFact = z.infer<typeof domElementFactSchema>;
+export type ElementIndexEntry = z.infer<typeof elementIndexEntrySchema>;
+export type ElementStyleFact = z.infer<typeof elementStyleFactSchema>;
 export type ContextScope = z.infer<typeof contextScopeSchema>;
 export type NodeTarget = z.infer<typeof nodeTargetSchema>;
 export type UiGoal = z.infer<typeof uiGoalSchema>;
@@ -314,7 +343,7 @@ export type ContentCommand =
   | { type: 'deactivateEditor' }
   | { type: 'startSelection' }
   | { type: 'selectFixture'; testId: string }
-  | { type: 'getContext'; scopes?: ContextScope[] }
+  | { type: 'getContext'; scopes?: ContextScope[]; targetNodeIds?: string[] }
   | { type: 'applyPlan'; plan: ChangePlan; confirmedExistingRemoval: boolean }
   | { type: 'undo' }
   | { type: 'redo' }

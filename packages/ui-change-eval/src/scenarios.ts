@@ -2,7 +2,7 @@ import { z } from 'zod';
 
 const operationTypeSchema = z.enum([
   'cloneSubtree', 'addComponent', 'updateContent', 'updateStyle',
-  'removeElement', 'moveElement', 'setVisualState'
+  'removeElement', 'moveElement', 'setVisualState', 'copyStyles'
 ]);
 
 export const challengeScenarioSchema = z.object({

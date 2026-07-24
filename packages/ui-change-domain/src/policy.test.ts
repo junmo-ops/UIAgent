@@ -97,6 +97,24 @@ describe('validatePlan', () => {
     };
     expect(() => validatePlan(removeChildPlan, componentContext)).toThrow(/仅允许读取/);
   });
+
+  it('allows a session-added target to copy styles from a read-only indexed source', () => {
+    const appearanceContext: SelectedContext = {
+      ...context,
+      selected: { ...context.selected, id: 'actions', tag: 'div', text: '编辑 删除' },
+      selectedTree: { id: 'actions', tag: 'div', text: '编辑 删除', attributes: {}, children: [] },
+      elementIndex: [
+        { id: 'edit-link', tag: 'a', text: '编辑' },
+        { id: 'delete-button', tag: 'button', text: '删除', isSessionAdded: true }
+      ]
+    };
+    expect(() => validatePlan(plan({
+      operationId: 'match',
+      type: 'copyStyles',
+      source: { kind: 'node', nodeId: 'edit-link' },
+      target: { kind: 'node', nodeId: 'delete-button' }
+    }), appearanceContext)).not.toThrow();
+  });
 });
 
 describe('compilePlanFromIntent', () => {

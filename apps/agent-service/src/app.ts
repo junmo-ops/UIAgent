@@ -16,7 +16,7 @@ export function createApp(env: NodeJS.ProcessEnv = process.env, providedLogStore
       name: env.MODEL_NAME
     }
   });
-  const runtime = createAgentRuntime(plannerFromEnvironment(env), logStore.observe);
+  const runtime = createAgentRuntime(plannerFromEnvironment(env, logStore.observe), logStore.observe);
   const agent = new UiChangeAgent(runtime);
   return new Hono()
     .use('*', cors({ origin: '*', allowHeaders: ['Content-Type', 'traceparent'] }))

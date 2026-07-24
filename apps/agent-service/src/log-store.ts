@@ -14,6 +14,16 @@ export interface TurnLogEntry {
   result?: PlannerResult;
   error?: string;
   durationMs?: number;
+  modelAttempts?: Array<{
+    timestamp: string;
+    status: 'completed' | 'failed';
+    attempt: number;
+    durationMs: number;
+    promptChars: number;
+    systemChars: number;
+    repairReason?: string;
+    error?: string;
+  }>;
   executions?: Array<{ timestamp: string; submission: ExecutionSubmission; response: AgentTurnResponse }>;
 }
 
@@ -63,6 +73,24 @@ export class TurnLogStore {
   }
 
   observe = (event: RuntimeTraceEvent): void => {
+    if (event.type === 'model.attempt.completed' || event.type === 'model.attempt.failed') {
+      const entry = [...this.entries].reverse().find(item => item.request.turnId === event.request.turnId);
+      if (!entry) return;
+      entry.modelAttempts ??= [];
+      entry.modelAttempts.push(redact({
+        timestamp: event.timestamp,
+        status: event.type === 'model.attempt.completed' ? 'completed' : 'failed',
+        attempt: event.attempt,
+        durationMs: event.durationMs,
+        promptChars: event.promptChars,
+        systemChars: event.systemChars,
+        repairReason: event.repairReason,
+        error: event.error
+      }) as NonNullable<TurnLogEntry['modelAttempts']>[number]);
+      entry.updatedAt = event.timestamp;
+      this.persist(entry);
+      return;
+    }
     if (event.type === 'turn.started') {
       const entry = redact({
         id: `log-${crypto.randomUUID()}`,

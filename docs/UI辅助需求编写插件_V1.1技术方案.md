@@ -363,7 +363,7 @@ selectionVersion     当前选区版本
 
 | 层级 | 内容 | 发送时机 |
 | --- | --- | --- |
-| L0 基础上下文 | 选中元素、最多两层最小子树、直接父级、页面与版本信息 | 每次首轮必带 |
+| L0 基础上下文 | 选中元素、最多两层最小子树、直接父级、轻量元素索引、页面与版本信息 | 每次首轮必带 |
 | L1 关系上下文 | `siblings`、`visibleStyles` | 模型需要判断相邻位置或详细样式时 |
 | L2 结构上下文 | `reusableStructures`、`elementFacts`、`sessionChanges` | 复制结构、复杂布局或引用本会话新增元素时 |
 
@@ -372,6 +372,7 @@ Planner 在页面事实不足时返回受控的 `ContextRequest`：
 ```text
 ContextRequest
 ├── reason：为什么当前事实不足
+├── targetNodeIds：需要详细信息的具体元素
 └── scopes：
     ├── siblings
     ├── visibleStyles
@@ -394,6 +395,18 @@ Side Panel 累积已申请的 scope，从 Content Script 重新采集，并使�
 - 请求 `elementFacts` 时不再重复发送 `siblings`；结构事实已经覆盖相邻关系。
 - 容器型 `elementFacts` 默认只保留直接文本；只有叶子或有明确组件语义的节点保留聚合可见文本，避免祖先节点逐层重复同一段内容。
 - 会话历史保存目标和结果，不复制旧页面快照。
+
+轻量 `elementIndex` 只保留有文本、组件语义、交互能力或本会话新增的节点，字段限定为 `id / tag / parentId / semanticRole / text / isSessionAdded`。模型因此可以先识别“编辑”“删除”等局部元素，再通过 `targetNodeIds` 精确申请这些元素的可见样式，无需把整个局部 DOM 升级成 `elementFacts`。
+
+当需求表达“与某元素外观一致”时，Planner 应在 GoalSpec 中声明：
+
+```text
+appearance:
+  mode: match
+  source: <NodeTarget>
+```
+
+领域编译器将其转换为通用 `copyStyles` 原子操作。执行器只从真实源元素读取固定白名单内的颜色、背景、字体、间距、边框、圆角、透明度和文字装饰，并支持事务撤销；模型不能在该路径中手写或猜测 CSS。
 
 ## 7. 执行后验证与自动修正
 
@@ -624,3 +637,13 @@ M3 后续仍需实现模型计划自动评分、Promptfoo 回归配置和失败�
 - UI Change Agent 增加最多 5 轮规划、幂等恢复、重复 scope 和无进展保护；执行后修正共享总轮数预算。
 - DOM 上下文对结构事实和相邻元素去重，并减少容器可见文本的逐层重复。
 - 单元测试覆盖基础上下文、按需扩展、重复请求幂等、无进展终止和五轮硬上限。
+
+### 2026-07-24：上下文与延迟优化
+
+- L0 增加经过语义过滤的轻量 `elementIndex`，使 Planner 不读取完整结构也能定位局部文本、交互元素和本轮新增元素。
+- `ContextRequest` 支持 `targetNodeIds`，`visibleStyles` 可以只返回指定元素的计算样式，避免为一个按钮发送几十个元素事实。
+- GoalSpec 增加通用 `appearance.match`，领域层编译为受控 `copyStyles`，消除模型猜测 CSS 及越过样式白名单的问题。
+- 渐进式循环的幂等键同时包含 scope 与目标元素 ID，允许在同一 scope 下继续申请新的具体元素。
+- DeepSeek 不设置客户端硬超时，避免供应商慢响应被提前中断；关闭 AI SDK 隐式网络重试，结构化输出上限保持 4096 Token。
+- AI SDK 7 的空结构化输出会被识别为可恢复错误，并进入一次显式修复调用；复杂多目标计划不会因为较低输出上限直接返回 500。
+- 本地日志新增模型 Attempt 明细，记录每次调用状态、耗时、Prompt/System 字符数、修复原因和错误，以区分供应商慢响应与 Schema 自动修复。

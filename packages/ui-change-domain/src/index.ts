@@ -58,6 +58,21 @@ function resultTarget(resultRef: string): NodeTarget {
   return { kind: 'result', resultRef, path: [] };
 }
 
+function targetsResultDescendant(operation: UIChangeOperation, resultRef: string): boolean {
+  const targets = operation.type === 'copyStyles'
+    ? [operation.target]
+    : operation.type === 'cloneSubtree' || operation.type === 'addComponent'
+      ? []
+      : operation.type === 'moveElement'
+        ? [operation.target]
+        : [operation.target];
+  return targets.some(target =>
+    target.kind === 'result'
+    && target.resultRef === resultRef
+    && target.path.length > 0
+  );
+}
+
 /**
  * Compiles declarative UI goals into an executable plan using a capability
  * registry. It never inspects natural-language keywords or business entities.
@@ -131,6 +146,36 @@ export function compilePlanFromIntent(
             props
           };
         }
+        for (let index = operations.length - 1; index >= 0; index -= 1) {
+          if (index !== producerIndex && targetsResultDescendant(operations[index]!, goal.resultRef!)) {
+            operations.splice(index, 1);
+          }
+        }
+      }
+    }
+
+    if (goal.appearance) {
+      const target = goal.target ?? (goal.resultRef ? resultTarget(goal.resultRef) : undefined);
+      if (!target) throw new IntentCompilationError(`外观目标 ${goal.goalId} 缺少 target 或 resultRef`);
+      for (let index = operations.length - 1; index >= 0; index -= 1) {
+        const operation = operations[index];
+        if (
+          operation?.type === 'updateStyle'
+          && JSON.stringify(operation.target) === JSON.stringify(target)
+        ) operations.splice(index, 1);
+      }
+      const alreadyCopiesAppearance = operations.some(operation =>
+        operation.type === 'copyStyles'
+        && JSON.stringify(operation.source) === JSON.stringify(goal.appearance?.source)
+        && JSON.stringify(operation.target) === JSON.stringify(target)
+      );
+      if (!alreadyCopiesAppearance) {
+        operations.push({
+          operationId: nextOperationId(goal.goalId, 'appearance'),
+          type: 'copyStyles',
+          source: goal.appearance.source,
+          target
+        });
       }
     }
 
@@ -241,6 +286,18 @@ export function intentFromOperations(summary: string, operations: UIChangeOperat
       });
       continue;
     }
+    if (operation.type === 'copyStyles') {
+      goals.push({
+        goalId: `goal-${operation.operationId}`,
+        action: 'update',
+        role: 'container',
+        target: operation.target,
+        content: {},
+        appearance: { mode: 'match', source: operation.source },
+        preserveTexts: []
+      });
+      continue;
+    }
     const target = operation.type === 'moveElement' ? operation.target : operation.target;
     goals.push({
       goalId: `goal-${operation.operationId}`,
@@ -315,6 +372,9 @@ function validateOperation(
   } else if (operation.type === 'updateStyle') {
     const onlyLayout = Object.keys(operation.styles).every(property => LAYOUT_STYLES.has(property));
     validateTarget(operation.target, nodes, resultRefs, onlyLayout ? layoutWritableNodeIds : contentWritableNodeIds);
+  } else if (operation.type === 'copyStyles') {
+    validateTarget(operation.source, nodes, resultRefs);
+    validateTarget(operation.target, nodes, resultRefs, contentWritableNodeIds);
   } else if (operation.type === 'updateContent' || operation.type === 'setVisualState') {
     validateTarget(operation.target, nodes, resultRefs, contentWritableNodeIds);
   } else {
@@ -350,6 +410,17 @@ export function validatePlan(plan: ChangePlan, context: SelectedContext): void {
     throw new PolicyError('页面或选区已变化，请重新生成方案');
   }
   const nodes = indexTrees([context.selectedTree, ...context.reusableTrees, ...context.addedTrees]);
+  for (const entry of context.elementIndex ?? []) {
+    if (!nodes.has(entry.id)) {
+      nodes.set(entry.id, {
+        id: entry.id,
+        tag: entry.tag,
+        text: entry.text,
+        attributes: entry.semanticRole ? { 'data-ui-component': entry.semanticRole } : {},
+        children: []
+      });
+    }
+  }
   for (const fact of context.elementFacts ?? []) {
     if (!nodes.has(fact.id)) {
       nodes.set(fact.id, {
@@ -363,7 +434,11 @@ export function validatePlan(plan: ChangePlan, context: SelectedContext): void {
   }
   const addedNodes = indexTrees(context.addedTrees);
   const selectedNodes = indexTrees([context.selectedTree]);
-  const directWritableNodeIds = new Set([context.selected.id, ...addedNodes.keys()]);
+  const directWritableNodeIds = new Set([
+    context.selected.id,
+    ...addedNodes.keys(),
+    ...(context.elementIndex ?? []).filter(entry => entry.isSessionAdded).map(entry => entry.id)
+  ]);
   const contentWritableNodeIds = new Set(directWritableNodeIds);
   const layoutWritableNodeIds = new Set([
     ...selectedNodes.keys(),

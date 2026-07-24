@@ -23,6 +23,7 @@ interface PlanningTurn {
   planningRound: number;
   providedScopeKey: string;
   requestedScopes: ContextScope[];
+  requestedTargetNodeIds: string[];
   response: Extract<AgentTurnResponse, { kind: 'contextRequest' }>;
 }
 
@@ -32,7 +33,8 @@ function scopeKey(request: StartTurnRequest): string {
   return [
     request.context.selectionVersion,
     request.context.pageRevision,
-    [...(request.context.contextScopes ?? [])].sort().join(',')
+    [...(request.context.contextScopes ?? [])].sort().join(','),
+    [...(request.context.contextTargetIds ?? [])].sort().join(',')
   ].join(':');
 }
 
@@ -241,19 +243,27 @@ export class UiChangeAgent {
       const nextScopeKey = scopeKey(request);
       if (nextScopeKey === planning.providedScopeKey) return planning.response;
       const provided = new Set(request.context.contextScopes ?? []);
-      if (!planning.requestedScopes.every(scope => provided.has(scope))) return planning.response;
+      const providedTargets = new Set(request.context.contextTargetIds ?? []);
+      if (
+        !planning.requestedScopes.every(scope => provided.has(scope))
+        || !planning.requestedTargetNodeIds.every(id => providedTargets.has(id))
+      ) return planning.response;
     }
     const planningRound = (planning?.planningRound ?? 0) + 1;
     const result = await this.runtime.invoke(request);
     if (result.kind === 'contextRequest') {
       const provided = new Set(request.context.contextScopes ?? []);
+      const providedTargets = new Set(request.context.contextTargetIds ?? []);
+      const requestedTargetNodeIds = [...new Set(result.contextRequest.targetNodeIds ?? [])]
+        .filter(id => !providedTargets.has(id));
       const requestedScopes = [...new Set(result.contextRequest.scopes)]
-        .filter(scope => !provided.has(scope));
-      if (requestedScopes.length === 0 || planningRound >= MAX_PLANNING_ROUNDS) {
+        .filter(scope => !provided.has(scope)
+          || (scope === 'visibleStyles' && requestedTargetNodeIds.length > 0));
+      if ((requestedScopes.length === 0 && requestedTargetNodeIds.length === 0) || planningRound >= MAX_PLANNING_ROUNDS) {
         const response: AgentTurnResponse = {
           kind: 'failed',
-          code: requestedScopes.length === 0 ? 'CONTEXT_NO_PROGRESS' : 'CONTEXT_ROUND_LIMIT',
-          message: requestedScopes.length === 0
+          code: requestedScopes.length === 0 && requestedTargetNodeIds.length === 0 ? 'CONTEXT_NO_PROGRESS' : 'CONTEXT_ROUND_LIMIT',
+          message: requestedScopes.length === 0 && requestedTargetNodeIds.length === 0
             ? 'Agent 重复申请已提供的页面上下文，已停止本轮规划'
             : `Agent 在 ${MAX_PLANNING_ROUNDS} 轮内仍无法生成可靠计划`
         };
@@ -263,7 +273,11 @@ export class UiChangeAgent {
       }
       const response: Extract<AgentTurnResponse, { kind: 'contextRequest' }> = {
         kind: 'contextRequest',
-        contextRequest: { ...result.contextRequest, scopes: requestedScopes },
+        contextRequest: {
+          ...result.contextRequest,
+          scopes: requestedScopes,
+          targetNodeIds: requestedTargetNodeIds
+        },
         planningRound
       };
       this.planning.set(request.turnId, {
@@ -271,6 +285,7 @@ export class UiChangeAgent {
         planningRound,
         providedScopeKey: scopeKey(request),
         requestedScopes,
+        requestedTargetNodeIds,
         response
       });
       return response;

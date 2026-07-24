@@ -25,6 +25,16 @@ describe('TurnLogStore', () => {
     const store = new TurnLogStore({ filePath, model: { mode: 'remote', provider: 'deepseek', name: 'deepseek-v4-flash' } });
     store.observe({ type: 'turn.started', timestamp: '2026-07-22T00:00:00.000Z', request, conversation: [] });
     store.observe({
+      type: 'model.attempt.failed',
+      timestamp: '2026-07-22T00:00:00.500Z',
+      request,
+      attempt: 1,
+      durationMs: 500,
+      promptChars: 1200,
+      systemChars: 9000,
+      error: 'schema mismatch'
+    });
+    store.observe({
       type: 'turn.completed', timestamp: '2026-07-22T00:00:01.000Z', request, conversation: [], durationMs: 1000,
       result: { kind: 'clarification', clarification: { protocolVersion: PROTOCOL_VERSION, reason: 'test', question: 'test' } }
     });
@@ -36,5 +46,13 @@ describe('TurnLogStore', () => {
     const reloaded = new TurnLogStore({ filePath });
     expect(reloaded.list()).toHaveLength(1);
     expect(reloaded.list()[0]).toMatchObject({ status: 'completed', editSessionId: 'session-log', durationMs: 1000 });
+    const detail = reloaded.get(reloaded.list()[0]!.id);
+    expect(detail?.modelAttempts).toEqual([expect.objectContaining({
+      status: 'failed',
+      attempt: 1,
+      durationMs: 500,
+      promptChars: 1200,
+      error: 'schema mismatch'
+    })]);
   });
 });

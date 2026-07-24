@@ -69,6 +69,48 @@ describe('DomEngine generic operations', () => {
     expect(structural.elementFacts?.length).toBeGreaterThan(1);
   });
 
+  it('indexes nearby elements cheaply, returns targeted styles, and copies appearance through a controlled operation', () => {
+    const document = installDom(`<!doctype html><html><body>
+      <div class="actions"><a style="color: rgb(22, 119, 255); font-size: 14px; text-decoration: underline">编辑</a><button>删除</button></div>
+    </body></html>`);
+    vi.stubGlobal('getComputedStyle', (element: HTMLElement) => new Proxy({}, {
+      get: (_target, property) => typeof property === 'string'
+        ? element.style.getPropertyValue(property.replace(/[A-Z]/g, value => `-${value.toLowerCase()}`))
+        : ''
+    }));
+    const engine = new DomEngine();
+    const button = document.querySelector('button') as unknown as HTMLElement;
+    const context = engine.select(button);
+    const edit = context.elementIndex?.find(entry => entry.text === '编辑');
+    expect(edit).toMatchObject({ tag: 'a', text: '编辑' });
+
+    const targeted = engine.context(['visibleStyles'], [edit!.id]);
+    expect(targeted.elementStyles).toEqual([expect.objectContaining({
+      id: edit!.id,
+      styles: expect.objectContaining({ color: 'rgb(22, 119, 255)', fontSize: '14px' })
+    })]);
+    expect(targeted.contextTargetIds).toEqual([edit!.id]);
+
+    const plan: ChangePlan = {
+      protocolVersion: PROTOCOL_VERSION,
+      planId: 'copy-appearance',
+      selectionVersion: context.selectionVersion,
+      pageRevision: context.pageRevision,
+      summary: '匹配编辑链接外观',
+      requiresConfirmation: false,
+      operations: [{
+        operationId: 'copy-style',
+        type: 'copyStyles',
+        source: { kind: 'node', nodeId: edit!.id },
+        target: { kind: 'node', nodeId: context.selected.id }
+      }]
+    };
+    const receipt = engine.applyPlan(plan, false);
+    expect(receipt).toMatchObject({ success: true, operations: [{ verified: true }] });
+    expect(button.style.color).toBe('rgb(22, 119, 255)');
+    expect(button.style.fontSize).toBe('14px');
+  });
+
   it('clones a table row, edits descendants through a result reference, and supports undo/redo', () => {
     const document = installDom(`<!doctype html><html><head><title>订单</title></head><body>
       <div class="table-wrapper"><table><tbody><tr class="order-row"><td><a href="#old">SO001</a></td><td>旧客户</td><td>¥ 100.00</td></tr></tbody></table></div>

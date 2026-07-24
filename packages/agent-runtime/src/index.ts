@@ -1,11 +1,12 @@
 import { createOpenAI } from '@ai-sdk/openai';
 import { Annotation, END, MemorySaver, START, StateGraph } from '@langchain/langgraph';
-import { generateText, NoObjectGeneratedError, Output } from 'ai';
+import { generateText, NoObjectGeneratedError, NoOutputGeneratedError, Output } from 'ai';
 import { z, ZodError } from 'zod';
 import {
   PROTOCOL_VERSION,
   plannerResultSchema,
   type ChangePlan,
+  type DomTreeNode,
   type PlannerResult,
   type StartTurnRequest,
   type UIChangeOperation,
@@ -48,6 +49,28 @@ export type RuntimeTraceEvent =
       conversation: ConversationTurn[];
       error: string;
       durationMs: number;
+    }
+  | {
+      type: 'model.attempt.completed';
+      timestamp: string;
+      request: StartTurnRequest;
+      attempt: number;
+      durationMs: number;
+      promptChars: number;
+      systemChars: number;
+      repairReason?: string;
+      error?: string;
+    }
+  | {
+      type: 'model.attempt.failed';
+      timestamp: string;
+      request: StartTurnRequest;
+      attempt: number;
+      durationMs: number;
+      promptChars: number;
+      systemChars: number;
+      repairReason?: string;
+      error?: string;
     };
 
 export type RuntimeTraceObserver = (event: RuntimeTraceEvent) => void;
@@ -60,7 +83,8 @@ const plannerRules = [
   '操作计划必须忠实实现 intent，不允许通过降低组件语义、改变位置或忽略状态来简化目标。',
   '把业务需求拆解为 Schema 中的通用 DOM 原子操作，不要创造订单行、筛选栏等业务操作类型。',
   'selectedTree 是选区局部结构；reusableTrees 是从选区内识别出的可复用结构模板。二者均可读取、复制和作为插入锚点。',
-  'currentContext.contextScopes 表示本轮已经提供的扩展上下文。基础上下文始终包含选中元素、最小子树和直接父级。',
+  'currentContext.contextScopes 表示本轮已经提供的扩展上下文。基础上下文始终包含选中元素、最小子树、直接父级和 elementIndex 轻量元素索引。',
+  'elementIndex 只用于识别局部元素及其 nodeId。需要某个具体元素的完整可见样式时，申请 visibleStyles，并在 contextRequest.targetNodeIds 中列出该元素 ID；不要为获取样式申请整个 elementFacts。',
   '如果生成可靠计划确实需要尚未提供的相邻元素、可复用结构、详细布局事实、完整可见样式或本会话新增结构，返回 contextRequest，并只申请必要 scopes。',
   '可申请的 scopes 为 siblings、visibleStyles、reusableStructures、elementFacts、sessionChanges。不得重复申请 currentContext.contextScopes 已包含的 scope。',
   '缺少页面结构时优先申请 contextRequest；只有缺少用户业务意图或输入内容时才返回 clarification。',
@@ -70,6 +94,7 @@ const plannerRules = [
   '用户要求随机生成、使用默认值或由你决定时，应自行生成合理的静态示例文案，不要继续追问字段值。',
   '组件角色由基础能力目录约束：button、text、link、input、select、checkboxGroup、radioGroup、tag、alert；结构复制使用 field、row 或 container 目标。',
   '组件的 label、placeholder、options、variant 和 state 必须同时写入 intent；执行操作中的 props 由目标编译器统一校准。',
+  '用户要求新元素或已有元素与另一个元素外观一致时，在对应 goal.appearance 中声明 mode=match 和 source；不要猜测或手写 CSS，领域编译器会生成受控 copyStyles 操作。',
   '不要通过向一个容器追加纯文本来伪造表格行、列表项或其他结构。',
   '不输出 HTML、JavaScript、选择器、网络请求、导航或事件处理器。',
   '删除已有选中元素时 requiresConfirmation 必须为 true。',
@@ -124,14 +149,65 @@ function createPlan(request: StartTurnRequest, operations: UIChangeOperation[], 
   return { kind: 'plan', plan: compilePlanFromIntent(plan, request.context) };
 }
 
+const MIN_NODE_ID_PREFIX_LENGTH = 8;
+
+function contextNodeIds(request: StartTurnRequest): string[] {
+  const ids = new Set<string>();
+  const visit = (node: DomTreeNode) => {
+    ids.add(node.id);
+    node.children.forEach(visit);
+  };
+  visit(request.context.selectedTree);
+  request.context.reusableTrees.forEach(visit);
+  request.context.addedTrees.forEach(visit);
+  request.context.elementIndex?.forEach(entry => ids.add(entry.id));
+  request.context.elementFacts?.forEach(entry => ids.add(entry.id));
+  return [...ids];
+}
+
+function resolveNodeId(reference: string, availableIds: string[]): string {
+  if (availableIds.includes(reference) || reference.length < MIN_NODE_ID_PREFIX_LENGTH) return reference;
+  const matches = availableIds.filter(id => id.startsWith(reference));
+  if (matches.length === 1) return matches[0]!;
+  if (matches.length > 1) {
+    throw new IntentCompilationError(`节点引用 ${reference} 匹配到多个局部元素，请使用完整 nodeId`);
+  }
+  return reference;
+}
+
+function normalizeNodeReferences<T>(value: T, availableIds: string[]): T {
+  if (Array.isArray(value)) {
+    return value.map(item => normalizeNodeReferences(item, availableIds)) as T;
+  }
+  if (!value || typeof value !== 'object') return value;
+  const record = value as Record<string, unknown>;
+  if (record.kind === 'node' && typeof record.nodeId === 'string') {
+    return { ...record, nodeId: resolveNodeId(record.nodeId, availableIds) } as T;
+  }
+  return Object.fromEntries(
+    Object.entries(record).map(([key, item]) => [key, normalizeNodeReferences(item, availableIds)])
+  ) as T;
+}
+
 /**
  * A model should not guess deep paths inside framework component DOM. When a
  * page explicitly exposes a semantic component template, collapse a fragile
  * clone-and-edit sequence into the controlled component macro.
  */
 export function compilePlannerResult(request: StartTurnRequest, result: PlannerResult): PlannerResult {
+  const availableIds = contextNodeIds(request);
+  if (result.kind === 'contextRequest') {
+    return {
+      ...result,
+      contextRequest: {
+        ...result.contextRequest,
+        targetNodeIds: result.contextRequest.targetNodeIds?.map(nodeId => resolveNodeId(nodeId, availableIds))
+      }
+    };
+  }
   if (result.kind !== 'plan') return result;
-  return { kind: 'plan', plan: compilePlanFromIntent(result.plan, request.context) };
+  const normalizedPlan = normalizeNodeReferences(result.plan, availableIds);
+  return { kind: 'plan', plan: compilePlanFromIntent(normalizedPlan, request.context) };
 }
 
 export class MockPlanner implements Planner {
@@ -195,19 +271,58 @@ export class MockPlanner implements Planner {
 
 export class AiSdkPlanner implements Planner {
   private readonly provider;
-  constructor(baseURL: string, apiKey: string, private readonly modelName: string) {
+  constructor(
+    baseURL: string,
+    apiKey: string,
+    private readonly modelName: string,
+    private readonly observe?: RuntimeTraceObserver
+  ) {
     this.provider = createOpenAI({ baseURL, apiKey });
   }
 
   async plan(request: StartTurnRequest, conversation: ConversationTurn[] = []): Promise<PlannerResult> {
-    const { output } = await generateText({
-      model: this.provider.chat(this.modelName),
-      output: Output.object({ schema: plannerResultSchema }),
-      system: plannerRules.join('\n'),
-      prompt: createPlannerPrompt(request, conversation)
+    const system = plannerRules.join('\n');
+    const prompt = createPlannerPrompt(request, conversation);
+    const startedAt = Date.now();
+    try {
+      const { output } = await generateText({
+        model: this.provider.chat(this.modelName),
+        output: Output.object({ schema: plannerResultSchema }),
+        maxRetries: 0,
+        system,
+        prompt
+      });
+      if (!output) throw new Error('模型没有返回结构化结果');
+      const result = compilePlannerResult(request, plannerResultSchema.parse(output));
+      this.traceModelAttempt('model.attempt.completed', request, 1, startedAt, prompt, system);
+      return result;
+    } catch (error) {
+      this.traceModelAttempt('model.attempt.failed', request, 1, startedAt, prompt, system, undefined, error);
+      throw error;
+    }
+  }
+
+  private traceModelAttempt(
+    type: 'model.attempt.completed' | 'model.attempt.failed',
+    request: StartTurnRequest,
+    attempt: number,
+    startedAt: number,
+    prompt: string,
+    system: string,
+    repairReason?: string,
+    error?: unknown
+  ) {
+    this.observe?.({
+      type,
+      timestamp: new Date().toISOString(),
+      request,
+      attempt,
+      durationMs: Date.now() - startedAt,
+      promptChars: prompt.length,
+      systemChars: system.length,
+      repairReason,
+      ...(error ? { error: error instanceof Error ? error.message : String(error) } : {})
     });
-    if (!output) throw new Error('模型没有返回结构化结果');
-    return compilePlannerResult(request, plannerResultSchema.parse(output));
   }
 }
 
@@ -219,41 +334,93 @@ export class AiSdkPlanner implements Planner {
 export class DeepSeekPlanner implements Planner {
   private readonly provider;
 
-  constructor(baseURL: string, apiKey: string, private readonly modelName: string) {
+  constructor(
+    baseURL: string,
+    apiKey: string,
+    private readonly modelName: string,
+    private readonly observe?: RuntimeTraceObserver
+  ) {
     this.provider = createOpenAI({ name: 'deepseek', baseURL, apiKey });
   }
 
   async plan(request: StartTurnRequest, conversation: ConversationTurn[] = []): Promise<PlannerResult> {
     try {
-      return await this.generatePlan(request, conversation);
+      return await this.generatePlan(request, conversation, undefined, 1);
     } catch (error) {
-      if (!NoObjectGeneratedError.isInstance(error) && !(error instanceof ZodError) && !(error instanceof IntentCompilationError)) throw error;
+      if (
+        !NoObjectGeneratedError.isInstance(error)
+        && !NoOutputGeneratedError.isInstance(error)
+        && !(error instanceof ZodError)
+        && !(error instanceof IntentCompilationError)
+      ) throw error;
       const reason = error instanceof IntentCompilationError
         ? `上一次 Intent 与操作计划不一致：${error.message}`
+        : NoOutputGeneratedError.isInstance(error)
+          ? '上一次响应没有生成可解析的输出。'
         : '上一次响应不是有效的目标 JSON。';
       return this.generatePlan(
         request,
         conversation,
-        `${reason} 请重新生成，确保每个 Goal 都有可执行操作，只返回一个符合 Schema 的 JSON 对象。`
+        `${reason} 请重新生成，确保每个 Goal 都有可执行操作，只返回一个符合 Schema 的 JSON 对象。`,
+        2
       );
     }
   }
 
-  private async generatePlan(request: StartTurnRequest, conversation: ConversationTurn[], repairInstruction?: string): Promise<PlannerResult> {
-    const { output } = await generateText({
-      model: this.provider.chat(this.modelName),
-      output: Output.json(),
-      maxOutputTokens: 4096,
-      system: [
-        ...plannerRules,
-        '必须只输出 JSON 对象，不要输出 Markdown、代码块或额外解释。',
-        `JSON Schema：${plannerJsonSchema}`,
-        ...(repairInstruction ? [repairInstruction] : [])
-      ].join('\n'),
-      prompt: createPlannerPrompt(request, conversation)
+  private async generatePlan(
+    request: StartTurnRequest,
+    conversation: ConversationTurn[],
+    repairInstruction?: string,
+    attempt = 1
+  ): Promise<PlannerResult> {
+    const system = [
+      ...plannerRules,
+      '必须只输出 JSON 对象，不要输出 Markdown、代码块或额外解释。',
+      `JSON Schema：${plannerJsonSchema}`,
+      ...(repairInstruction ? [repairInstruction] : [])
+    ].join('\n');
+    const prompt = createPlannerPrompt(request, conversation);
+    const startedAt = Date.now();
+    try {
+      const { output } = await generateText({
+        model: this.provider.chat(this.modelName),
+        output: Output.json(),
+        maxOutputTokens: 4096,
+        maxRetries: 0,
+        system,
+        prompt
+      });
+      if (!output) throw new Error('DeepSeek 没有返回 JSON 结果');
+      const result = compilePlannerResult(request, plannerResultSchema.parse(output));
+      this.traceModelAttempt('model.attempt.completed', request, attempt, startedAt, prompt, system, repairInstruction);
+      return result;
+    } catch (error) {
+      this.traceModelAttempt('model.attempt.failed', request, attempt, startedAt, prompt, system, repairInstruction, error);
+      throw error;
+    }
+  }
+
+  private traceModelAttempt(
+    type: 'model.attempt.completed' | 'model.attempt.failed',
+    request: StartTurnRequest,
+    attempt: number,
+    startedAt: number,
+    prompt: string,
+    system: string,
+    repairReason?: string,
+    error?: unknown
+  ) {
+    this.observe?.({
+      type,
+      timestamp: new Date().toISOString(),
+      request,
+      attempt,
+      durationMs: Date.now() - startedAt,
+      promptChars: prompt.length,
+      systemChars: system.length,
+      repairReason,
+      ...(error ? { error: error instanceof Error ? error.message : String(error) } : {})
     });
-    if (!output) throw new Error('DeepSeek 没有返回 JSON 结果');
-    return compilePlannerResult(request, plannerResultSchema.parse(output));
   }
 }
 
@@ -312,13 +479,16 @@ export function createAgentRuntime(planner: Planner, observe?: RuntimeTraceObser
   };
 }
 
-export function plannerFromEnvironment(env: NodeJS.ProcessEnv = process.env): Planner {
+export function plannerFromEnvironment(
+  env: NodeJS.ProcessEnv = process.env,
+  observe?: RuntimeTraceObserver
+): Planner {
   if (env.MODEL_MODE !== 'remote') return new MockPlanner();
   if (!env.MODEL_BASE_URL || !env.MODEL_API_KEY || !env.MODEL_NAME) {
     throw new Error('MODEL_MODE=remote 时必须设置 MODEL_BASE_URL、MODEL_API_KEY 和 MODEL_NAME');
   }
   if (env.MODEL_PROVIDER === 'deepseek') {
-    return new DeepSeekPlanner(env.MODEL_BASE_URL, env.MODEL_API_KEY, env.MODEL_NAME);
+    return new DeepSeekPlanner(env.MODEL_BASE_URL, env.MODEL_API_KEY, env.MODEL_NAME, observe);
   }
-  return new AiSdkPlanner(env.MODEL_BASE_URL, env.MODEL_API_KEY, env.MODEL_NAME);
+  return new AiSdkPlanner(env.MODEL_BASE_URL, env.MODEL_API_KEY, env.MODEL_NAME, observe);
 }

@@ -61,7 +61,7 @@ export default defineContentScript({
         }
         if (command.type === 'getContext') return {
           ok: true,
-          context: engine.context(command.scopes),
+          context: engine.context(command.scopes, command.targetNodeIds),
           ...engine.historyState()
         } satisfies ContentCommandResult;
         if (command.type === 'applyPlan') {

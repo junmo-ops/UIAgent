@@ -1,6 +1,15 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { PROTOCOL_VERSION, type StartTurnRequest } from '@ui-agent/contracts';
-import { compilePlannerResult, createAgentRuntime, DeepSeekPlanner, MockPlanner, type ConversationTurn, type Planner } from './index';
+import { validatePlan } from '@ui-agent/domain';
+import {
+  compilePlannerResult,
+  createAgentRuntime,
+  DeepSeekPlanner,
+  MockPlanner,
+  type ConversationTurn,
+  type Planner,
+  type RuntimeTraceEvent
+} from './index';
 
 const request: StartTurnRequest = {
   protocolVersion: PROTOCOL_VERSION,
@@ -36,6 +45,7 @@ describe('DeepSeekPlanner', () => {
   afterEach(() => vi.unstubAllGlobals());
 
   it('uses DeepSeek JSON Object mode and validates the result locally', async () => {
+    const traces: RuntimeTraceEvent[] = [];
     const result = {
       kind: 'plan',
       plan: {
@@ -75,14 +85,285 @@ describe('DeepSeekPlanner', () => {
     });
     vi.stubGlobal('fetch', fetchMock);
 
-    await expect(new DeepSeekPlanner('https://api.deepseek.com', 'test-key', 'deepseek-v4-flash').plan(request))
+    await expect(new DeepSeekPlanner(
+      'https://api.deepseek.com',
+      'test-key',
+      'deepseek-v4-flash',
+      event => traces.push(event)
+    ).plan(request))
       .resolves.toEqual(result);
     expect(fetchMock).toHaveBeenCalledOnce();
     expect(String(fetchMock.mock.calls[0]?.[0])).toBe('https://api.deepseek.com/chat/completions');
+    expect(traces).toEqual([expect.objectContaining({
+      type: 'model.attempt.completed',
+      attempt: 1,
+      promptChars: expect.any(Number),
+      systemChars: expect.any(Number)
+    })]);
+  });
+
+  it('retries once when AI SDK reports an empty structured output', async () => {
+    const traces: RuntimeTraceEvent[] = [];
+    const validResult = {
+      kind: 'plan',
+      plan: {
+        protocolVersion: PROTOCOL_VERSION,
+        planId: 'plan-after-empty-output',
+        selectionVersion: 1,
+        pageRevision: 0,
+        summary: '新增两个筛选项',
+        intent: {
+          summary: '新增两个筛选项',
+          goals: [{
+            goalId: 'source-filter',
+            action: 'create',
+            role: 'select',
+            resultRef: 'source',
+            content: { label: '订单来源' },
+            placement: {
+              anchor: { kind: 'node', nodeId: 'selected' },
+              relation: 'after',
+              strict: true,
+              sameRow: true
+            },
+            preserveTexts: []
+          }]
+        },
+        requiresConfirmation: false,
+        operations: [{
+          operationId: 'add-source',
+          type: 'addComponent',
+          anchor: { kind: 'node', nodeId: 'selected' },
+          component: 'select',
+          position: 'after',
+          resultRef: 'source',
+          props: { label: '订单来源' }
+        }]
+      }
+    };
+    let callCount = 0;
+    const fetchMock = vi.fn(async (_input: string | URL | Request, init?: RequestInit) => {
+      callCount += 1;
+      const body = JSON.parse(String(init?.body));
+      expect(body.max_tokens).toBe(4096);
+      const content = callCount === 1 ? '' : JSON.stringify(validResult);
+      return new Response(JSON.stringify({
+        id: `chatcmpl-${callCount}`,
+        object: 'chat.completion',
+        created: 0,
+        model: 'deepseek-v4-flash',
+        choices: [{ index: 0, message: { role: 'assistant', content }, finish_reason: callCount === 1 ? 'length' : 'stop' }],
+        usage: { prompt_tokens: 10, completion_tokens: 10, total_tokens: 20 }
+      }), { status: 200, headers: { 'content-type': 'application/json' } });
+    });
+    vi.stubGlobal('fetch', fetchMock);
+
+    await expect(new DeepSeekPlanner(
+      'https://api.deepseek.com',
+      'test-key',
+      'deepseek-v4-flash',
+      event => traces.push(event)
+    ).plan(request)).resolves.toMatchObject(validResult);
+
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    expect(traces).toEqual([
+      expect.objectContaining({ type: 'model.attempt.failed', attempt: 1, error: 'No output generated.' }),
+      expect.objectContaining({
+        type: 'model.attempt.completed',
+        attempt: 2,
+        repairReason: expect.stringContaining('没有生成可解析的输出')
+      })
+    ]);
+  });
+});
+
+describe('model node reference normalization', () => {
+  const fullAnchorId = 'el-9cb3bba2-623f-4d86-a86e-90e54ec233f0';
+  const fullSourceId = 'el-686cb5f8-2022-48d6-8d0e-4fbdee2f363a';
+
+  const referenceRequest: StartTurnRequest = {
+    ...request,
+    context: {
+      ...request.context,
+      selected: { ...request.context.selected, id: 'selected-cell', tag: 'td', text: '详情 编辑' },
+      selectedTree: {
+        id: 'selected-cell',
+        tag: 'td',
+        text: '',
+        attributes: {},
+        children: [{
+          id: fullAnchorId,
+          tag: 'div',
+          text: '',
+          attributes: {},
+          children: [{
+            id: fullSourceId,
+            tag: 'a',
+            text: '编辑',
+            attributes: {},
+            children: []
+          }]
+        }]
+      },
+      elementIndex: [
+        { id: fullAnchorId, tag: 'div', text: '' },
+        { id: fullSourceId, tag: 'a', text: '编辑' }
+      ]
+    }
+  };
+
+  it('resolves a unique model-truncated node ID before intent compilation', () => {
+    const modelResult = {
+      kind: 'plan' as const,
+      plan: {
+        protocolVersion: PROTOCOL_VERSION,
+        planId: 'truncated-node-plan',
+        selectionVersion: 1,
+        pageRevision: 0,
+        summary: '在编辑右边增加删除',
+        requiresConfirmation: false,
+        intent: {
+          summary: '在编辑右边增加删除',
+          goals: [{
+            goalId: 'create-delete',
+            action: 'create' as const,
+            role: 'link' as const,
+            resultRef: 'delete-link',
+            content: { text: '删除' },
+            placement: {
+              anchor: { kind: 'node' as const, nodeId: 'el-9cb3bba2' },
+              relation: 'after' as const,
+              strict: true,
+              sameRow: true
+            },
+            appearance: {
+              mode: 'match' as const,
+              source: { kind: 'node' as const, nodeId: 'el-686cb5f8' }
+            },
+            preserveTexts: []
+          }]
+        },
+        operations: [{
+          operationId: 'add-delete',
+          type: 'addComponent' as const,
+          anchor: { kind: 'node' as const, nodeId: 'el-9cb3bba2' },
+          component: 'link' as const,
+          position: 'after' as const,
+          resultRef: 'delete-link',
+          props: { text: '删除' }
+        }, {
+          operationId: 'fragile-content',
+          type: 'updateContent' as const,
+          target: { kind: 'result' as const, resultRef: 'delete-link', path: [0] },
+          text: '删除'
+        }, {
+          operationId: 'fragile-appearance',
+          type: 'copyStyles' as const,
+          source: { kind: 'node' as const, nodeId: 'el-686cb5f8' },
+          target: { kind: 'result' as const, resultRef: 'delete-link', path: [0] }
+        }]
+      }
+    };
+
+    const normalized = compilePlannerResult(referenceRequest, modelResult);
+    expect(normalized).toMatchObject({
+      kind: 'plan',
+      plan: {
+        operations: [
+          { type: 'addComponent', anchor: { kind: 'node', nodeId: fullAnchorId } },
+          { type: 'copyStyles', source: { kind: 'node', nodeId: fullSourceId } }
+        ]
+      }
+    });
+    if (normalized.kind === 'plan') {
+      expect(normalized.plan.operations).toHaveLength(2);
+      expect(() => validatePlan(normalized.plan, referenceRequest.context)).not.toThrow();
+    }
+  });
+
+  it('rejects an ambiguous truncated node ID instead of widening permissions', () => {
+    const ambiguousRequest: StartTurnRequest = {
+      ...referenceRequest,
+      context: {
+        ...referenceRequest.context,
+        elementIndex: [
+          ...(referenceRequest.context.elementIndex ?? []),
+          { id: 'el-9cb3bba2-other-node', tag: 'div', text: '另一个元素' }
+        ]
+      }
+    };
+    const modelResult = {
+      kind: 'contextRequest' as const,
+      contextRequest: {
+        protocolVersion: PROTOCOL_VERSION,
+        reason: '读取目标样式',
+        scopes: ['visibleStyles' as const],
+        targetNodeIds: ['el-9cb3bba2']
+      }
+    };
+
+    expect(() => compilePlannerResult(ambiguousRequest, modelResult)).toThrow(/匹配到多个局部元素/);
   });
 });
 
 describe('intent-driven plan compilation', () => {
+  it('compiles appearance matching into a controlled style copy instead of model-authored CSS', () => {
+    const appearanceRequest: StartTurnRequest = {
+      ...request,
+      context: {
+        ...request.context,
+        elementIndex: [
+          { id: 'edit-link', tag: 'a', text: '编辑' },
+          { id: 'delete-button', tag: 'button', text: '删除', isSessionAdded: true }
+        ]
+      }
+    };
+    const modelResult = {
+      kind: 'plan' as const,
+      plan: {
+        protocolVersion: PROTOCOL_VERSION,
+        planId: 'appearance-plan',
+        selectionVersion: 1,
+        pageRevision: 0,
+        summary: '删除按钮匹配编辑外观',
+        requiresConfirmation: false,
+        intent: {
+          summary: '删除按钮匹配编辑外观',
+          goals: [{
+            goalId: 'match-appearance',
+            action: 'update' as const,
+            role: 'button' as const,
+            target: { kind: 'node' as const, nodeId: 'delete-button' },
+            content: {},
+            appearance: {
+              mode: 'match' as const,
+              source: { kind: 'node' as const, nodeId: 'edit-link' }
+            },
+            preserveTexts: []
+          }]
+        },
+        operations: [{
+          operationId: 'guessed-css',
+          type: 'updateStyle' as const,
+          target: { kind: 'node' as const, nodeId: 'delete-button' },
+          styles: { cursor: 'pointer', background: 'transparent' }
+        }]
+      }
+    };
+
+    const normalized = compilePlannerResult(appearanceRequest, modelResult);
+    expect(normalized).toMatchObject({
+      kind: 'plan',
+      plan: {
+        operations: [{
+          type: 'copyStyles',
+          source: { kind: 'node', nodeId: 'edit-link' },
+          target: { kind: 'node', nodeId: 'delete-button' }
+        }]
+      }
+    });
+  });
+
   it('compiles a semantic goal into a controlled component capability', () => {
     const formRequest: StartTurnRequest = {
       ...request,
