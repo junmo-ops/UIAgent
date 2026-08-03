@@ -42,7 +42,7 @@ describe('DomEngine generic operations', () => {
 
   it('builds a minimal base context and adds requested scopes progressively', () => {
     const document = installDom(`<!doctype html><html><body>
-      <div class="actions"><button data-ui-component="query-button"><span>查询</span></button><button>重置</button></div>
+      <div class="actions"><button data-ui-source-id="source-42" data-ui-component="query-button"><span>查询</span></button><button>重置</button></div>
     </body></html>`);
     const engine = new DomEngine();
     const button = document.querySelector('[data-ui-component="query-button"]') as unknown as HTMLElement;
@@ -50,7 +50,9 @@ describe('DomEngine generic operations', () => {
 
     const base = engine.context([]);
     expect(base.contextScopes).toEqual([]);
+    expect(base.selected.sourceId).toBe('source-42');
     expect(base.selectedTree.tag).toBe('button');
+    expect(base.selectedTree.attributes['data-ui-source-id']).toBe('source-42');
     expect(base.selectedTree.children[0]?.text).toBe('查询');
     expect(base.siblings).toEqual([]);
     expect(base.visibleStyle).toEqual({});

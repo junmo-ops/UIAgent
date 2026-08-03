@@ -22,3 +22,8 @@ export function pageInjectionIssue(url?: string): PageInjectionIssue | undefined
 export function pageInjectionError(url?: string): string | undefined {
   return pageInjectionIssue(url)?.message;
 }
+
+export function isLocalWorkspacePreviewUrl(url?: string): boolean {
+  if (!url) return false;
+  return /^http:\/\/(?:127\.0\.0\.1|localhost):\d+\/workspaces\/[0-9a-f-]{36}\/preview\/?(?:[?#].*)?$/i.test(url);
+}

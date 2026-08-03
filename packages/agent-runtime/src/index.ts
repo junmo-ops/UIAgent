@@ -492,3 +492,35 @@ export function plannerFromEnvironment(
   }
   return new AiSdkPlanner(env.MODEL_BASE_URL, env.MODEL_API_KEY, env.MODEL_NAME, observe);
 }
+
+export {
+  SourceEditingAgent,
+  sourceEditingAgentFromEnvironment,
+  type SourceAgentTraceStep,
+  type SourceConversationTurn,
+  type SourceDecisionMaker,
+  type SourceFileTools
+} from './source-agent';
+export {
+  type CodingAgentCheckpoint,
+  type CodingAgentConversationTurn,
+  type CodingAgentEvent,
+  type CodingAgentObserver,
+  type CodingAgentPort,
+  type CodingAgentRunResult,
+  type CodingAgentStep,
+  type CodingAgentTurn,
+  type CodingWorkspaceTools
+} from './coding-agent-port';
+export {
+  LegacyCodingAgentAdapter,
+  codingAgentPortFromEnvironment
+} from './legacy-coding-agent-adapter';
+export {
+  ClineCodingAgentAdapter,
+  clineCodingAgentFromEnvironment,
+  type ClineAgentFactory,
+  type ClineAgentFactoryInput,
+  type ClineAgentInstance,
+  type ClineCodingAgentOptions
+} from './cline-coding-agent-adapter';

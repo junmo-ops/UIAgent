@@ -25,4 +25,10 @@ describe('EditorTabRegistry', () => {
     expect(registry.removeTab(11).sort()).toEqual(['editor-a', 'editor-b']);
     expect(registry.resolve('editor-a')).toBeUndefined();
   });
+
+  it('waits for an asynchronous side-panel binding', async () => {
+    const registry = new EditorTabRegistry();
+    setTimeout(() => registry.bind('editor-a', 11), 10);
+    await expect(registry.waitFor('editor-a', 100)).resolves.toBe(11);
+  });
 });

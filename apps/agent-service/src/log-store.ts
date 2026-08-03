@@ -1,7 +1,20 @@
 import { appendFileSync, existsSync, mkdirSync, readFileSync, renameSync, statSync, writeFileSync } from 'node:fs';
 import { dirname, resolve } from 'node:path';
-import type { AgentTurnResponse, ExecutionSubmission, PlannerResult, StartTurnRequest } from '@ui-agent/contracts';
-import type { ConversationTurn, RuntimeTraceEvent } from '@ui-agent/agent-runtime';
+import type {
+  AgentTurnResponse,
+  ExecutionSubmission,
+  PlannerResult,
+  SourceTurnRequest,
+  SourceTurnResponse,
+  StartTurnRequest
+} from '@ui-agent/contracts';
+import type {
+  ConversationTurn,
+  CodingAgentStep,
+  CodingAgentCheckpoint,
+  RuntimeTraceEvent,
+  SourceConversationTurn
+} from '@ui-agent/agent-runtime';
 
 export interface TurnLogEntry {
   id: string;
@@ -9,9 +22,12 @@ export interface TurnLogEntry {
   updatedAt: string;
   status: 'running' | 'completed' | 'failed';
   model: { mode: string; provider: string; name?: string };
-  request: StartTurnRequest;
-  conversation: ConversationTurn[];
-  result?: PlannerResult;
+  request: StartTurnRequest | SourceTurnRequest;
+  conversation: ConversationTurn[] | SourceConversationTurn[];
+  result?: PlannerResult | SourceTurnResponse;
+  sourceWorkspaceId?: string;
+  codingAgent?: { adapterId: string; checkpoint: CodingAgentCheckpoint };
+  sourceSteps?: CodingAgentStep[];
   error?: string;
   durationMs?: number;
   modelAttempts?: Array<{
@@ -35,7 +51,7 @@ export interface TurnLogSummary {
   turnId: string;
   traceId: string;
   instruction: string;
-  resultKind?: PlannerResult['kind'];
+  resultKind?: string;
   durationMs?: number;
   error?: string;
   model: TurnLogEntry['model'];
@@ -152,6 +168,37 @@ export class TurnLogStore {
     entry.executions ??= [];
     entry.executions.push(redact({ timestamp, submission, response }) as NonNullable<TurnLogEntry['executions']>[number]);
     this.persist(entry);
+  }
+
+  recordSourceTurn(
+    workspaceId: string,
+    request: SourceTurnRequest,
+    conversation: SourceConversationTurn[],
+    response: SourceTurnResponse,
+    sourceSteps: CodingAgentStep[],
+    durationMs: number,
+    codingAgent?: { adapterId: string; checkpoint: CodingAgentCheckpoint }
+  ): void {
+    const timestamp = new Date().toISOString();
+    const entry = redact({
+      id: `log-${crypto.randomUUID()}`,
+      timestamp,
+      updatedAt: timestamp,
+      status: response.kind === 'failed' ? 'failed' : 'completed',
+      model: this.model,
+      request,
+      conversation,
+      result: response,
+      sourceWorkspaceId: workspaceId,
+      codingAgent,
+      sourceSteps,
+      durationMs,
+      ...(response.kind === 'failed' ? { error: response.message } : {})
+    }) as TurnLogEntry;
+    this.entries.push(entry);
+    this.trim();
+    this.persist(entry);
+    console.info(`[agent-log] ${entry.status} source-workspace=${workspaceId} turn=${request.turnId} durationMs=${durationMs}`);
   }
 
   private load(): void {

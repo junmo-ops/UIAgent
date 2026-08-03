@@ -1,6 +1,6 @@
 import { onMessage, sendMessage } from '../src/messaging';
 import type { ContentCommand, ContentCommandResult, ExtensionErrorCode } from '@ui-agent/contracts';
-import { pageInjectionIssue } from '../src/url-policy';
+import { isLocalWorkspacePreviewUrl, pageInjectionIssue } from '../src/url-policy';
 import { EditorTabRegistry } from '../src/editor-tab-registry';
 
 class BrowserCommandError extends Error {
@@ -16,6 +16,16 @@ function failure(code: ExtensionErrorCode, error: string): ContentCommandResult 
 async function activeTab() {
   const [tab] = await browser.tabs.query({ active: true, currentWindow: true });
   if (!tab?.id) throw new BrowserCommandError('NO_ACTIVE_TAB', '当前没有可用的活动页面');
+  return tab;
+}
+
+async function waitForWorkspacePreviewTab(tabId: number, timeoutMs = 3000): Promise<Browser.tabs.Tab> {
+  const deadline = Date.now() + timeoutMs;
+  let tab = await browser.tabs.get(tabId);
+  while (![tab.url, tab.pendingUrl].some(isLocalWorkspacePreviewUrl) && Date.now() < deadline) {
+    await new Promise(resolve => setTimeout(resolve, 50));
+    tab = await browser.tabs.get(tabId);
+  }
   return tab;
 }
 
@@ -110,11 +120,39 @@ export default defineBackground(() => {
   onMessage('browserCommand', async message => {
     try {
       const { editorClientId, command } = message.data;
-      const tabId = editorTabs.resolve(editorClientId);
-      if (tabId === undefined) throw new BrowserCommandError('EDITOR_NOT_READY', '插件正在连接当前页面，请稍后重试。');
+      if (command.type === 'bindEditorTab') {
+        const trustedPreviewUrl = isLocalWorkspacePreviewUrl(command.previewUrl);
+        const tab = trustedPreviewUrl
+          ? await browser.tabs.get(command.tabId)
+          : await waitForWorkspacePreviewTab(command.tabId);
+        if (!trustedPreviewUrl && ![tab.url, tab.pendingUrl].some(isLocalWorkspacePreviewUrl)) {
+          throw new BrowserCommandError(
+            'INVALID_PAGE_URL',
+            `只能将编辑会话绑定到本机静态源码副本。当前地址：${tab.url ?? '未知'}；待加载地址：${tab.pendingUrl ?? '无'}`
+          );
+        }
+        const previousTabId = editorTabs.resolve(editorClientId);
+        editorTabs.bind(editorClientId, command.tabId);
+        if (previousTabId !== undefined && previousTabId !== command.tabId) {
+          void sendMessage('contentCommand', { type: 'deactivateEditor' }, previousTabId).catch(() => undefined);
+        }
+        return { ok: true };
+      }
+      let tabId = await editorTabs.waitFor(editorClientId);
+      if (tabId === undefined) {
+        // 扩展重载可能使旧 Port 的绑定事件丢失。消息只能来自扩展页面，
+        // 因此可安全地将这个新 clientId 恢复到用户当前活动标签页。
+        const current = await activeTab();
+        tabId = current.id!;
+        editorTabs.bind(editorClientId, tabId);
+      }
       const [tab, current] = await Promise.all([browser.tabs.get(tabId), activeTab()]);
       if (current.id !== tabId) {
         throw new BrowserCommandError('TAB_CHANGED', '插件仍绑定在打开它时的页面。请切回原页面，或在当前页面重新点击插件图标。');
+      }
+      if (command.type === 'reloadPreview') {
+        await browser.tabs.reload(tabId);
+        return { ok: true };
       }
       if (command.type === 'exportScreenshot') return await exportScreenshot(tab);
       return await sendToContent(tab, command);

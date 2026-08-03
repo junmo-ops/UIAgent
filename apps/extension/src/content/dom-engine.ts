@@ -37,7 +37,7 @@ const appearanceStyleProperties = [
 const safeContextAttributes = new Set([
   'aria-label', 'aria-selected', 'aria-expanded', 'aria-checked', 'aria-disabled', 'disabled', 'role', 'type',
   'placeholder', 'title', 'href', 'data-ui-component', 'data-ui-agent-variant',
-  'data-ui-agent-options', 'data-ui-agent-selected-options'
+  'data-ui-agent-options', 'data-ui-agent-selected-options', 'data-ui-source-id'
 ]);
 const forbiddenCloneTags = new Set(['SCRIPT', 'STYLE', 'IFRAME', 'OBJECT', 'EMBED']);
 
@@ -450,6 +450,7 @@ export class DomEngine {
     const rect = element.getBoundingClientRect();
     return {
       id: knownId ?? element.getAttribute(ownAttribute) ?? `read-${crypto.randomUUID()}`,
+      sourceId: element.getAttribute('data-ui-source-id') ?? undefined,
       tag: element.tagName.toLowerCase(), role: element.getAttribute('role') ?? undefined,
       text: (element.innerText || element.getAttribute('aria-label') || element.getAttribute('placeholder') || '').trim().slice(0, 300),
       rect: { x: rect.x, y: rect.y, width: rect.width, height: rect.height }

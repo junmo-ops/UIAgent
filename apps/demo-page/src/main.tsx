@@ -1,14 +1,19 @@
 import React, { useEffect, useState } from 'react';
 import ReactDOM from 'react-dom/client';
 import {
-  App as AntApp, Button, Card, Checkbox, Col, Descriptions, Form, Input, Layout, Menu,
-  Radio, Row, Select, Space, Table, Tag, Typography
+  App as AntApp, Avatar, Button, Card, Checkbox, Col, Descriptions, Divider, Form, Input, Layout, Menu,
+  Radio, Row, Segmented, Select, Space, Table, Tag, Typography
 } from 'antd';
-import { ArrowLeftOutlined, EditOutlined, PlusOutlined, SearchOutlined } from '@ant-design/icons';
+import {
+  ArrowLeftOutlined, CheckCircleFilled, ClockCircleOutlined, CloudDownloadOutlined,
+  CodeOutlined, DownOutlined, EditOutlined, ExpandOutlined, EyeOutlined, HighlightOutlined, HistoryOutlined,
+  LeftOutlined, MoreOutlined, PlusOutlined, RedoOutlined, RightOutlined, SearchOutlined,
+  SendOutlined, UndoOutlined
+} from '@ant-design/icons';
 import 'antd/dist/reset.css';
 import './styles.css';
 
-type DemoRoute = 'orders' | 'detail' | 'form';
+type DemoRoute = 'orders' | 'detail' | 'form' | 'workspace';
 
 const rows = [
   { key: '1', id: 'SO20260722001', customer: '杭州星海科技', amount: '¥ 12,800.00', status: '待审核', createdAt: '2026-07-22 09:30' },
@@ -18,7 +23,7 @@ const rows = [
 
 function routeFromLocation(): DemoRoute {
   const route = new URLSearchParams(location.search).get('page');
-  return route === 'detail' || route === 'form' ? route : 'orders';
+  return route === 'detail' || route === 'form' || route === 'workspace' ? route : 'orders';
 }
 
 function PageHeading({ title, description, action }: { title: string; description: string; action?: React.ReactNode }) {
@@ -102,6 +107,167 @@ function FormPage({ navigate }: { navigate: (route: DemoRoute) => void }) {
   </div>;
 }
 
+function WorkspacePrototype() {
+  return <div className="prototype-workspace">
+    <header className="prototype-topbar">
+      <div className="prototype-title-group">
+        <Button type="text" shape="circle" icon={<ArrowLeftOutlined />} aria-label="回到原页面" />
+        <div className="prototype-mark"><HighlightOutlined /></div>
+        <div>
+          <div className="prototype-title-line">
+            <strong>订单筛选调整</strong>
+            <span className="prototype-copy-badge">静态副本</span>
+          </div>
+          <span className="prototype-subtitle">来自订单管理 · 不影响原页面</span>
+        </div>
+      </div>
+      <div className="prototype-top-actions">
+        <span className="prototype-saved"><CheckCircleFilled /> 已自动保存</span>
+        <Segmented size="small" value="当前版本" options={['初始版本', '当前版本']} />
+        <Divider type="vertical" />
+        <Button type="text" shape="circle" icon={<UndoOutlined />} />
+        <Button type="text" shape="circle" icon={<RedoOutlined />} disabled />
+        <Button icon={<CloudDownloadOutlined />}>导出截图</Button>
+      </div>
+    </header>
+
+    <main className="prototype-main">
+      <section className="prototype-preview-pane">
+        <div className="prototype-preview-toolbar">
+          <div className="preview-toolbar-group">
+            <span className="preview-toolbar-label"><EyeOutlined /> 实时预览</span>
+            <span className="prototype-divider-dot" />
+            <Button size="small" type="text">适应窗口 <DownOutlined /></Button>
+            <Button size="small" type="text">100%</Button>
+          </div>
+          <div className="preview-toolbar-group">
+            <span className="preview-hint">点击页面元素可辅助定位</span>
+            <Button size="small" type="text" icon={<CodeOutlined />}>查看改动</Button>
+            <Button size="small" type="text" shape="circle" icon={<ExpandOutlined />} />
+          </div>
+        </div>
+
+        <div className="prototype-canvas">
+          <div className="prototype-browser">
+            <div className="prototype-browser-bar">
+              <div className="browser-dots"><i /><i /><i /></div>
+              <div className="prototype-address">静态副本 / 订单管理 / 筛选区域</div>
+              <MoreOutlined />
+            </div>
+            <div className="prototype-page">
+              <div className="prototype-page-heading">
+                <div>
+                  <h2>订单管理</h2>
+                  <p>查询和管理全部销售订单</p>
+                </div>
+                <button type="button" className="prototype-primary-button"><PlusOutlined /> 新建订单</button>
+              </div>
+              <div className="prototype-selected-card">
+                <span className="prototype-selection-label">当前编辑区域</span>
+                <div className="prototype-filter-row">
+                  <label className="prototype-field prototype-keyword">
+                    <span>关键词</span>
+                    <div><SearchOutlined /><em>订单号 / 客户名称</em></div>
+                  </label>
+                  <label className="prototype-field">
+                    <span>订单状态</span>
+                    <div><em>请选择状态</em><DownOutlined /></div>
+                  </label>
+                  <label className="prototype-field prototype-new-field">
+                    <span>订单来源</span>
+                    <div><em>请选择来源</em><DownOutlined /></div>
+                  </label>
+                  <label className="prototype-field prototype-new-field">
+                    <span>负责人</span>
+                    <div><em>请选择负责人</em><DownOutlined /></div>
+                  </label>
+                  <div className="prototype-filter-actions">
+                    <button type="button" className="prototype-query">查询</button>
+                    <button type="button" className="prototype-reset">重置</button>
+                  </div>
+                </div>
+              </div>
+              <div className="prototype-table-placeholder">
+                <div><strong>订单列表</strong><span>共 3 条</span></div>
+                <div className="placeholder-lines"><i /><i /><i /><i /></div>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <div className="prototype-versionbar">
+          <Button type="text" size="small" icon={<HistoryOutlined />}>版本记录</Button>
+          <div className="prototype-version-steps">
+            <i className="done" />
+            <span>初始副本</span>
+            <b />
+            <i className="done" />
+            <span>增加两个筛选项</span>
+            <b />
+            <i className="current" />
+            <span className="current-text">当前版本</span>
+          </div>
+          <div className="version-nav">
+            <Button type="text" size="small" shape="circle" icon={<LeftOutlined />} />
+            <span>3 / 3</span>
+            <Button type="text" size="small" shape="circle" icon={<RightOutlined />} disabled />
+          </div>
+        </div>
+      </section>
+
+      <aside className="prototype-agent-pane">
+        <div className="prototype-agent-header">
+          <div>
+            <Avatar size={30} className="prototype-agent-avatar" icon={<HighlightOutlined />} />
+            <div><strong>UI 示意助手</strong><span><i /> 已连接</span></div>
+          </div>
+          <Button type="text" shape="circle" icon={<MoreOutlined />} />
+        </div>
+
+        <div className="prototype-conversation">
+          <div className="prototype-date">今天 18:42</div>
+          <div className="prototype-user-message">
+            在订单状态右侧、查询按钮左侧增加订单来源和负责人两个筛选项，宽度和现有筛选项一致。
+          </div>
+          <div className="prototype-agent-message">
+            <div className="prototype-agent-message-title"><HighlightOutlined /> 已完成页面调整</div>
+            <p>新增了“订单来源”和“负责人”两个筛选项，并复用了订单状态的字段宽度、间距和下拉样式。</p>
+            <button type="button" className="prototype-change-summary">
+              <span><CheckCircleFilled /> 修改了 2 处</span>
+              <RightOutlined />
+            </button>
+            <div className="prototype-message-actions">
+              <Button type="text" size="small">恢复到修改前</Button>
+              <Button type="text" size="small">查看改动</Button>
+            </div>
+          </div>
+          <div className="prototype-event-line">
+            <ClockCircleOutlined />
+            <span>已创建版本 3 · 当前版本</span>
+          </div>
+        </div>
+
+        <div className="prototype-suggestions">
+          <button type="button">让两个字段再宽一点</button>
+          <button type="button">交换两个字段的位置</button>
+        </div>
+
+        <footer className="prototype-composer">
+          <Input.TextArea
+            variant="borderless"
+            autoSize={{ minRows: 3, maxRows: 5 }}
+            placeholder="继续描述你想调整的效果…"
+          />
+          <div>
+            <span>Shift + Enter 换行</span>
+            <Button type="primary" shape="circle" icon={<SendOutlined />} />
+          </div>
+        </footer>
+      </aside>
+    </main>
+  </div>;
+}
+
 function DemoPage() {
   const [route, setRoute] = useState<DemoRoute>(routeFromLocation);
   useEffect(() => {
@@ -114,15 +280,18 @@ function DemoPage() {
     setRoute(next);
   };
 
+  if (route === 'workspace') return <AntApp><WorkspacePrototype /></AntApp>;
+
   return <AntApp>
     <Layout className="app-shell">
       <Layout.Sider width={220} theme="light" className="sider">
         <div className="brand">Nova Admin</div>
-        <Menu mode="inline" selectedKeys={[route]} onClick={({ key }) => key === 'orders' || key === 'detail' || key === 'form' ? navigate(key) : undefined} items={[
+        <Menu mode="inline" selectedKeys={[route]} onClick={({ key }) => key === 'orders' || key === 'detail' || key === 'form' || key === 'workspace' ? navigate(key) : undefined} items={[
           { key: 'dashboard', label: '工作台' },
           { key: 'orders', label: '订单列表' },
           { key: 'detail', label: '订单详情' },
           { key: 'form', label: '新建订单' },
+          { key: 'workspace', label: 'UI 示意原型' },
           { key: 'customers', label: '客户管理' },
           { key: 'settings', label: '系统设置' }
         ]} />

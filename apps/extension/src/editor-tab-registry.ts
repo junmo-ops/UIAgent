@@ -19,6 +19,16 @@ export class EditorTabRegistry {
     return this.editorTabs.get(editorClientId);
   }
 
+  async waitFor(editorClientId: string, timeoutMs = 1500): Promise<number | undefined> {
+    const deadline = Date.now() + timeoutMs;
+    let tabId = this.resolve(editorClientId);
+    while (tabId === undefined && Date.now() < deadline) {
+      await new Promise(resolve => setTimeout(resolve, 25));
+      tabId = this.resolve(editorClientId);
+    }
+    return tabId;
+  }
+
   unbind(editorClientId: string): ReleasedEditorTab | undefined {
     const tabId = this.editorTabs.get(editorClientId);
     if (tabId === undefined) return undefined;

@@ -76,6 +76,17 @@ button, textarea { font: inherit; }
 
 .conversation-meta { display: flex; align-items: center; gap: 7px; }
 
+.header-back.ant-btn {
+  height: 25px;
+  padding: 0 7px;
+  color: #6f6b68;
+  border-radius: 8px;
+  font-size: 10px;
+}
+
+.header-back.ant-btn:hover { color: #242424 !important; background: #f2f0ee !important; }
+.header-back .ui-icon { width: 13px; height: 13px; }
+
 .demo-badge {
   padding: 3px 7px;
   color: #8b8885;
@@ -137,6 +148,13 @@ button, textarea { font: inherit; }
   font-size: 11px;
 }
 
+.selection-actions {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  flex: 0 0 auto;
+}
+
 .selection-action.ant-btn:hover { color: #1f1f1f !important; background: #efedeb !important; }
 .selection-action .ui-icon { width: 14px; height: 14px; }
 
@@ -164,6 +182,31 @@ button, textarea { font: inherit; }
   flex-direction: column;
   color: #76726f;
   text-align: center;
+}
+
+.snapshot-welcome {
+  width: min(340px, 100%);
+  margin: auto;
+  padding: 24px 12px 34px;
+  display: flex;
+  align-items: center;
+  flex-direction: column;
+  color: #76726f;
+  text-align: center;
+}
+
+.snapshot-welcome strong {
+  color: #2a2826;
+  font-size: 16px;
+  font-weight: 650;
+}
+
+.snapshot-welcome p {
+  max-width: 300px;
+  margin: 8px 0 0;
+  color: #96918d;
+  font-size: 12px;
+  line-height: 1.7;
 }
 
 .empty-icon {
@@ -228,11 +271,131 @@ button, textarea { font: inherit; }
   font-size: 12px;
 }
 
+.agent-progress-card {
+  width: min(360px, 100%);
+  padding: 12px 13px 10px;
+  align-self: flex-start;
+  color: #46413e;
+  background: #faf9f8;
+  border: 1px solid #ebe8e5;
+  border-radius: 14px;
+  animation: bubble-in .18s ease-out;
+}
+
+.agent-progress-head {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+}
+
+.agent-progress-head > div {
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+}
+
+.agent-progress-head strong {
+  font-size: 12px;
+  font-weight: 620;
+}
+
+.agent-progress-head span {
+  color: #96918d;
+  font-size: 10px;
+}
+
+.agent-progress-list {
+  margin: 10px 0 0 6px;
+  padding: 0 0 0 14px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  border-left: 1px solid #e1deda;
+}
+
+.agent-progress-item {
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  color: #77716d;
+  font-size: 10px;
+  line-height: 1.35;
+}
+
+.agent-progress-item i {
+  width: 6px;
+  height: 6px;
+  margin-left: -18px;
+  flex: 0 0 auto;
+  background: #aaa5a1;
+  border: 2px solid #faf9f8;
+  border-radius: 50%;
+  box-sizing: content-box;
+}
+
+.agent-progress-item.failed { color: #a85f55; }
+.agent-progress-item.failed i { background: #c57265; }
+
+.agent-progress-card > p {
+  margin: 9px 0 0;
+  color: #aaa5a1;
+  font-size: 9px;
+  line-height: 1.4;
+}
+
 .inline-alert.ant-alert {
   width: 100%;
   padding: 8px 10px;
   border-radius: 11px;
   font-size: 11px;
+}
+
+.source-workspace-cta {
+  margin: 0 14px 10px;
+  padding: 12px;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex: 0 0 auto;
+  background: #faf9f8;
+  border: 1px solid #efedeb;
+  border-radius: 16px;
+}
+
+.source-workspace-cta .ant-btn {
+  width: auto;
+  min-width: 138px;
+  height: 38px;
+  padding: 0 13px;
+  color: #fff;
+  background: #262626;
+  border-color: #262626;
+  border-radius: 11px;
+  box-shadow: none;
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.source-workspace-cta .ant-btn:not(:disabled):hover {
+  color: #fff !important;
+  background: #101010 !important;
+  border-color: #101010 !important;
+}
+
+.source-workspace-cta .ant-btn:disabled {
+  color: #fff;
+  background: #aaa;
+  border-color: #aaa;
+}
+
+.source-workspace-cta .ui-icon { width: 15px; height: 15px; }
+.source-workspace-cta > span {
+  min-width: 0;
+  color: #97928e;
+  font-size: 10px;
+  line-height: 1.35;
 }
 
 .composer-shell {
@@ -335,10 +498,14 @@ button, textarea { font: inherit; }
   .workspace { border-radius: 15px; }
   .selection-strip { margin: 9px 9px 0; }
   .chat-list { padding-inline: 12px; }
+  .source-workspace-cta { margin: 0 9px 8px; }
+  .source-workspace-cta > span { display: none; }
+  .source-workspace-cta .ant-btn { width: 100%; }
   .composer-shell { min-height: 106px; margin: 0 9px 9px; padding: 13px 12px 9px; }
   .history-actions { gap: 2px; }
   .history-actions .export-action { margin-left: 1px; }
   .selection-action.ant-btn span:not(.ant-btn-icon) { display: none; }
+  .selection-actions { gap: 0; }
 }
 
 @media (prefers-reduced-motion: reduce) {

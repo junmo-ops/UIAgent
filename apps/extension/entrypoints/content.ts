@@ -1,6 +1,7 @@
 import { changePlanSchema, type ContentCommandResult } from '@ui-agent/contracts';
 import { DomEngine } from '../src/content/dom-engine';
 import { selectionTarget } from '../src/content/selection-target';
+import { captureStaticSnapshot } from '../src/content/snapshot-capture';
 import { onMessage, sendMessage } from '../src/messaging';
 
 export default defineContentScript({
@@ -8,6 +9,7 @@ export default defineContentScript({
   main() {
     const engine = new DomEngine();
     let selecting = false;
+    let selectedElement: HTMLElement | undefined;
     let editorLeaseTimer: ReturnType<typeof setTimeout> | undefined;
 
     const deactivateEditor = () => {
@@ -32,6 +34,7 @@ export default defineContentScript({
       const target = selectionTarget(event.target);
       if (!target || target.hasAttribute('data-ui-agent-overlay')) return;
       event.preventDefault(); event.stopImmediatePropagation(); selecting = false;
+      selectedElement = target;
       const context = engine.select(target);
       sendMessage('selectionChanged', context).catch(() => undefined);
     };
@@ -57,6 +60,7 @@ export default defineContentScript({
           const target = [...document.querySelectorAll<HTMLElement>('[data-testid]')]
             .find(element => element.getAttribute('data-testid') === command.testId);
           if (!target) throw new Error(`测试页不存在选区 ${command.testId}`);
+          selectedElement = target;
           return { ok: true, context: engine.select(target), ...engine.historyState() } satisfies ContentCommandResult;
         }
         if (command.type === 'getContext') return {
@@ -71,6 +75,13 @@ export default defineContentScript({
         if (command.type === 'undo') return { ok: true, canUndo: (engine.undo(), engine.historyState().canUndo), canRedo: engine.historyState().canRedo } satisfies ContentCommandResult;
         if (command.type === 'redo') return { ok: true, canUndo: (engine.redo(), engine.historyState().canUndo), canRedo: engine.historyState().canRedo } satisfies ContentCommandResult;
         if (command.type === 'reset') { engine.reset(); return { ok: true, ...engine.historyState() } satisfies ContentCommandResult; }
+        if (command.type === 'captureSnapshot') {
+          if (!selectedElement?.isConnected) throw new Error('请先选择需要生成快照的页面区域');
+          return { ok: true, snapshot: captureStaticSnapshot(selectedElement) } satisfies ContentCommandResult;
+        }
+        if (command.type === 'capturePageSnapshot') {
+          return { ok: true, snapshot: captureStaticSnapshot(document.body) } satisfies ContentCommandResult;
+        }
         if (command.type === 'prepareScreenshot') { engine.hideOverlay(); return { ok: true } satisfies ContentCommandResult; }
         if (command.type === 'finishScreenshot') { engine.refreshOverlay(); return { ok: true } satisfies ContentCommandResult; }
         return { ok: false, code: 'PAGE_OPERATION_FAILED', error: '该命令只能由 Background 执行' } satisfies ContentCommandResult;

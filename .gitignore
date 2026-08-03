@@ -9,6 +9,7 @@ test-results/
 .playwright-cli/
 .env
 .logs/
+apps/agent-service/.snapshots/
 .DS_Store
 *.log
 *.tsbuildinfo

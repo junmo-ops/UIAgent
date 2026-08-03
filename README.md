@@ -5,6 +5,7 @@
 ## 当前能力
 
 - Chrome Side Panel 与页面元素选择、高亮；侧栏会话固定绑定到打开时的标签页。
+- 选区静态快照：冻结当前表单状态和可见样式，移除原页面脚本、事件、接口与外链资源，在本机隔离页面中继续编辑。
 - 选区局部 DOM、相邻元素和可见样式提取。
 - 添加按钮、文字、链接、输入框、下拉框、单选和多选。
 - 修改已有或本轮新增元素的文案与白名单样式。
@@ -62,6 +63,19 @@ pnpm dev:extension
 
 插件使用 `activeTab` 临时授权，也可以在任意普通 HTTP/HTTPS 页面上测试：先切换到目标标签页，再点击 Chrome 工具栏中的插件图标，随后点击“重新选择页面元素”。页面跳转或切换标签后需要重新点击插件图标授权。`chrome://`、Chrome Web Store 和其他浏览器保护页面不支持注入；插件不申请 `<all_urls>` 长期权限。
 
+### 使用静态源码副本
+
+1. 保持 Agent Service 运行，在需要制作示意的原页面打开插件。
+2. 点击“进入副本编辑”，插件会复制当前已渲染页面，无需提前选择区域或输入需求。
+3. 加载标签页随后自动切换为 `http://127.0.0.1:8787/workspaces/{id}/preview`。
+4. 在副本页点击“选择”，选中需要调整的区域，再通过输入框描述需求。
+5. 后续可以继续对话和重新选区，并可逐步撤销、重做、恢复初始版本及导出截图。
+6. 点击 Side Panel 顶部“原页面”可切回来源标签页。再次回到副本时会恢复 Workspace 和对话。
+
+静态源码副本会冻结当前输入值、勾选状态、展开状态和浏览器计算后的主要可见样式，并编译为 Agent Service 本地目录中的 `index.html`、去重后的 `snapshot.css`、语义结构 `outline.json` 和定位信息 `source-map.json`。HTML 与 CSS 会随每轮 Revision 一起保存、撤销和重做。源码 Agent 通过 Outline、搜索、局部读取、精确替换、校验和提交工具工作，不接收旧模式的完整 `SelectedContext`，也不能使用 Shell、网络或访问其他目录。
+
+捕获阶段会移除原始 JavaScript、事件处理器、iframe、表单提交和 HTTP/HTTPS 外链资源，预览页再通过 CSP 禁止接口、脚本与页面导航。复杂伪元素、跨域图片、Web Font、Canvas、动画和依赖 JavaScript 的交互不会完整保留；此模式的目标是生成静态需求示意，不是复制真实业务系统。
+
 ## 接入 DeepSeek
 
 在 [DeepSeek 开放平台](https://platform.deepseek.com/api_keys) 创建 API Key，然后配置服务端：
@@ -80,11 +94,18 @@ pnpm dev:service
 
 默认使用 `deepseek-v4-flash`，适合 Demo 的低延迟规划；如需更强的复杂指令理解，可改为 `deepseek-v4-pro`。不要把长期 Key 写入插件代码、浏览器存储或提交到 Git。
 
-可打开 `http://127.0.0.1:8787/health` 确认返回 `modelMode: "remote"`、`modelProvider: "deepseek"` 和当前模型名。修改配置后需要停止并重启 Agent Service，Chrome 插件本身无需重新构建。
+可打开 `http://127.0.0.1:8787/health` 确认当前模型和 Coding Agent。静态源码模式支持两套可切换实现：
+
+- `CODING_AGENT_ADAPTER=legacy`：现有 Source Editing Agent，作为稳定回退。
+- `CODING_AGENT_ADAPTER=cline`：Cline SDK 通用源码 Agent POC，需要 Node.js 22 或更高版本；可用 `CLINE_MAX_ITERATIONS` 调整单轮最大迭代数，默认 30。
+
+Cline 只会获得当前静态副本的搜索、局部读取、样式规则直读、结构化移动与克隆、精确替换、受控 Patch、校验、提交和澄清工具；除正常调用模型接口外，不向 Agent 开放 Shell、任意网络请求、浏览器或任意文件访问工具。移动和克隆按 `sourceId` 操作并保留完整结构与样式；Patch 只允许修改 `index.html` 和 `snapshot.css`，支持原子替换及在文件开头、末尾或唯一锚点旁插入，校验失败不会形成 Revision。切换 Adapter 不改变插件、工作区或预览协议。修改配置后需要停止并重启 Agent Service，Chrome 插件本身无需重新构建。
+
+静态源码编辑期间，Side Panel 会展示“定位元素、读取源码、应用补丁、校验页面、提交修改”等实时操作摘要和模型/工具调用计数。该区域用于解释 Agent 当前在做什么，不展示模型的隐式逐字推理，也不会展示完整搜索或替换源码。
 
 ## 查看 Agent 会话日志
 
-Agent Service 会把最近 200 个 Turn 的当前请求、局部 DOM 上下文、此前对话、每次模型 Attempt 的耗时与输入规模、模型结果、逐操作执行回执、执行后观察、验证结果和错误写入本地 JSONL，并提供调试页面：
+Agent Service 会把最近 200 个 Turn 写入本地 JSONL，并提供调试页面。直接 DOM 模式记录局部上下文、模型 Attempt、执行回执和验证结果；静态源码模式记录当前请求、此前对话、Coding Agent Adapter、最终 Checkpoint、每一步搜索/读取/替换决策、工具结果、Revision、模型与工具调用次数和总耗时：
 
 ```text
 http://127.0.0.1:8787/logs
@@ -105,6 +126,6 @@ pnpm build
 
 Agent 能力上限验证当前优先人工执行，步骤和 C01～C12 的逐项指令见《[C 组挑战测试方案](./docs/UI辅助需求编写插件_C组挑战测试方案.md)》。实验性的自动化 Runner 已保留在 `apps/challenge-runner`，不影响人工测试，也无需为了当前验证安装 Playwright Chromium。
 
-当前 Demo 只保证本地或明确测试环境中的当前页面会话，不承诺页面刷新、框架重新渲染或跨页面后保留修改。
+直接编辑模式只保证当前页面会话，不承诺页面刷新、框架重新渲染或跨页面后保留修改。复杂场景优先使用静态快照工作台，避免原框架重新渲染覆盖示意结果。
 
-需求和技术资料位于 [`docs`](./docs/)。下一阶段的架构增量、Agent 执行后验证、场景评测和实施计划见《[V1.1 技术方案](./docs/UI辅助需求编写插件_V1.1技术方案.md)》。
+需求和技术资料位于 [`docs`](./docs/)。Agent 架构、执行后验证和场景评测见《[V1.1 技术方案](./docs/UI辅助需求编写插件_V1.1技术方案.md)》；静态页面编辑方向见《[静态快照工作台技术方案](./docs/UI辅助需求编写插件_静态快照工作台技术方案.md)》。

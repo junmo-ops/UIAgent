@@ -1,17 +1,25 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { Alert, Button, Input, Modal, Spin, Tooltip } from 'antd';
+import type { TextAreaRef } from 'antd/es/input/TextArea';
 import { useMachine } from '@xstate/react';
 import { storage } from 'wxt/utils/storage';
 import {
   PROTOCOL_VERSION,
   agentTurnResponseSchema,
   executionSubmissionSchema,
+  sourceTurnRequestSchema,
+  sourceTurnProgressSchema,
+  sourceTurnResponseSchema,
+  sourceWorkspaceCreatedSchema,
+  sourceWorkspaceInfoSchema,
   startTurnRequestSchema,
   type AgentTurnResponse,
   type ChangePlan,
   type ContentCommand,
   type ContentCommandResult,
   type ContextScope,
+  type SourceWorkspaceInfo,
+  type SourceTurnProgress,
   type SelectedContext
 } from '@ui-agent/contracts';
 import { onMessage, sendMessage } from '../../src/messaging';
@@ -21,22 +29,40 @@ const serviceUrlItem = storage.defineItem<string>('local:agentServiceUrl', { fal
 
 // Side Panel 文档关闭时 Chrome 会自动断开该 Port，Background 据此立即清理选区。
 const editorClientId = crypto.randomUUID();
-browser.runtime.connect({ name: `ui-agent-editor:${editorClientId}` });
+const editorPort = browser.runtime.connect({ name: `ui-agent-editor:${editorClientId}` });
+// 保留 Port 引用，避免扩展重载或长时间空闲时被垃圾回收而提前触发 onDisconnect。
+void editorPort;
 
 interface ChatEntry { id: string; role: 'user' | 'assistant'; text: string }
 interface ActiveTurn { turnId: string; traceId: string }
-type IconName = 'sparkle' | 'target' | 'edit' | 'undo' | 'redo' | 'reset' | 'download' | 'arrow';
+interface ActiveWorkspace extends SourceWorkspaceInfo {
+  tabId: number;
+  sourceTabId?: number;
+}
+interface PersistedWorkspaceSession {
+  workspace: SourceWorkspaceInfo;
+  chat: ChatEntry[];
+  editSessionId: string;
+  sourceTabId?: number;
+}
+const sourceWorkspaceSessionItem = storage.defineItem<PersistedWorkspaceSession | null>(
+  'local:sourceWorkspaceSession',
+  { fallback: null }
+);
+type IconName = 'sparkle' | 'target' | 'edit' | 'snapshot' | 'undo' | 'redo' | 'reset' | 'download' | 'arrow' | 'back';
 
 function UiIcon({ name }: { name: IconName }) {
   const paths: Record<IconName, React.ReactNode> = {
     sparkle: <><path d="M12 2.8c.5 4.6 2.6 6.7 7.2 7.2-4.6.5-6.7 2.6-7.2 7.2-.5-4.6-2.6-6.7-7.2-7.2 4.6-.5 6.7-2.6 7.2-7.2Z" /><path d="M18.5 16.5c.2 1.8 1 2.6 2.7 2.8-1.7.2-2.5 1-2.7 2.7-.2-1.7-1-2.5-2.7-2.7 1.7-.2 2.5-1 2.7-2.8Z" /></>,
     target: <><circle cx="12" cy="12" r="7" /><circle cx="12" cy="12" r="2.5" /><path d="M12 2v3M12 19v3M2 12h3M19 12h3" /></>,
     edit: <><path d="M4 20h4l11-11a2.8 2.8 0 0 0-4-4L4 16v4Z" /><path d="m13.5 6.5 4 4" /></>,
+    snapshot: <><rect x="3.5" y="5" width="14" height="14" rx="2" /><path d="M7 2.5h12.5a2 2 0 0 1 2 2V17" /><path d="m6.5 15 3.2-3.2 2.4 2.4 2-2 1.8 1.8" /></>,
     undo: <><path d="m9 7-5 5 5 5" /><path d="M5 12h8a6 6 0 0 1 6 6" /></>,
     redo: <><path d="m15 7 5 5-5 5" /><path d="M19 12h-8a6 6 0 0 0-6 6" /></>,
     reset: <><path d="M4.8 8A8 8 0 1 1 4 15" /><path d="M4 4v5h5" /></>,
     download: <><path d="M12 3v12" /><path d="m7.5 11 4.5 4.5 4.5-4.5" /><path d="M5 21h14" /></>,
-    arrow: <><path d="M12 19V5" /><path d="m6.5 10.5 5.5-5.5 5.5 5.5" /></>
+    arrow: <><path d="M12 19V5" /><path d="m6.5 10.5 5.5-5.5 5.5 5.5" /></>,
+    back: <><path d="m10 7-5 5 5 5" /><path d="M5 12h14" /></>
   };
   return <svg className="ui-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">{paths[name]}</svg>;
 }
@@ -67,11 +93,55 @@ export function SidePanelApp() {
   const [instruction, setInstruction] = useState('');
   const [chat, setChat] = useState<ChatEntry[]>([]);
   const [serviceUrl, setServiceUrl] = useState('http://127.0.0.1:8787');
-  const [editSessionId, setEditSessionId] = useState(() => crypto.randomUUID());
+  const [editSessionId, setEditSessionId] = useState<string>(() => crypto.randomUUID());
   const [activeTurn, setActiveTurn] = useState<ActiveTurn>();
-  const busy = state.matches('planning') || state.matches('applying') || state.matches('verifying') || state.matches('repairing');
+  const [sourceWorkspace, setSourceWorkspace] = useState<ActiveWorkspace>();
+  const [sourceProgress, setSourceProgress] = useState<SourceTurnProgress>();
+  const [snapshotBusy, setSnapshotBusy] = useState(false);
+  const composerRef = useRef<TextAreaRef>(null);
+  const busy = snapshotBusy || state.matches('planning') || state.matches('applying') || state.matches('verifying') || state.matches('repairing');
 
-  useEffect(() => { serviceUrlItem.getValue().then(setServiceUrl); }, []);
+  useEffect(() => {
+    serviceUrlItem.getValue().then(async url => {
+      setServiceUrl(url);
+      const [tab] = await browser.tabs.query({ active: true, currentWindow: true });
+      const match = /\/workspaces\/([0-9a-f-]{36})\/preview/i.exec(tab?.url ?? '');
+      if (!match || !tab?.id) return;
+      try {
+        const [response, persisted] = await Promise.all([
+          fetch(`${url.replace(/\/$/, '')}/v1/workspaces/${match[1]}`),
+          sourceWorkspaceSessionItem.getValue()
+        ]);
+        if (!response.ok) return;
+        const workspace = sourceWorkspaceInfoSchema.parse(await response.json());
+        const restoredWorkspace = persisted?.workspace.workspaceId === workspace.workspaceId
+          ? { ...workspace, selectedSourceId: persisted.workspace.selectedSourceId }
+          : workspace;
+        setSourceWorkspace({
+          ...restoredWorkspace,
+          tabId: tab.id,
+          sourceTabId: persisted?.workspace.workspaceId === workspace.workspaceId
+            ? persisted.sourceTabId
+            : undefined
+        });
+        if (persisted?.workspace.workspaceId === workspace.workspaceId) {
+          setChat(persisted.chat);
+          setEditSessionId(persisted.editSessionId);
+        }
+        await command({ type: 'bindEditorTab', tabId: tab.id, previewUrl: workspace.previewUrl });
+      } catch { /* Keep the regular page mode when workspace restoration fails. */ }
+    });
+  }, []);
+  useEffect(() => {
+    if (!sourceWorkspace) return;
+    const { tabId: _tabId, sourceTabId: _sourceTabId, ...workspace } = sourceWorkspace;
+    void sourceWorkspaceSessionItem.setValue({
+      workspace,
+      chat,
+      editSessionId,
+      sourceTabId: sourceWorkspace.sourceTabId
+    });
+  }, [sourceWorkspace, chat, editSessionId]);
   useEffect(() => {
     const heartbeat = () => { void command({ type: 'editorHeartbeat' }).catch(() => undefined); };
     const deactivate = () => { void command({ type: 'deactivateEditor' }).catch(() => undefined); };
@@ -84,11 +154,16 @@ export function SidePanelApp() {
     };
   }, []);
   useEffect(() => onMessage('selectionChanged', message => {
-    setEditSessionId(crypto.randomUUID());
-    setActiveTurn(undefined);
-    setChat([]);
+    if (!sourceWorkspace) {
+      setEditSessionId(crypto.randomUUID());
+      setActiveTurn(undefined);
+      setChat([]);
+    } else {
+      const sourceId = message.data.selected.sourceId;
+      if (sourceId) setSourceWorkspace(current => current ? { ...current, selectedSourceId: sourceId } : current);
+    }
     send({ type: 'SELECTION_FOUND', selection: message.data });
-  }), [send]);
+  }), [send, sourceWorkspace]);
 
   const startSelection = async () => {
     try { await command({ type: 'startSelection' }); send({ type: 'START_SELECTION' }); }
@@ -105,6 +180,16 @@ export function SidePanelApp() {
   const submit = async () => {
     const text = instruction.trim();
     if (!text) return;
+    if (sourceWorkspace) {
+      if (!state.context.selection) {
+        fail(new Error('请先在副本页面中选择需要调整的区域'));
+        return;
+      }
+      setChat(entries => [...entries, { id: crypto.randomUUID(), role: 'user', text }]);
+      setInstruction('');
+      await runSourceTurn(text, sourceWorkspace);
+      return;
+    }
     setChat(entries => [...entries, { id: crypto.randomUUID(), role: 'user', text }]);
     setInstruction(''); send({ type: 'SUBMIT' });
     try {
@@ -192,13 +277,162 @@ export function SidePanelApp() {
 
   const history = async (type: 'undo' | 'redo' | 'reset') => {
     try {
+      if (sourceWorkspace) {
+        setSnapshotBusy(true);
+        const response = await fetch(
+          `${serviceUrl.replace(/\/$/, '')}/v1/workspaces/${sourceWorkspace.workspaceId}/${type}`,
+          { method: 'POST' }
+        );
+        if (!response.ok) throw await serviceResponseError(response, '源码副本版本接口返回');
+        const value = await response.json() as Pick<SourceWorkspaceInfo, 'revision' | 'canUndo' | 'canRedo'>;
+        setSourceWorkspace(current => current ? { ...current, ...value } : current);
+        await command({ type: 'reloadPreview' });
+        return;
+      }
       const result = await command({ type });
       const context = await refreshContext().catch(() => state.context.selection);
       send({ type: 'HISTORY', canUndo: result.canUndo ?? false, canRedo: result.canRedo ?? false, selection: context });
     } catch (error) { fail(error); }
+    finally { setSnapshotBusy(false); }
   };
 
   const exportScreenshot = async () => { try { await command({ type: 'exportScreenshot' }); } catch (error) { fail(error); } };
+  const returnToSource = async () => {
+    if (!sourceWorkspace?.sourceTabId) return;
+    try {
+      await browser.tabs.update(sourceWorkspace.sourceTabId, { active: true });
+    } catch {
+      fail(new Error('原页面标签页已关闭'));
+    }
+  };
+  const runSourceTurn = async (text: string, workspace: ActiveWorkspace) => {
+    setSnapshotBusy(true);
+    let progressTimer: number | undefined;
+    try {
+      const request = sourceTurnRequestSchema.parse({
+        protocolVersion: PROTOCOL_VERSION,
+        editSessionId,
+        turnId: crypto.randomUUID(),
+        traceId: crypto.randomUUID(),
+        instruction: text,
+        sourceId: workspace.selectedSourceId
+      });
+      setSourceProgress({
+        workspaceId: workspace.workspaceId,
+        turnId: request.turnId,
+        status: 'running',
+        phase: 'analyzing',
+        message: '正在理解修改目标…',
+        modelCalls: 0,
+        toolCalls: 0,
+        updatedAt: new Date().toISOString(),
+        activities: []
+      });
+      const progressUrl = `${serviceUrl.replace(/\/$/, '')}/v1/workspaces/${workspace.workspaceId}/turns/${request.turnId}/progress`;
+      const refreshProgress = async () => {
+        try {
+          const progressResponse = await fetch(progressUrl, { cache: 'no-store' });
+          if (!progressResponse.ok) return;
+          setSourceProgress(sourceTurnProgressSchema.parse(await progressResponse.json()));
+        } catch {
+          // Progress is best-effort. The main Turn request remains authoritative.
+        }
+      };
+      progressTimer = window.setInterval(() => { void refreshProgress(); }, 650);
+      const response = await fetch(`${serviceUrl.replace(/\/$/, '')}/v1/workspaces/${workspace.workspaceId}/turns`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify(request)
+      });
+      if (!response.ok) throw await serviceResponseError(response, '源码 Agent 返回');
+      const outcome = sourceTurnResponseSchema.parse(await response.json());
+      if (outcome.kind === 'clarification') {
+        setChat(entries => [...entries, { id: crypto.randomUUID(), role: 'assistant', text: outcome.question }]);
+        return;
+      }
+      if (outcome.kind === 'failed') throw new Error(`[${outcome.code}] ${outcome.message}`);
+      setSourceWorkspace(current => current ? {
+        ...current,
+        revision: outcome.revision,
+        canUndo: outcome.revision > 0,
+        canRedo: false
+      } : current);
+      setChat(entries => [...entries, {
+        id: crypto.randomUUID(),
+        role: 'assistant',
+        text: outcome.summary
+      }]);
+      await command({ type: 'reloadPreview' });
+    } catch (error) {
+      fail(error);
+    } finally {
+      if (progressTimer !== undefined) window.clearInterval(progressTimer);
+      setSnapshotBusy(false);
+      setSourceProgress(undefined);
+    }
+  };
+
+  const createSourceWorkspace = async () => {
+    setSnapshotBusy(true);
+    let loadingTabId: number | undefined;
+    let previewReady = false;
+    try {
+      const [sourceTab, captured] = await Promise.all([
+        browser.tabs.query({ active: true, currentWindow: true }).then(tabs => tabs[0]),
+        command({ type: 'capturePageSnapshot' })
+      ]);
+      if (!captured.snapshot) throw new Error('页面没有返回静态源码副本');
+      const loadingTab = await browser.tabs.create({
+        url: browser.runtime.getURL('/workspace-loading.html'),
+        active: false
+      });
+      loadingTabId = loadingTab.id;
+      if (!loadingTabId) throw new Error('静态副本标签页创建失败');
+      const response = await fetch(`${serviceUrl.replace(/\/$/, '')}/v1/workspaces`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify(captured.snapshot)
+      });
+      if (!response.ok) throw await serviceResponseError(response, '静态源码工作区服务返回');
+      const created = sourceWorkspaceCreatedSchema.parse(await response.json());
+      const persistedWorkspace: SourceWorkspaceInfo = {
+        ...created,
+        sourceUrl: captured.snapshot.sourceUrl,
+        revision: 0,
+        canUndo: false,
+        canRedo: false
+      };
+      await sourceWorkspaceSessionItem.setValue({
+        workspace: persistedWorkspace,
+        chat: [],
+        editSessionId,
+        sourceTabId: sourceTab?.id
+      });
+      setChat([]);
+      setInstruction('');
+      const tab = await browser.tabs.update(loadingTabId, { url: created.previewUrl, active: false });
+      if (!tab?.id) throw new Error('静态副本标签页更新失败');
+      previewReady = true;
+      const workspace: ActiveWorkspace = {
+        ...persistedWorkspace,
+        tabId: tab.id,
+        sourceTabId: sourceTab?.id
+      };
+      setSourceWorkspace(workspace);
+      await command({ type: 'bindEditorTab', tabId: tab.id, previewUrl: created.previewUrl });
+      await browser.tabs.update(tab.id, { active: true });
+      setSnapshotBusy(false);
+    } catch (error) {
+      fail(error);
+      if (loadingTabId && !previewReady) {
+        void browser.tabs.remove(loadingTabId).catch(() => undefined);
+      } else if (loadingTabId && previewReady) {
+        // Workspace 已经成功创建时保留副本。切换过去后，新 Side Panel 会再次尝试绑定。
+        void browser.tabs.update(loadingTabId, { active: true }).catch(() => undefined);
+      }
+      setSnapshotBusy(false);
+    }
+  };
   const fail = (error: unknown) => send({ type: 'FAIL', error: error instanceof Error ? error.message : '操作失败' });
   const selection = state.context.selection;
   const examples = ['把按钮文案改成“确定”', '在右侧增加一个筛选项'];
@@ -207,8 +441,21 @@ export function SidePanelApp() {
     <main className="panel">
       <section className="workspace">
         <div className="conversation-header">
-          <span>新建 UI 示意</span>
+          <span>{sourceWorkspace ? '静态副本' : '新建 UI 示意'}</span>
           <div className="conversation-meta">
+            {sourceWorkspace?.sourceTabId && (
+              <Tooltip title="切换回原页面">
+                <Button
+                  className="header-back"
+                  type="text"
+                  size="small"
+                  icon={<UiIcon name="back" />}
+                  onClick={returnToSource}
+                >
+                  原页面
+                </Button>
+              </Tooltip>
+            )}
             <Tooltip title={`Agent Service：${serviceUrl}`}>
               <span className="service-status"><i />已连接</span>
             </Tooltip>
@@ -216,48 +463,100 @@ export function SidePanelApp() {
           </div>
         </div>
 
-        <div className={`selection-strip ${selection ? 'has-selection' : ''}`}>
-          <span className="selection-symbol"><UiIcon name="target" /></span>
-          <div className="selection-copy">
-            <span className="selection-label">{selection ? '当前选区' : '还没有选择区域'}</span>
-            <span className="selection-value">
-              {selection ? `${selection.selected.tag} · ${selection.selected.text || '无文本内容'}` : '先在页面中选择需要调整的元素'}
-            </span>
+        {sourceWorkspace && (
+          <div className={`selection-strip ${selection ? 'has-selection' : ''}`}>
+            <span className="selection-symbol"><UiIcon name="target" /></span>
+            <div className="selection-copy">
+              <span className="selection-label">{selection ? '当前选区' : '选择编辑区域'}</span>
+              <span className="selection-value">
+                {selection
+                  ? `${selection.selected.tag} · ${selection.selected.text || '无文本内容'}`
+                  : '在静态副本中选择需要调整的元素'}
+              </span>
+            </div>
+            <div className="selection-actions">
+              <Button
+                type="text"
+                className="selection-action"
+                icon={<UiIcon name="edit" />}
+                disabled={busy}
+                onClick={startSelection}
+              >
+                {state.matches('selecting') ? '选择中…' : selection ? '重选' : '选择'}
+              </Button>
+            </div>
           </div>
-          <Button
-            type="text"
-            className="selection-action"
-            icon={<UiIcon name="edit" />}
-            onClick={startSelection}
-          >
-            {state.matches('selecting') ? '选择中…' : selection ? '重选' : '选择'}
-          </Button>
-        </div>
+        )}
 
         <section className="chat-list">
-          {chat.length === 0 && (
+          {!sourceWorkspace && (
+            <div className="snapshot-welcome">
+              <span className="empty-icon"><UiIcon name="snapshot" /></span>
+              <strong>在静态副本中编辑当前页面</strong>
+              <p>确认后将在新标签页复制当前页面。进入副本后再选择区域、描述改动，原页面不会受到影响。</p>
+            </div>
+          )}
+          {sourceWorkspace && chat.length === 0 && (
             <div className="empty-tip">
               <span className="empty-icon"><UiIcon name="sparkle" /></span>
-              <strong>描述你想看到的页面效果</strong>
-              <p>选中页面元素后，可以修改内容、样式、布局，或添加新的基础组件。</p>
+              <strong>{selection ? '描述你想看到的页面效果' : '先选择需要调整的区域'}</strong>
+              <p>{selection ? '可以修改内容、样式和布局，或添加新的基础组件。' : '点击上方“选择”，然后在静态副本页面中点击目标元素。'}</p>
               <div className="example-list">
                 {examples.map(example => <button key={example} type="button" onClick={() => setInstruction(example)}>{example}</button>)}
               </div>
             </div>
           )}
           {chat.map(entry => <div key={entry.id} className={`bubble ${entry.role}`}>{entry.text}</div>)}
-          {busy && (
+          {busy && sourceWorkspace && snapshotBusy && sourceProgress ? (
+            <div className="agent-progress-card">
+              <div className="agent-progress-head">
+                <Spin size="small" />
+                <div>
+                  <strong>{sourceProgress.message}</strong>
+                  <span>已进行 {sourceProgress.modelCalls} 轮分析 · {sourceProgress.toolCalls} 次工具操作</span>
+                </div>
+              </div>
+              {sourceProgress.activities.length > 0 && (
+                <div className="agent-progress-list">
+                  {sourceProgress.activities.slice(-5).map(activity => (
+                    <div key={activity.id} className={`agent-progress-item ${activity.status}`}>
+                      <i />
+                      <span>{activity.label}{activity.detail ? ` · ${activity.detail}` : ''}</span>
+                    </div>
+                  ))}
+                </div>
+              )}
+              <p>展示的是可审计操作摘要，不包含模型的隐式推理内容。</p>
+            </div>
+          ) : busy && (
             <div className="bubble assistant working">
               <Spin size="small" />
-              <span>{state.matches('verifying') ? '正在验证页面结果…' : state.matches('repairing') ? '正在生成安全修正…' : state.matches('applying') ? '正在更新页面示意…' : '正在理解并生成方案…'}</span>
+              <span>{sourceWorkspace && snapshotBusy ? '正在读取并修改静态源码…' : state.matches('verifying') ? '正在验证页面结果…' : state.matches('repairing') ? '正在生成安全修正…' : state.matches('applying') ? '正在更新页面示意…' : '正在理解并生成方案…'}</span>
             </div>
           )}
           {state.context.message && <Alert className="inline-alert" type="info" showIcon message={state.context.message} closable />}
           {state.context.error && <Alert className="inline-alert" type="error" showIcon message={state.context.error} closable onClose={() => send({ type: 'DISMISS' })} />}
         </section>
 
-        <footer className="composer-shell">
+        {!sourceWorkspace && (
+          <div className="source-workspace-cta">
+            <Button
+              block
+              type="primary"
+              icon={<UiIcon name="snapshot" />}
+              disabled={busy}
+              loading={snapshotBusy}
+              onClick={createSourceWorkspace}
+            >
+              进入副本编辑
+            </Button>
+            <span>复制当前页面并在新标签页打开</span>
+          </div>
+        )}
+
+        {sourceWorkspace && <footer className="composer-shell">
           <Input.TextArea
+            ref={composerRef}
             value={instruction}
             variant="borderless"
             onChange={event => setInstruction(event.target.value)}
@@ -267,9 +566,9 @@ export function SidePanelApp() {
           />
           <div className="composer-toolbar">
             <div className="history-actions">
-              <Tooltip title="撤销"><Button type="text" shape="circle" aria-label="撤销" disabled={!state.context.canUndo || busy} icon={<UiIcon name="undo" />} onClick={() => history('undo')} /></Tooltip>
-              <Tooltip title="重做"><Button type="text" shape="circle" aria-label="重做" disabled={!state.context.canRedo || busy} icon={<UiIcon name="redo" />} onClick={() => history('redo')} /></Tooltip>
-              <Tooltip title="恢复初始"><Button type="text" shape="circle" aria-label="恢复初始" disabled={!state.context.canUndo || busy} icon={<UiIcon name="reset" />} onClick={() => history('reset')} /></Tooltip>
+              <Tooltip title="撤销"><Button type="text" shape="circle" aria-label="撤销" disabled={!(sourceWorkspace?.canUndo ?? state.context.canUndo) || busy} icon={<UiIcon name="undo" />} onClick={() => history('undo')} /></Tooltip>
+              <Tooltip title="重做"><Button type="text" shape="circle" aria-label="重做" disabled={!(sourceWorkspace?.canRedo ?? state.context.canRedo) || busy} icon={<UiIcon name="redo" />} onClick={() => history('redo')} /></Tooltip>
+              <Tooltip title="恢复初始"><Button type="text" shape="circle" aria-label="恢复初始" disabled={!(sourceWorkspace?.canUndo ?? state.context.canUndo) || busy} icon={<UiIcon name="reset" />} onClick={() => history('reset')} /></Tooltip>
               <Tooltip title="导出当前可视区域"><Button className="export-action" type="text" shape="circle" aria-label="导出截图" disabled={busy} icon={<UiIcon name="download" />} onClick={exportScreenshot} /></Tooltip>
             </div>
             <Tooltip title={!selection ? '请先选择页面区域' : '生成示意'}>
@@ -285,7 +584,7 @@ export function SidePanelApp() {
               />
             </Tooltip>
           </div>
-        </footer>
+        </footer>}
       </section>
 
       <Modal open={state.matches('confirming')} title="确认删除页面已有元素" okText="确认删除" okButtonProps={{ danger: true }} cancelText="取消" onCancel={() => send({ type: 'DISMISS' })} onOk={() => state.context.pendingPlan && apply(state.context.pendingPlan, true)}>

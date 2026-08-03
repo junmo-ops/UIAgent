@@ -4,6 +4,18 @@ packages:
 
 allowBuilds:
   esbuild: true
+  protobufjs: true
   spawn-sync: false
 
 confirmModulesPurge: false
+
+overrides:
+  "@cline/llms>ai": 6.0.144
+  "@cline/llms>@ai-sdk/google": 3.0.60
+  "@cline/llms>@ai-sdk/openai": 3.0.52
+  "@cline/llms>@ai-sdk/mistral": 3.0.28
+  "@cline/llms>@ai-sdk/provider": 3.0.8
+  "@cline/llms>@ai-sdk/anthropic": 3.0.68
+  "@cline/llms>@ai-sdk/google-vertex": 4.0.100
+  "@cline/llms>@ai-sdk/amazon-bedrock": 4.0.89
+  "@cline/llms>@ai-sdk/openai-compatible": 2.0.38
