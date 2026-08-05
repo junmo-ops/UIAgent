@@ -48,6 +48,15 @@ function isSafeInlineUrl(value: string): boolean {
   return normalized.startsWith('data:image/') || normalized.startsWith('data:font/');
 }
 
+function normalizeComputedStyleValue(property: string, value: string): string {
+  if (property !== 'font-family') return value;
+  // 部分业务站点会把整段字体栈误写成一个带引号的字体名，例如
+  // "PingFang SC,Microsoft YaHei,Arial,sans-serif"。同机运行时会静默回退，
+  // 但跨系统导入后回退字体不同，文字度量会变化并引发换行。快照里还原为字体栈。
+  const quotedStack = value.match(/^(["'])(.+,.+)\1$/);
+  return quotedStack ? quotedStack[2]!.trim() : value;
+}
+
 function copyLiveState(source: Element, clone: Element): void {
   if (source instanceof HTMLInputElement && clone instanceof HTMLInputElement) {
     clone.value = source.value;
@@ -67,17 +76,53 @@ function copyLiveState(source: Element, clone: Element): void {
   }
 }
 
-function applyComputedStyle(source: Element, clone: Element): void {
-  const computed = getComputedStyle(source);
+function computedStyleDeclarations(
+  computed: CSSStyleDeclaration,
+  overrides: Readonly<Record<string, string>> = {}
+): string[] {
   const declarations: string[] = [];
   for (const property of STYLE_PROPERTIES) {
-    const value = computed.getPropertyValue(property).trim();
+    const value = (overrides[property] ?? computed.getPropertyValue(property)).trim();
     // CSS URL 可能包含远程背景、字体或光标。静态需求示意不依赖这些资源，
     // 统一丢弃，避免混合 data:/remote fallback 绕过单值判断。
     if (!value || /url\s*\(/i.test(value)) continue;
-    declarations.push(`${property}:${value}`);
+    declarations.push(`${property}:${normalizeComputedStyleValue(property, value)}`);
   }
+  return declarations;
+}
+
+function preservesSingleRenderedLine(source: Element, computed: CSSStyleDeclaration): boolean {
+  if (!source.textContent?.trim()) return false;
+  const whiteSpace = computed.getPropertyValue('white-space').trim();
+  if (whiteSpace && whiteSpace !== 'normal' && whiteSpace !== 'pre-line') return false;
+  const rect = source.getBoundingClientRect();
+  const fontSize = Number.parseFloat(computed.getPropertyValue('font-size'));
+  const lineHeightValue = computed.getPropertyValue('line-height').trim();
+  const lineHeight = Number.parseFloat(lineHeightValue);
+  const estimatedLineHeight = Number.isFinite(lineHeight) ? lineHeight : fontSize * 1.5;
+  return rect.height > 0
+    && Number.isFinite(estimatedLineHeight)
+    && rect.height <= estimatedLineHeight * 1.25;
+}
+
+function applyComputedStyle(source: Element, clone: Element): void {
+  const computed = getComputedStyle(source);
+  const declarations = computedStyleDeclarations(
+    computed,
+    preservesSingleRenderedLine(source, computed) ? { 'white-space': 'nowrap' } : {}
+  );
   clone.setAttribute('style', declarations.join(';'));
+}
+
+function capturePseudoStyle(source: Element, sourceId: string, pseudo: '::before' | '::after'): string | undefined {
+  const computed = getComputedStyle(source, pseudo);
+  const content = computed.getPropertyValue('content').trim();
+  if (
+    !content || content === 'none' || content === 'normal'
+    || /url\s*\(/i.test(content) || /[<>]/.test(content)
+  ) return undefined;
+  const declarations = [`content:${content}`, ...computedStyleDeclarations(computed)];
+  return `[data-ui-source-id="${sourceId}"]${pseudo}{${declarations.join(';')}}`;
 }
 
 function sanitizeElement(source: Element, clone: Element): void {
@@ -109,9 +154,10 @@ function sanitizeElement(source: Element, clone: Element): void {
   }
 }
 
-function sanitizeTree(sourceRoot: HTMLElement, cloneRoot: HTMLElement): void {
+function sanitizeTree(sourceRoot: HTMLElement, cloneRoot: HTMLElement): string[] {
   const sourceElements = [sourceRoot, ...sourceRoot.querySelectorAll('*')];
   const cloneElements = [cloneRoot, ...cloneRoot.querySelectorAll('*')];
+  const pseudoRules: string[] = [];
 
   for (let index = cloneElements.length - 1; index >= 0; index -= 1) {
     const source = sourceElements[index];
@@ -121,8 +167,13 @@ function sanitizeTree(sourceRoot: HTMLElement, cloneRoot: HTMLElement): void {
       clone.remove();
       continue;
     }
-    clone.setAttribute('data-ui-source-id', `source-${index}`);
+    const sourceId = `source-${index}`;
+    clone.setAttribute('data-ui-source-id', sourceId);
     sanitizeElement(source, clone);
+    for (const pseudo of ['::before', '::after'] as const) {
+      const rule = capturePseudoStyle(source, sourceId, pseudo);
+      if (rule) pseudoRules.push(rule);
+    }
   }
 
   const removeComments = (node: Node) => {
@@ -132,11 +183,12 @@ function sanitizeTree(sourceRoot: HTMLElement, cloneRoot: HTMLElement): void {
     }
   };
   removeComments(cloneRoot);
+  return pseudoRules;
 }
 
 export function captureStaticSnapshot(sourceRoot: HTMLElement): StaticSnapshot {
   const cloneRoot = sourceRoot.cloneNode(true) as HTMLElement;
-  sanitizeTree(sourceRoot, cloneRoot);
+  const pseudoRules = sanitizeTree(sourceRoot, cloneRoot);
   let renderedRoot = cloneRoot;
   if (sourceRoot === document.body) {
     renderedRoot = document.createElement('div');
@@ -146,7 +198,8 @@ export function captureStaticSnapshot(sourceRoot: HTMLElement): StaticSnapshot {
     renderedRoot.innerHTML = cloneRoot.innerHTML;
   }
   const nodeCount = 1 + renderedRoot.querySelectorAll('*').length;
-  const rect = sourceRoot.getBoundingClientRect();
+  const viewportWidth = Math.max(1, Math.round(innerWidth));
+  const viewportHeight = Math.max(1, Math.round(innerHeight));
   const pageBackground = getComputedStyle(document.body).backgroundColor || '#ffffff';
   const title = `${document.title || '未命名页面'} · 静态快照`;
 
@@ -163,10 +216,11 @@ export function captureStaticSnapshot(sourceRoot: HTMLElement): StaticSnapshot {
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>${escapeHtml(title)}</title>
   <style>
-    html,body{margin:0;min-width:100%;min-height:100%;box-sizing:border-box}
+    html,body{margin:0;width:100%;min-width:${viewportWidth}px;min-height:${viewportHeight}px;box-sizing:border-box}
     *,*::before,*::after{box-sizing:border-box}
-    body{padding:32px;background:${pageBackground};overflow:auto}
-    [data-ui-agent-snapshot-stage]{width:max-content;min-width:min(100%,${Math.ceil(rect.width)}px)}
+    body{padding:0;background:${pageBackground};overflow:auto}
+    [data-ui-agent-snapshot-stage]{display:block;width:${viewportWidth}px;min-width:${viewportWidth}px;min-height:${viewportHeight}px;margin:0 auto;transform:translateZ(0)}
+    ${pseudoRules.join('\n    ')}
   </style>
 </head>
 <body data-ui-agent-static-snapshot="true">
@@ -183,8 +237,8 @@ export function captureStaticSnapshot(sourceRoot: HTMLElement): StaticSnapshot {
     nodeCount,
     selectedSourceId: 'source-0',
     viewport: {
-      width: Math.max(1, Math.round(innerWidth)),
-      height: Math.max(1, Math.round(innerHeight))
+      width: viewportWidth,
+      height: viewportHeight
     }
   });
 }

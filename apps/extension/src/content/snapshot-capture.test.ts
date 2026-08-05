@@ -14,9 +14,17 @@ function installDom(html: string) {
   vi.stubGlobal('location', { href: 'https://example.test/orders' });
   vi.stubGlobal('innerWidth', 1280);
   vi.stubGlobal('innerHeight', 800);
-  vi.stubGlobal('getComputedStyle', (element: HTMLElement) => ({
+  vi.stubGlobal('getComputedStyle', (element: HTMLElement, pseudo?: string) => ({
     backgroundColor: element === window.document.body ? 'rgb(245, 245, 245)' : '',
-    getPropertyValue: (property: string) => element.style.getPropertyValue(property)
+    getPropertyValue: (property: string) => {
+      if (pseudo === '::before' && element.classList.contains('modal-centered')) {
+        const values: Record<string, string> = {
+          content: '""', display: 'inline-block', height: '800px', 'vertical-align': 'middle'
+        };
+        return values[property] ?? '';
+      }
+      return element.style.getPropertyValue(property);
+    }
   }));
   window.HTMLElement.prototype.getBoundingClientRect = () => ({
     x: 0, y: 0, width: 600, height: 300, top: 0, right: 600, bottom: 300, left: 0,
@@ -94,8 +102,8 @@ describe('captureStaticSnapshot', () => {
   it('preserves fixed overlay offsets so an open modal remains visible', () => {
     const document = installDom(`<!doctype html><html><head><title>弹窗页面</title></head><body>
       <main>页面内容</main>
-      <div role="dialog" style="position:fixed;inset:0;top:0;right:0;bottom:0;left:0;z-index:1000">
-        当前打开的弹窗
+      <div class="modal-centered" style="position:fixed;inset:0;top:0;right:0;bottom:0;left:0;z-index:1000">
+        <div role="dialog">当前打开的弹窗</div>
       </div>
     </body></html>`);
 
@@ -108,5 +116,29 @@ describe('captureStaticSnapshot', () => {
     expect(snapshot.html).toContain('bottom:0');
     expect(snapshot.html).toContain('left:0');
     expect(snapshot.html).toContain('当前打开的弹窗');
+    expect(snapshot.html).toContain('[data-ui-source-id="source-2"]::before{content:""');
+    expect(snapshot.html).toContain('display:inline-block');
+    expect(snapshot.html).toContain('vertical-align:middle');
+  });
+
+  it('freezes the capture viewport without adding a layout-changing page gutter', () => {
+    const document = installDom(`<!doctype html><html><head><title>跨电脑页面</title></head><body>
+      <main style='font-family:"PingFang SC,Microsoft YaHei,Arial,sans-serif"'>内容</main>
+      <span id="single-line" style="display:block;font-size:14px;white-space:normal">3.0指引</span>
+    </body></html>`);
+    const singleLine = document.querySelector('#single-line') as unknown as HTMLElement;
+    singleLine.getBoundingClientRect = () => ({
+      x: 0, y: 0, width: 48, height: 19, top: 0, right: 48, bottom: 19, left: 0,
+      toJSON: () => ({})
+    });
+
+    const snapshot = captureStaticSnapshot(document.body as unknown as HTMLElement);
+
+    expect(snapshot.html).toContain('width:100%;min-width:1280px;min-height:800px');
+    expect(snapshot.html).toContain('body{padding:0');
+    expect(snapshot.html).not.toContain('width:max-content');
+    expect(snapshot.html).toContain('margin:0 auto;transform:translateZ(0)');
+    expect(snapshot.html).toContain('font-family:PingFang SC,Microsoft YaHei,Arial,sans-serif');
+    expect(snapshot.html).toMatch(/id="single-line"[^>]+white-space:nowrap/);
   });
 });

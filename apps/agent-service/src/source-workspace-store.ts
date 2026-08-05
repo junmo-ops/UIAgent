@@ -342,7 +342,7 @@ export class SourceWorkspaceStore {
   create(input: unknown): SourceWorkspace {
     const snapshot = staticSnapshotSchema.parse(input);
     validateHtml(snapshot.html);
-    const compiled = compileSourceWorkspace(snapshot.html);
+    const compiled = compileSourceWorkspace(snapshot.html, { viewport: snapshot.viewport });
     validateHtml(compiled.html);
     validateCss(compiled.css);
     const workspaceId = randomUUID();

@@ -46,7 +46,7 @@ describe('SourceWorkspaceStore', () => {
       expect.objectContaining({ path: 'outline.json' }),
       expect.objectContaining({ path: 'source-map.json' })
     ]));
-    expect(await tools.inspectElement('source-0')).toMatch(/domText: "查 询".+visibilityNote:.+rawTextSegments: \["查 询"\].+compactHtml: <button[^>]+source-0[^>]*>.+<span[^>]+source-1[^>]*>查 询/s);
+    expect(await tools.inspectElement('source-0')).toMatch(/domText: "查 询".+visibilityNote:.+rawTextSegments: \["查 询"\].+compactHtml: <button[^>]+source-0[^>]*>.*<span[^>]+source-1[^>]*>查 询/s);
     expect(await tools.readStyleRule('ui-snapshot-style-0')).toContain('color:red');
     await tools.replaceInElement('source-0', '查 询', '确定');
     expect(await tools.validate()).toContain('校验通过');

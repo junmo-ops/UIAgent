@@ -1,10 +1,5 @@
 import { parseHTML } from 'linkedom';
 
-const VOID_TAGS = new Set([
-  'area', 'base', 'br', 'col', 'embed', 'hr', 'img', 'input', 'link', 'meta',
-  'param', 'source', 'track', 'wbr'
-]);
-
 export interface WorkspaceOutlineNode {
   sourceId: string;
   tag: string;
@@ -32,6 +27,29 @@ export interface CompiledSourceWorkspace {
   sourceMap: string;
 }
 
+export interface SourceWorkspaceCompileOptions {
+  viewport?: { width: number; height: number };
+}
+
+function normalizeLegacyDeclaration(declaration: string): string {
+  return declaration.replace(
+    /font-family:(["'])([^;]*,[^;]*)\1(?=;|$)/gi,
+    (_match, _quote: string, fontStack: string) => `font-family:${fontStack.trim()}`
+  );
+}
+
+function frozenViewportCss(viewport: SourceWorkspaceCompileOptions['viewport']): string | undefined {
+  if (!viewport) return undefined;
+  const width = Math.max(1, Math.round(viewport.width));
+  const height = Math.max(1, Math.round(viewport.height));
+  return [
+    '/* Keep imported snapshots in the capture-time coordinate system. */',
+    `html,body{width:100%;min-width:${width}px;min-height:${height}px}`,
+    'body{padding:0!important}',
+    `[data-ui-agent-snapshot-stage]{display:block;width:${width}px!important;min-width:${width}px!important;min-height:${height}px;margin:0 auto;transform:translateZ(0)}`
+  ].join('\n');
+}
+
 function compactText(value: string | null | undefined): string {
   return (value ?? '').replace(/\s+/g, ' ').trim().slice(0, 160);
 }
@@ -50,24 +68,10 @@ function elementSummaryText(element: Element): string {
   );
 }
 
-function prettyHtml(html: string): string {
-  const lines = html
-    .replace(/>\s*</g, '>\n<')
-    .split('\n')
-    .map(line => line.trim())
-    .filter(Boolean);
-  let depth = 0;
-  return lines.map(line => {
-    const closing = /^<\s*\//.test(line);
-    const rendered = `${'  '.repeat(Math.max(0, depth - (closing ? 1 : 0)))}${line}`;
-    const openingTags = [...line.matchAll(/<\s*([a-z][\w:-]*)\b[^>]*>/gi)]
-      .filter(match => !/^<\s*\//.test(match[0]) && !/\/\s*>$/.test(match[0]))
-      .map(match => match[1]!.toLowerCase())
-      .filter(tag => !VOID_TAGS.has(tag)).length;
-    const closingTags = [...line.matchAll(/<\s*\/\s*([a-z][\w:-]*)\s*>/gi)].length;
-    depth = Math.max(0, depth + openingTags - closingTags);
-    return rendered;
-  }).join('\n');
+function sourceReadableHtml(html: string): string {
+  // 标签之间的换行会成为真实文本节点，破坏 inline/inline-block 布局。
+  // 把换行放进开始标签内部，既保留每个 source id 的独立行号，又不改变 DOM。
+  return html.replace(/\s+(?=data-ui-source-id\s*=)/gi, '\n  ');
 }
 
 function sourceLineMap(html: string): Map<string, number> {
@@ -80,7 +84,10 @@ function sourceLineMap(html: string): Map<string, number> {
   return result;
 }
 
-export function compileSourceWorkspace(inputHtml: string): CompiledSourceWorkspace {
+export function compileSourceWorkspace(
+  inputHtml: string,
+  options: SourceWorkspaceCompileOptions = {}
+): CompiledSourceWorkspace {
   const { document } = parseHTML(inputHtml);
   const baselineCss = [...document.querySelectorAll('style')]
     .map(element => element.textContent?.trim())
@@ -89,7 +96,7 @@ export function compileSourceWorkspace(inputHtml: string): CompiledSourceWorkspa
 
   const styles = new Map<string, string>();
   for (const element of [...document.querySelectorAll('[style]')]) {
-    const declaration = element.getAttribute('style')?.trim();
+    const declaration = normalizeLegacyDeclaration(element.getAttribute('style')?.trim() ?? '');
     if (!declaration) {
       element.removeAttribute('style');
       continue;
@@ -103,11 +110,12 @@ export function compileSourceWorkspace(inputHtml: string): CompiledSourceWorkspa
     element.removeAttribute('style');
   }
 
-  const html = prettyHtml(document.toString());
+  const html = sourceReadableHtml(document.toString());
   const css = [
     '/* UI Agent Workspace V2: frozen snapshot styles */',
     ...baselineCss,
-    ...[...styles.entries()].map(([declaration, className]) => `.${className}{${declaration}}`)
+    ...[...styles.entries()].map(([declaration, className]) => `.${className}{${declaration}}`),
+    frozenViewportCss(options.viewport)
   ].filter(Boolean).join('\n\n') + '\n';
 
   const sourceElements = [...document.querySelectorAll('[data-ui-source-id]')];
