@@ -19,9 +19,21 @@
 ```text
 apps/demo-page             固定 React + Ant Design 测试页
 apps/extension             WXT Chrome MV3 插件
+  entrypoints              Background、Content Script 与 Side Panel 入口
+  src/content              页面捕获、选区和受控交互
+  src/session              编辑标签页绑定与页面访问策略
+  src/service              Agent Service 地址与运行配置
+  src/snapshot             离线快照包导入导出
+  src/sidepanel            Side Panel 应用实现
 apps/agent-service         Hono Agent Service
+  src/workspace            静态源码工作区、编译、校验与版本历史
+  src/progress             Agent Turn 进度
+  src/observability        会话日志与日志页面
 packages/agent-runtime     Source Agent、Coding Agent Port 与 Adapter
-packages/ui-change-contracts 版本化 DTO 和 Zod Schema
+  src/core                 通用 Agent Port 与 Checkpoint
+  src/adapters             Cline 和 Legacy Adapter
+  src/source-editing       静态源码编辑 Agent 与约束指令
+packages/contracts          版本化 DTO 和 Zod Schema
 ```
 
 ## 本地运行
@@ -143,6 +155,6 @@ pnpm architecture
 pnpm build
 ```
 
-Agent 能力上限验证当前优先人工执行，步骤和 C01～C12 的逐项指令见《[C 组挑战测试方案](./docs/UI辅助需求编写插件_C组挑战测试方案.md)》。
+当前自动化测试覆盖静态副本捕获、源码工具、版本历史、受控交互、Agent Adapter 和服务接口。旧 DOM Agent 的 C 组测试已移入 [`docs/archive`](./docs/archive/) 作为历史资料。
 
 需求和技术资料位于 [`docs`](./docs/)。当前实现以《[静态快照工作台技术方案](./docs/UI辅助需求编写插件_静态快照工作台技术方案.md)》为准；早期直接 DOM 方案文档仅保留为决策历史。腾讯云部署步骤见《[CloudBase 部署配置教程](./docs/UI辅助需求编写插件_CloudBase部署配置教程.md)》，架构原理见《[云端架构科普教程](./docs/UI辅助需求编写插件_云端架构科普教程.md)》。

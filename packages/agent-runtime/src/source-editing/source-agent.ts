@@ -7,7 +7,7 @@ import {
   type SourceTurnResponse
 } from '@ui-agent/contracts';
 import { z, ZodError } from 'zod';
-import type { CodingAgentStep, CodingWorkspaceTools } from './coding-agent-port';
+import type { CodingAgentStep, CodingWorkspaceTools } from '../core/coding-agent-port';
 import { CONTROLLED_INTERACTION_INSTRUCTIONS } from './controlled-interaction-instructions';
 
 export interface SourceFileTools extends CodingWorkspaceTools {}

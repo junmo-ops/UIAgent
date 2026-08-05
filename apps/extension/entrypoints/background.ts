@@ -1,9 +1,9 @@
 import { onMessage, sendMessage } from '../src/messaging';
 import type { ContentCommand, ContentCommandResult, ExtensionErrorCode } from '@ui-agent/contracts';
-import { pageInjectionIssue } from '../src/url-policy';
-import { EditorTabRegistry } from '../src/editor-tab-registry';
-import { getAgentServiceUrl } from '../src/agent-service-config';
-import { isWorkspacePreviewUrl } from '../src/agent-service-url';
+import { pageInjectionIssue } from '../src/session/url-policy';
+import { EditorTabRegistry } from '../src/session/editor-tab-registry';
+import { getAgentServiceUrl } from '../src/service/agent-service-config';
+import { isWorkspacePreviewUrl } from '../src/service/agent-service-url';
 
 class BrowserCommandError extends Error {
   constructor(readonly code: ExtensionErrorCode, message: string) {

@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { validateControlledInteractions } from './source-workspace-interactions';
+import { validateControlledInteractions } from './interactions';
 
 describe('validateControlledInteractions', () => {
   it('accepts safe visibility and state declarations', () => {

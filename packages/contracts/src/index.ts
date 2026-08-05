@@ -36,12 +36,6 @@ export const portableSnapshotPackageSchema = z.object({
 });
 export type PortableSnapshotPackage = z.infer<typeof portableSnapshotPackageSchema>;
 
-export const snapshotCreatedSchema = z.object({
-  snapshotId: z.string().uuid(),
-  previewUrl: z.string().url()
-});
-export type SnapshotCreated = z.infer<typeof snapshotCreatedSchema>;
-
 export const sourceAgentDecisionSchema = z.discriminatedUnion('action', [
   z.object({
     action: z.literal('search'),

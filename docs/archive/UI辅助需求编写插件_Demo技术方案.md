@@ -1,5 +1,7 @@
 # UI 辅助需求编写插件 Demo 技术方案
 
+> 历史方案：本文描述已移除的当前页面直接 DOM 编辑链路，仅供设计决策追溯。
+
 ## 1. 方案结论
 
 采用“Chrome 插件 + 通用 Agent Runtime + 专用 UI Change Agent + 受控 DOM 编辑内核”的架构。

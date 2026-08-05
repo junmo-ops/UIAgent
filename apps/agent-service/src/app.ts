@@ -4,7 +4,6 @@ import {
   type CodingAgentPort
 } from '@ui-agent/agent-runtime';
 import {
-  snapshotCreatedSchema,
   sourceTurnRequestSchema,
   sourceTurnProgressSchema,
   sourceWorkspaceCreatedSchema,
@@ -13,16 +12,14 @@ import {
 } from '@ui-agent/contracts';
 import { Hono } from 'hono';
 import { cors } from 'hono/cors';
-import { logPageHtml } from './log-page';
-import { TurnLogStore } from './log-store';
-import { SnapshotStore } from './snapshot-store';
-import { SourceWorkspaceStore } from './source-workspace-store';
-import { SourceTurnProgressStore } from './source-turn-progress-store';
+import { logPageHtml } from './observability/log-page';
+import { TurnLogStore } from './observability/log-store';
+import { SourceWorkspaceStore } from './workspace/store';
+import { SourceTurnProgressStore } from './progress/source-turn-progress-store';
 
 export function createApp(
   env: NodeJS.ProcessEnv = process.env,
   providedLogStore?: TurnLogStore,
-  providedSnapshotStore?: SnapshotStore,
   providedWorkspaceStore?: SourceWorkspaceStore,
   providedCodingAgent?: CodingAgentPort
 ) {
@@ -36,7 +33,6 @@ export function createApp(
       name: env.MODEL_NAME
     }
   });
-  const snapshotStore = providedSnapshotStore ?? new SnapshotStore();
   const workspaceStore = providedWorkspaceStore ?? new SourceWorkspaceStore(
     env.SOURCE_WORKSPACE_DIR ?? '.snapshots/source-workspaces'
   );
@@ -62,27 +58,6 @@ export function createApp(
       }),
       codingAgentAdapter: codingAgent.adapterId
     }))
-    .post('/v1/snapshots', zValidator('json', staticSnapshotSchema), c => {
-      try {
-        const snapshot = snapshotStore.create(c.req.valid('json'));
-        const previewUrl = publicUrl(`/snapshots/${snapshot.snapshotId}`, c.req.url);
-        return c.json(snapshotCreatedSchema.parse({ snapshotId: snapshot.snapshotId, previewUrl }), 201);
-      } catch (error) {
-        return c.json({
-          code: 'SNAPSHOT_REJECTED',
-          message: error instanceof Error ? error.message : '静态快照保存失败'
-        }, 400);
-      }
-    })
-    .get('/snapshots/:snapshotId', c => {
-      const snapshot = snapshotStore.get(c.req.param('snapshotId'));
-      if (!snapshot) return c.text('静态快照不存在或 Agent Service 已重新启动', 404);
-      c.header('Content-Security-Policy', "default-src 'none'; style-src 'unsafe-inline'; img-src data: blob:; font-src data:; connect-src 'none'; form-action 'none'; frame-src 'none'; object-src 'none'; base-uri 'none'");
-      c.header('X-Content-Type-Options', 'nosniff');
-      c.header('Referrer-Policy', 'no-referrer');
-      c.header('Cache-Control', 'no-store');
-      return c.html(snapshot.html);
-    })
     .post('/v1/workspaces', zValidator('json', staticSnapshotSchema), c => {
       try {
         const workspace = workspaceStore.create(c.req.valid('json'));

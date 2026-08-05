@@ -5,9 +5,8 @@ import { join } from 'node:path';
 import { PROTOCOL_VERSION } from '@ui-agent/contracts';
 import type { CodingAgentPort } from '@ui-agent/agent-runtime';
 import { createApp } from './app';
-import { TurnLogStore } from './log-store';
-import { SnapshotStore } from './snapshot-store';
-import { SourceWorkspaceStore } from './source-workspace-store';
+import { TurnLogStore } from './observability/log-store';
+import { SourceWorkspaceStore } from './workspace/store';
 
 describe('agent service', () => {
   it('creates and serves a persistent static source workspace', async () => {
@@ -16,7 +15,6 @@ describe('agent service', () => {
       const app = createApp(
         { MODEL_MODE: 'mock', PUBLIC_BASE_URL: 'https://ui-agent.example.test' },
         new TurnLogStore({ persist: false }),
-        new SnapshotStore(),
         new SourceWorkspaceStore(root)
       );
       const response = await app.request('/v1/workspaces', {
@@ -47,37 +45,6 @@ describe('agent service', () => {
     } finally {
       rmSync(root, { recursive: true, force: true });
     }
-  });
-
-  it('creates and serves an isolated static snapshot', async () => {
-    const app = createApp(
-      { MODEL_MODE: 'mock' },
-      new TurnLogStore({ persist: false }),
-      new SnapshotStore()
-    );
-    const response = await app.request('/v1/snapshots', {
-      method: 'POST',
-      headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({
-        protocolVersion: PROTOCOL_VERSION,
-        title: '订单页 · 静态快照',
-        sourceUrl: 'https://example.test/orders',
-        capturedAt: '2026-07-29T10:00:00.000Z',
-        html: '<!doctype html><html><body><button style="color:red">查询</button></body></html>',
-        nodeCount: 1,
-        selectedSourceId: 'source-0',
-        viewport: { width: 1280, height: 800 }
-      })
-    });
-    expect(response.status).toBe(201);
-    const created = await response.json() as { snapshotId: string; previewUrl: string };
-    expect(created.previewUrl).toContain(`/snapshots/${created.snapshotId}`);
-
-    const preview = await app.request(`/snapshots/${created.snapshotId}`);
-    expect(preview.status).toBe(200);
-    expect(preview.headers.get('content-security-policy')).toContain("connect-src 'none'");
-    expect(preview.headers.get('cache-control')).toBe('no-store');
-    expect(await preview.text()).toContain('查询');
   });
 
   it('runs source turns through CodingAgentPort and records its checkpoint', async () => {
@@ -128,7 +95,6 @@ describe('agent service', () => {
       const app = createApp(
         { MODEL_MODE: 'mock' },
         logStore,
-        new SnapshotStore(),
         new SourceWorkspaceStore(root),
         codingAgent
       );

@@ -45,7 +45,7 @@ importers:
         version: link:../../packages/agent-runtime
       '@ui-agent/contracts':
         specifier: workspace:*
-        version: link:../../packages/ui-change-contracts
+        version: link:../../packages/contracts
       hono:
         specifier: ^4.9.0
         version: 4.12.31
@@ -98,7 +98,7 @@ importers:
     dependencies:
       '@ui-agent/contracts':
         specifier: workspace:*
-        version: link:../../packages/ui-change-contracts
+        version: link:../../packages/contracts
       '@webext-core/messaging':
         specifier: ^2.3.0
         version: 2.3.0
@@ -144,7 +144,7 @@ importers:
         version: 0.0.65(@cfworker/json-schema@4.1.1)(@opentelemetry/core@2.10.0(@opentelemetry/api@1.9.1))
       '@ui-agent/contracts':
         specifier: workspace:*
-        version: link:../ui-change-contracts
+        version: link:../contracts
       ai:
         specifier: ^7.0.0
         version: 7.0.32(zod@4.4.3)
@@ -156,7 +156,7 @@ importers:
         specifier: ^5.9.0
         version: 5.9.3
 
-  packages/ui-change-contracts:
+  packages/contracts:
     dependencies:
       zod:
         specifier: ^4.0.0

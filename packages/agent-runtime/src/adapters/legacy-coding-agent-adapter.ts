@@ -6,9 +6,9 @@ import {
   type CodingAgentRunResult,
   type CodingAgentTurn,
   type CodingWorkspaceTools
-} from './coding-agent-port';
+} from '../core/coding-agent-port';
 import { clineCodingAgentFromEnvironment } from './cline-coding-agent-adapter';
-import { SourceEditingAgent, sourceEditingAgentFromEnvironment } from './source-agent';
+import { SourceEditingAgent, sourceEditingAgentFromEnvironment } from '../source-editing/source-agent';
 
 function responseStatus(response: SourceTurnResponse): CodingAgentCheckpoint['status'] {
   if (response.kind === 'completed') return 'completed';

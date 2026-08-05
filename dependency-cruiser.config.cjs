@@ -9,7 +9,7 @@ module.exports = {
     {
       name: 'contracts-do-not-depend-on-implementation',
       severity: 'error',
-      from: { path: '^packages/ui-change-contracts/' },
+      from: { path: '^packages/contracts/' },
       to: { path: '^apps/' }
     },
     {
@@ -17,6 +17,30 @@ module.exports = {
       severity: 'error',
       from: { path: '^packages/agent-runtime/' },
       to: { path: '^apps/extension/' }
+    },
+    {
+      name: 'agent-runtime-core-is-independent',
+      severity: 'error',
+      from: { path: '^packages/agent-runtime/src/core/' },
+      to: { path: '^(packages/agent-runtime/src/(adapters|source-editing)/|apps/)' }
+    },
+    {
+      name: 'source-editing-does-not-depend-on-adapters',
+      severity: 'error',
+      from: { path: '^packages/agent-runtime/src/source-editing/' },
+      to: { path: '^packages/agent-runtime/src/adapters/' }
+    },
+    {
+      name: 'extension-does-not-depend-on-agent-runtime',
+      severity: 'error',
+      from: { path: '^apps/extension/' },
+      to: { path: '^packages/agent-runtime/' }
+    },
+    {
+      name: 'workspace-domain-does-not-depend-on-service-shell',
+      severity: 'error',
+      from: { path: '^apps/agent-service/src/workspace/' },
+      to: { path: '^apps/agent-service/src/(observability|progress|app|index)' }
     }
   ],
   options: {

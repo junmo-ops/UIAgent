@@ -3,7 +3,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
 import { PROTOCOL_VERSION } from '@ui-agent/contracts';
-import { SourceWorkspaceStore } from './source-workspace-store';
+import { SourceWorkspaceStore } from './store';
 
 const roots: string[] = [];
 

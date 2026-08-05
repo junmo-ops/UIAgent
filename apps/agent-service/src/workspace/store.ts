@@ -11,9 +11,9 @@ import { basename, dirname, resolve, sep } from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { type SourceConversationTurn, type SourceFileTools } from '@ui-agent/agent-runtime';
 import { staticSnapshotSchema, type SourceTurnResponse } from '@ui-agent/contracts';
-import { compileSourceWorkspace, refreshWorkspaceIndexes } from './source-workspace-compiler';
-import { validateControlledInteractions } from './source-workspace-interactions';
-import { analyzeStaticVisibility, staticVisibilityIssueKey } from './source-workspace-visibility';
+import { compileSourceWorkspace, refreshWorkspaceIndexes } from './compiler';
+import { validateControlledInteractions } from './interactions';
+import { analyzeStaticVisibility, staticVisibilityIssueKey } from './visibility';
 
 const WORKSPACE_FILES = ['index.html', 'snapshot.css', 'outline.json', 'source-map.json'] as const;
 type WorkspaceFile = typeof WORKSPACE_FILES[number];

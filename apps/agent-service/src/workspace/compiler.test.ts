@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { compileSourceWorkspace, refreshWorkspaceIndexes } from './source-workspace-compiler';
+import { compileSourceWorkspace, refreshWorkspaceIndexes } from './compiler';
 
 describe('source workspace compiler', () => {
   it('deduplicates inline computed styles into snapshot.css', () => {

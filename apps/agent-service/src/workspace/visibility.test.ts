@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { analyzeStaticVisibility } from './source-workspace-visibility';
+import { analyzeStaticVisibility } from './visibility';
 
 describe('analyzeStaticVisibility', () => {
   it('detects a visible absolute child fully clipped by its parent', () => {

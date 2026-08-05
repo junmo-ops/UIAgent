@@ -14,8 +14,8 @@ import {
   type CodingAgentStep,
   type CodingAgentTurn,
   type CodingWorkspaceTools
-} from './coding-agent-port';
-import { CONTROLLED_INTERACTION_INSTRUCTIONS } from './controlled-interaction-instructions';
+} from '../core/coding-agent-port';
+import { CONTROLLED_INTERACTION_INSTRUCTIONS } from '../source-editing/controlled-interaction-instructions';
 
 const objectSchema = (
   properties: Record<string, unknown>,

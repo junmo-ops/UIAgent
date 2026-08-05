@@ -1,8 +1,8 @@
 import { describe, expect, it } from 'vitest';
 import { PROTOCOL_VERSION, type SourceAgentDecision, type SourceTurnRequest } from '@ui-agent/contracts';
-import type { CodingAgentEvent, CodingWorkspaceTools } from './coding-agent-port';
+import type { CodingAgentEvent, CodingWorkspaceTools } from '../core/coding-agent-port';
 import { LegacyCodingAgentAdapter, codingAgentPortFromEnvironment } from './legacy-coding-agent-adapter';
-import { SourceEditingAgent, type SourceDecisionMaker } from './source-agent';
+import { SourceEditingAgent, type SourceDecisionMaker } from '../source-editing/source-agent';
 
 class SequenceDecisions implements SourceDecisionMaker {
   constructor(private readonly decisions: SourceAgentDecision[]) {}

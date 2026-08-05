@@ -14,16 +14,12 @@ RUN corepack enable
 COPY package.json pnpm-lock.yaml pnpm-workspace.yaml ./
 COPY apps/agent-service/package.json apps/agent-service/package.json
 COPY packages/agent-runtime/package.json packages/agent-runtime/package.json
-COPY packages/ui-change-agent/package.json packages/ui-change-agent/package.json
-COPY packages/ui-change-contracts/package.json packages/ui-change-contracts/package.json
-COPY packages/ui-change-domain/package.json packages/ui-change-domain/package.json
+COPY packages/contracts/package.json packages/contracts/package.json
 RUN pnpm install --frozen-lockfile
 
 COPY apps/agent-service apps/agent-service
 COPY packages/agent-runtime packages/agent-runtime
-COPY packages/ui-change-agent packages/ui-change-agent
-COPY packages/ui-change-contracts packages/ui-change-contracts
-COPY packages/ui-change-domain packages/ui-change-domain
+COPY packages/contracts packages/contracts
 
 RUN mkdir -p /data/source-workspaces /data/logs
 

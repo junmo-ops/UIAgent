@@ -1,7 +1,7 @@
 import type { AgentRunResult, AgentTool, AgentToolContext } from '@cline/sdk';
 import { describe, expect, it } from 'vitest';
 import { PROTOCOL_VERSION, type SourceTurnRequest } from '@ui-agent/contracts';
-import type { CodingAgentEvent, CodingWorkspaceTools } from './coding-agent-port';
+import type { CodingAgentEvent, CodingWorkspaceTools } from '../core/coding-agent-port';
 import {
   ClineCodingAgentAdapter,
   clineCodingAgentFromEnvironment,

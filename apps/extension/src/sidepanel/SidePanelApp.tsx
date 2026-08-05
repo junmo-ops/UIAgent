@@ -16,14 +16,14 @@ import {
   type SourceTurnProgress,
   type StaticSnapshot
 } from '@ui-agent/contracts';
-import { onMessage, sendMessage } from '../../src/messaging';
+import { onMessage, sendMessage } from '../messaging';
 import {
   createPortableSnapshotPackage,
   parsePortableSnapshotPackage,
   portableSnapshotFilename,
   serializePortableSnapshotPackage
-} from '../../src/portable-snapshot';
-import { DEFAULT_AGENT_SERVICE_URL, getAgentServiceUrl } from '../../src/agent-service-config';
+} from '../snapshot/portable-snapshot';
+import { DEFAULT_AGENT_SERVICE_URL, getAgentServiceUrl } from '../service/agent-service-config';
 
 // Side Panel 文档关闭时 Chrome 会自动断开该 Port，Background 据此立即清理选区。
 const editorClientId = crypto.randomUUID();
