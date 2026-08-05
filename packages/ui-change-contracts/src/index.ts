@@ -17,6 +17,25 @@ export const staticSnapshotSchema = z.object({
 });
 export type StaticSnapshot = z.infer<typeof staticSnapshotSchema>;
 
+export const SNAPSHOT_PACKAGE_FORMAT = 'ui-agent-static-snapshot' as const;
+export const SNAPSHOT_PACKAGE_VERSION = 1 as const;
+
+export const portableSnapshotPackageSchema = z.object({
+  format: z.literal(SNAPSHOT_PACKAGE_FORMAT),
+  version: z.literal(SNAPSHOT_PACKAGE_VERSION),
+  exportedAt: z.string().datetime(),
+  snapshot: staticSnapshotSchema,
+  safety: z.object({
+    activeContentRemoved: z.literal(true),
+    browserStateExcluded: z.tuple([
+      z.literal('cookies'),
+      z.literal('localStorage'),
+      z.literal('sessionStorage')
+    ])
+  })
+});
+export type PortableSnapshotPackage = z.infer<typeof portableSnapshotPackageSchema>;
+
 export const snapshotCreatedSchema = z.object({
   snapshotId: z.string().uuid(),
   previewUrl: z.string().url()

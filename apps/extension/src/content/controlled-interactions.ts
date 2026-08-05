@@ -1,0 +1,88 @@
+const ACTION_ATTRIBUTE = 'data-ui-agent-action';
+const TARGETS_ATTRIBUTE = 'data-ui-agent-targets';
+const GROUP_ATTRIBUTE = 'data-ui-agent-state-group';
+const VALUE_ATTRIBUTE = 'data-ui-agent-state-value';
+const WHEN_ATTRIBUTE = 'data-ui-agent-state-when';
+const ACTIVE_CLASS_ATTRIBUTE = 'data-ui-agent-active-class';
+
+type ControlledAction = 'toggle' | 'show' | 'hide' | 'set-state';
+
+function safeToken(value: string | null, maxLength = 100): string | undefined {
+  const normalized = value?.trim();
+  return normalized && normalized.length <= maxLength && /^[a-zA-Z0-9_-]+$/.test(normalized)
+    ? normalized
+    : undefined;
+}
+
+export class ControlledInteractionRuntime {
+  private readonly click = (event: MouseEvent) => {
+    if (!(event.target instanceof Element)) return;
+    const control = event.target.closest<HTMLElement>(`[${ACTION_ATTRIBUTE}]`);
+    if (!control || !this.activate(control)) return;
+    event.preventDefault();
+  };
+
+  constructor(private readonly document: Document) {}
+
+  mount(): void {
+    this.document.addEventListener('click', this.click);
+  }
+
+  unmount(): void {
+    this.document.removeEventListener('click', this.click);
+  }
+
+  activate(control: HTMLElement): boolean {
+    const action = control.getAttribute(ACTION_ATTRIBUTE) as ControlledAction | null;
+    if (action === 'set-state') return this.setState(control);
+    if (action !== 'toggle' && action !== 'show' && action !== 'hide') return false;
+    const targets = this.targets(control);
+    if (!targets.length) return false;
+    const makeVisible = action === 'show' || (action === 'toggle' && targets.some(target => target.hidden));
+    for (const target of targets) this.setVisible(target, makeVisible);
+    control.setAttribute('aria-expanded', String(makeVisible));
+    return true;
+  }
+
+  private targets(control: HTMLElement): HTMLElement[] {
+    const ids = (control.getAttribute(TARGETS_ATTRIBUTE) ?? '')
+      .split(/\s+/)
+      .map(value => safeToken(value))
+      .filter((value): value is string => Boolean(value))
+      .slice(0, 20);
+    if (!ids.length) return [];
+    const wanted = new Set(ids);
+    return [...this.document.querySelectorAll<HTMLElement>('[data-ui-source-id]')]
+      .filter(element => wanted.has(element.getAttribute('data-ui-source-id') ?? ''));
+  }
+
+  private setState(control: HTMLElement): boolean {
+    const group = safeToken(control.getAttribute(GROUP_ATTRIBUTE), 80);
+    const value = safeToken(control.getAttribute(VALUE_ATTRIBUTE), 80);
+    if (!group || !value) return false;
+    let matchedPanel = false;
+    for (const element of this.document.querySelectorAll<HTMLElement>(`[${GROUP_ATTRIBUTE}]`)) {
+      if (element.getAttribute(GROUP_ATTRIBUTE) !== group) continue;
+      const when = (element.getAttribute(WHEN_ATTRIBUTE) ?? '').split(/\s+/).filter(Boolean);
+      if (when.length) {
+        const active = when.includes(value);
+        this.setVisible(element, active);
+        matchedPanel ||= active;
+        continue;
+      }
+      if (element.getAttribute(ACTION_ATTRIBUTE) !== 'set-state') continue;
+      const active = element.getAttribute(VALUE_ATTRIBUTE) === value;
+      element.setAttribute('aria-selected', String(active));
+      element.setAttribute('aria-pressed', String(active));
+      element.setAttribute('data-ui-agent-state-active', String(active));
+      const activeClass = safeToken(element.getAttribute(ACTIVE_CLASS_ATTRIBUTE), 120);
+      if (activeClass) element.classList.toggle(activeClass, active);
+    }
+    return matchedPanel;
+  }
+
+  private setVisible(element: HTMLElement, visible: boolean): void {
+    element.hidden = !visible;
+    element.setAttribute('aria-hidden', String(!visible));
+  }
+}

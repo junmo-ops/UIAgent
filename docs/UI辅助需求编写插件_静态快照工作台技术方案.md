@@ -177,6 +177,39 @@ flowchart LR
 
 工作区不得创建在用户项目源码目录内，Agent 也不得读取其他工作区。
 
+对话记忆必须与源码 Revision 绑定。每个成功 Turn 记录其结果 Revision，澄清轮次记录
+当时所在 Revision；传给 Coding Agent 的最近对话只取当前 Revision 有效链路。Undo 后，
+被撤销版本对应的对话不进入模型上下文；Redo 后重新恢复。Undo 后产生新提交时，系统
+同时截断旧的源码后续版本和旧分支对话。旧 Turn 仍保留在 JSONL 日志用于审计，不因
+分支切换而删除。旧版未记录 Revision 的 Workspace 在读取时通过 Revision summary
+迁移，避免升级后继续携带已回滚上下文。
+
+### 5.3 跨电脑离线迁移
+
+当业务页面只能在另一台电脑或隔离网络中访问时，插件支持导出、导入版本化的
+`.ui-snapshot.json` 文件：
+
+```text
+可访问业务页面的电脑
+  → 打开插件
+  → 导出快照包
+  → 通过合规方式传输文件
+  → 当前开发电脑打开插件
+  → 导入快照包
+  → 本地 Agent Service 重新校验并创建 Workspace V2
+```
+
+快照包复用 `StaticSnapshot` 协议，只增加文件格式、格式版本、导出时间和安全声明。
+导入端不信任安全声明，仍使用与在线捕获相同的 Zod、HTML、CSS 和工作区边界校验，
+再由 Workspace Compiler 生成 `index.html`、`snapshot.css`、`outline.json` 和
+`source-map.json`。因此不在两台电脑间搬运服务端内部目录，也不会耦合工作区 ID、
+历史 Revision 或 Agent 会话。
+
+快照包明确不包含 Cookie、Local Storage、Session Storage、脚本和接口能力；会保留
+页面当前可见文字以及表单控件的运行态值。导出前必须提示用户确认已脱敏，并要求使用
+公司允许的渠道传输。首期文件大小上限为 15 MB，静态 HTML 仍受 10 MB、10,000 节点
+的原协议限制。不在包中附带截图，避免重复数据和不必要的敏感信息扩散。
+
 ## 6. 快照生成
 
 ### 6.1 捕获范围
@@ -231,6 +264,41 @@ flowchart LR
 ```
 
 Agent 使用 `sourceId` 搜索相关文件，而不是接收完整 DOM。
+
+### 6.5 受控声明式交互
+
+静态副本可选地包含由插件固定运行时解释的声明属性，但不允许页面脚本。首期支持：
+
+- `toggle/show/hide`：下拉框、弹窗、抽屉和折叠区域的显示隐藏；
+- `set-state`：Tab、单选态和互斥内容面板切换；
+- 同步 `aria-expanded`、`aria-selected`、`aria-pressed` 和 `aria-hidden`；
+- 为激活控制项切换一个声明的安全 class。
+
+```html
+<button
+  data-ui-agent-action="toggle"
+  data-ui-agent-targets="source-20"
+  aria-expanded="false">
+  查看历史会话
+</button>
+<aside data-ui-source-id="source-20" hidden>...</aside>
+```
+
+Tab 使用安全组名和值关联控制项与面板，不接受 CSS Selector：
+
+```html
+<button data-ui-agent-action="set-state"
+  data-ui-agent-state-group="order-tabs"
+  data-ui-agent-state-value="detail">详情</button>
+<section data-ui-agent-state-group="order-tabs"
+  data-ui-agent-state-when="detail">...</section>
+```
+
+页面捕获阶段删除原页面已有的同名声明属性，只有 Workspace 中经 Agent 新增并通过校验的
+配置才会生效。服务端拒绝未知动作、不存在的 sourceId、非法标识符和没有对应面板的状态。
+运行时仅在本机 Workspace Preview 启用；选择区域期间，捕获阶段的选择事件优先，点击
+不会误触发交互。预览 CSP 继续禁止页面脚本，固定交互逻辑运行在扩展 Content Script
+隔离环境中。
 
 ## 7. Source Editing Agent
 
@@ -444,6 +512,15 @@ http://127.0.0.1:8787/workspaces/{workspaceId}/preview
 - meta refresh；
 - CSS 中的非本地 URL；
 - 超过大小和节点限制的文件。
+
+除安全校验外，Working Copy 在 `validate_workspace` 和 `commit` 前执行静态可见性检查。
+检查以 Revision 0 的原始快照为基线，识别本会话新增的明确零可见风险，例如绝对定位
+元素完全落在直接父容器的 `overflow:hidden/clip` 裁剪区域之外。命中后本轮不得形成
+Revision，错误需要返回元素 sourceId、裁剪祖先、方向和关键尺寸，供 Coding Agent 修复。
+
+`inspect_element` 输出中的文本字段命名为 `domText`，只代表文字存在于源码，不再使用
+容易误导模型的 `visibleText`。静态检查负责拦截确定性布局错误；遮挡、响应式重排、颜色
+对比度等必须依赖后续浏览器渲染验证，不能仅凭 HTML/CSS 语法校验宣称完成。
 
 ### 11.3 预览 CSP
 
@@ -673,7 +750,7 @@ flowchart TD
     CA --> FT["受限通用文件工具"]
     SA --> FT
     FT --> WC["Working Copy"]
-    WC --> SV["结构与安全校验"]
+    WC --> SV["结构、安全与静态可见性校验"]
     SV --> PV["静态预览验证"]
     PV -->|"未达成"| CP
     PV -->|"达成"| RV["Revision / Undo / Redo"]

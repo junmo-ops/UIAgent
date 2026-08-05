@@ -12,7 +12,8 @@ const interactiveSelector = [
   '[role="radio"]',
   '[role="combobox"]',
   '[role="switch"]',
-  '[role="tab"]'
+  '[role="tab"]',
+  '[data-ui-agent-action]'
 ].join(',');
 
 /**

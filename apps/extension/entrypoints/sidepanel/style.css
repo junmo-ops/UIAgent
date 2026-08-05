@@ -49,6 +49,20 @@ button, textarea { font: inherit; }
   box-shadow: 0 0 0 3px rgba(53, 166, 111, .11);
 }
 
+.service-status.checking i {
+  background: #c08a2c;
+  box-shadow: 0 0 0 3px rgba(192, 138, 44, .12);
+}
+
+.service-status.unavailable {
+  color: #a33a36;
+}
+
+.service-status.unavailable i {
+  background: #c34b45;
+  box-shadow: 0 0 0 3px rgba(195, 75, 69, .12);
+}
+
 .workspace {
   min-height: 0;
   flex: 1;
@@ -356,15 +370,22 @@ button, textarea { font: inherit; }
   margin: 0 14px 10px;
   padding: 12px;
   display: flex;
-  align-items: center;
-  gap: 10px;
+  flex-direction: column;
+  gap: 8px;
   flex: 0 0 auto;
   background: #faf9f8;
   border: 1px solid #efedeb;
   border-radius: 16px;
 }
 
-.source-workspace-cta .ant-btn {
+.source-workspace-primary {
+  width: 100%;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.source-workspace-primary .ant-btn {
   width: auto;
   min-width: 138px;
   height: 38px;
@@ -378,25 +399,52 @@ button, textarea { font: inherit; }
   font-weight: 600;
 }
 
-.source-workspace-cta .ant-btn:not(:disabled):hover {
+.source-workspace-primary .ant-btn:not(:disabled):hover {
   color: #fff !important;
   background: #101010 !important;
   border-color: #101010 !important;
 }
 
-.source-workspace-cta .ant-btn:disabled {
+.source-workspace-primary .ant-btn:disabled {
   color: #fff;
   background: #aaa;
   border-color: #aaa;
 }
 
-.source-workspace-cta .ui-icon { width: 15px; height: 15px; }
-.source-workspace-cta > span {
+.source-workspace-primary .ui-icon { width: 15px; height: 15px; }
+.source-workspace-primary > span {
   min-width: 0;
   color: #97928e;
   font-size: 10px;
   line-height: 1.35;
 }
+
+.snapshot-transfer-actions {
+  width: 100%;
+  padding-top: 7px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 4px;
+  border-top: 1px solid #eeecea;
+}
+
+.snapshot-transfer-actions .ant-btn {
+  height: 29px;
+  padding: 0 8px;
+  color: #716d69;
+  border-radius: 8px;
+  font-size: 10px;
+}
+
+.snapshot-transfer-actions .ant-btn:not(:disabled):hover {
+  color: #262422 !important;
+  background: #f0eeec !important;
+}
+
+.snapshot-transfer-actions .ui-icon { width: 13px; height: 13px; }
+.snapshot-transfer-actions > i { width: 1px; height: 14px; background: #dfdcd9; }
+.snapshot-file-input { display: none; }
 
 .composer-shell {
   min-height: 112px;
@@ -499,8 +547,8 @@ button, textarea { font: inherit; }
   .selection-strip { margin: 9px 9px 0; }
   .chat-list { padding-inline: 12px; }
   .source-workspace-cta { margin: 0 9px 8px; }
-  .source-workspace-cta > span { display: none; }
-  .source-workspace-cta .ant-btn { width: 100%; }
+  .source-workspace-primary > span { display: none; }
+  .source-workspace-primary .ant-btn { width: 100%; }
   .composer-shell { min-height: 106px; margin: 0 9px 9px; padding: 13px 12px 9px; }
   .history-actions { gap: 2px; }
   .history-actions .export-action { margin-left: 1px; }

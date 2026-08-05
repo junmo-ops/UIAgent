@@ -31,6 +31,8 @@ export function createApp(
   providedWorkspaceStore?: SourceWorkspaceStore,
   providedCodingAgent?: CodingAgentPort
 ) {
+  const publicBaseUrl = env.PUBLIC_BASE_URL?.trim().replace(/\/+$/, '');
+  const publicUrl = (path: string, requestUrl: string) => new URL(path, publicBaseUrl ? `${publicBaseUrl}/` : requestUrl).toString();
   const logStore = providedLogStore ?? new TurnLogStore({
     filePath: env.LOG_FILE ?? '.logs/agent-turns.jsonl',
     model: {
@@ -48,7 +50,10 @@ export function createApp(
   const codingAgent = providedCodingAgent ?? codingAgentPortFromEnvironment(env);
   const sourceProgress = new SourceTurnProgressStore();
   return new Hono()
-    .use('*', cors({ origin: '*', allowHeaders: ['Content-Type', 'traceparent'] }))
+    .use('*', cors({
+      origin: env.CORS_ORIGIN?.trim() || '*',
+      allowHeaders: ['Content-Type', 'traceparent']
+    }))
     .get('/logs', c => c.html(logPageHtml))
     .get('/v1/logs', c => c.json(logStore.list()))
     .get('/v1/logs/:id', c => {
@@ -67,7 +72,7 @@ export function createApp(
     .post('/v1/snapshots', zValidator('json', staticSnapshotSchema), c => {
       try {
         const snapshot = snapshotStore.create(c.req.valid('json'));
-        const previewUrl = new URL(`/snapshots/${snapshot.snapshotId}`, c.req.url).toString();
+        const previewUrl = publicUrl(`/snapshots/${snapshot.snapshotId}`, c.req.url);
         return c.json(snapshotCreatedSchema.parse({ snapshotId: snapshot.snapshotId, previewUrl }), 201);
       } catch (error) {
         return c.json({
@@ -88,7 +93,7 @@ export function createApp(
     .post('/v1/workspaces', zValidator('json', staticSnapshotSchema), c => {
       try {
         const workspace = workspaceStore.create(c.req.valid('json'));
-        const previewUrl = new URL(`/workspaces/${workspace.workspaceId}/preview`, c.req.url).toString();
+        const previewUrl = publicUrl(`/workspaces/${workspace.workspaceId}/preview`, c.req.url);
         return c.json(sourceWorkspaceCreatedSchema.parse({ ...workspace, previewUrl }), 201);
       } catch (error) {
         return c.json({
@@ -101,7 +106,7 @@ export function createApp(
       try {
         const workspace = workspaceStore.get(c.req.param('workspaceId'));
         if (!workspace) return c.json({ code: 'WORKSPACE_NOT_FOUND', message: '静态源码工作区不存在' }, 404);
-        const previewUrl = new URL(`/workspaces/${workspace.workspaceId}/preview`, c.req.url).toString();
+        const previewUrl = publicUrl(`/workspaces/${workspace.workspaceId}/preview`, c.req.url);
         return c.json(sourceWorkspaceInfoSchema.parse({ ...workspace, previewUrl }));
       } catch (error) {
         return c.json({ code: 'WORKSPACE_NOT_FOUND', message: error instanceof Error ? error.message : '工作区不存在' }, 404);

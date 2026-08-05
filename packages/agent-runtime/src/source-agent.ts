@@ -8,6 +8,7 @@ import {
 } from '@ui-agent/contracts';
 import { z, ZodError } from 'zod';
 import type { CodingAgentStep, CodingWorkspaceTools } from './coding-agent-port';
+import { CONTROLLED_INTERACTION_INSTRUCTIONS } from './controlled-interaction-instructions';
 
 export interface SourceFileTools extends CodingWorkspaceTools {}
 
@@ -47,6 +48,7 @@ const sourceRules = [
   '需要新增复杂结构时，复制最相似的现有结构，再修改文字、属性和静态状态。',
   'replace.search 必须是刚刚读取到的原文且足够唯一；不要猜测文件内容。',
   '不得添加 script、事件属性、远程资源、接口请求、表单 action 或 javascript: URL。',
+  CONTROLLED_INTERACTION_INSTRUCTIONS,
   '每次替换后根据工具返回的校验结果决定继续修改或 finish。',
   '达到用户目标后立即 finish，不要做无关重构。',
   '只能返回指定 JSON，不要输出 Markdown 或解释。'

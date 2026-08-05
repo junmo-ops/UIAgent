@@ -20,12 +20,18 @@ import {
   type ContextScope,
   type SourceWorkspaceInfo,
   type SourceTurnProgress,
-  type SelectedContext
+  type SelectedContext,
+  type StaticSnapshot
 } from '@ui-agent/contracts';
 import { onMessage, sendMessage } from '../../src/messaging';
+import {
+  createPortableSnapshotPackage,
+  parsePortableSnapshotPackage,
+  portableSnapshotFilename,
+  serializePortableSnapshotPackage
+} from '../../src/portable-snapshot';
 import { sessionMachine } from './session-machine';
-
-const serviceUrlItem = storage.defineItem<string>('local:agentServiceUrl', { fallback: 'http://127.0.0.1:8787' });
+import { DEFAULT_AGENT_SERVICE_URL, getAgentServiceUrl } from '../../src/agent-service-config';
 
 // Side Panel 文档关闭时 Chrome 会自动断开该 Port，Background 据此立即清理选区。
 const editorClientId = crypto.randomUUID();
@@ -35,6 +41,7 @@ void editorPort;
 
 interface ChatEntry { id: string; role: 'user' | 'assistant'; text: string }
 interface ActiveTurn { turnId: string; traceId: string }
+type ServiceStatus = 'checking' | 'connected' | 'unavailable';
 interface ActiveWorkspace extends SourceWorkspaceInfo {
   tabId: number;
   sourceTabId?: number;
@@ -49,7 +56,7 @@ const sourceWorkspaceSessionItem = storage.defineItem<PersistedWorkspaceSession 
   'local:sourceWorkspaceSession',
   { fallback: null }
 );
-type IconName = 'sparkle' | 'target' | 'edit' | 'snapshot' | 'undo' | 'redo' | 'reset' | 'download' | 'arrow' | 'back';
+type IconName = 'sparkle' | 'target' | 'edit' | 'snapshot' | 'undo' | 'redo' | 'reset' | 'download' | 'upload' | 'arrow' | 'back';
 
 function UiIcon({ name }: { name: IconName }) {
   const paths: Record<IconName, React.ReactNode> = {
@@ -61,6 +68,7 @@ function UiIcon({ name }: { name: IconName }) {
     redo: <><path d="m15 7 5 5-5 5" /><path d="M19 12h-8a6 6 0 0 0-6 6" /></>,
     reset: <><path d="M4.8 8A8 8 0 1 1 4 15" /><path d="M4 4v5h5" /></>,
     download: <><path d="M12 3v12" /><path d="m7.5 11 4.5 4.5 4.5-4.5" /><path d="M5 21h14" /></>,
+    upload: <><path d="M12 21V9" /><path d="m7.5 13.5 4.5-4.5 4.5 4.5" /><path d="M5 3h14" /></>,
     arrow: <><path d="M12 19V5" /><path d="m6.5 10.5 5.5-5.5 5.5 5.5" /></>,
     back: <><path d="m10 7-5 5 5 5" /><path d="M5 12h14" /></>
   };
@@ -88,28 +96,40 @@ async function serviceResponseError(response: Response, fallback: string): Promi
   }
 }
 
+async function fetchAgentService(url: string, init?: RequestInit): Promise<Response> {
+  try {
+    return await fetch(url, init);
+  } catch {
+    const origin = (() => { try { return new URL(url).origin; } catch { return url; } })();
+    throw new Error(`无法连接 Agent Service（${origin}）。请确认服务地址可访问；跨电脑使用时不能指向 127.0.0.1。`);
+  }
+}
+
 export function SidePanelApp() {
   const [state, send] = useMachine(sessionMachine);
   const [instruction, setInstruction] = useState('');
   const [chat, setChat] = useState<ChatEntry[]>([]);
-  const [serviceUrl, setServiceUrl] = useState('http://127.0.0.1:8787');
+  const [serviceUrl, setServiceUrl] = useState(DEFAULT_AGENT_SERVICE_URL);
+  const [serviceStatus, setServiceStatus] = useState<ServiceStatus>('checking');
   const [editSessionId, setEditSessionId] = useState<string>(() => crypto.randomUUID());
   const [activeTurn, setActiveTurn] = useState<ActiveTurn>();
   const [sourceWorkspace, setSourceWorkspace] = useState<ActiveWorkspace>();
   const [sourceProgress, setSourceProgress] = useState<SourceTurnProgress>();
   const [snapshotBusy, setSnapshotBusy] = useState(false);
+  const [exportConfirmOpen, setExportConfirmOpen] = useState(false);
   const composerRef = useRef<TextAreaRef>(null);
+  const snapshotFileRef = useRef<HTMLInputElement>(null);
   const busy = snapshotBusy || state.matches('planning') || state.matches('applying') || state.matches('verifying') || state.matches('repairing');
 
   useEffect(() => {
-    serviceUrlItem.getValue().then(async url => {
+    getAgentServiceUrl().then(async url => {
       setServiceUrl(url);
       const [tab] = await browser.tabs.query({ active: true, currentWindow: true });
       const match = /\/workspaces\/([0-9a-f-]{36})\/preview/i.exec(tab?.url ?? '');
       if (!match || !tab?.id) return;
       try {
         const [response, persisted] = await Promise.all([
-          fetch(`${url.replace(/\/$/, '')}/v1/workspaces/${match[1]}`),
+          fetchAgentService(`${url.replace(/\/$/, '')}/v1/workspaces/${match[1]}`),
           sourceWorkspaceSessionItem.getValue()
         ]);
         if (!response.ok) return;
@@ -132,6 +152,19 @@ export function SidePanelApp() {
       } catch { /* Keep the regular page mode when workspace restoration fails. */ }
     });
   }, []);
+  useEffect(() => {
+    const controller = new AbortController();
+    const timer = window.setTimeout(() => controller.abort(), 5000);
+    setServiceStatus('checking');
+    fetchAgentService(`${serviceUrl}/health`, { signal: controller.signal, cache: 'no-store' })
+      .then(response => setServiceStatus(response.ok ? 'connected' : 'unavailable'))
+      .catch(() => setServiceStatus('unavailable'))
+      .finally(() => window.clearTimeout(timer));
+    return () => {
+      window.clearTimeout(timer);
+      controller.abort();
+    };
+  }, [serviceUrl]);
   useEffect(() => {
     if (!sourceWorkspace) return;
     const { tabId: _tabId, sourceTabId: _sourceTabId, ...workspace } = sourceWorkspace;
@@ -203,7 +236,7 @@ export function SidePanelApp() {
           protocolVersion: PROTOCOL_VERSION, editSessionId,
           ...turn, instruction: text, context
         });
-        const response = await fetch(`${serviceUrl}/v1/turns`, {
+        const response = await fetchAgentService(`${serviceUrl}/v1/turns`, {
           method: 'POST',
           headers: { 'content-type': 'application/json' },
           body: JSON.stringify(request)
@@ -245,7 +278,7 @@ export function SidePanelApp() {
         receipt: result.receipt,
         observation: context
       });
-      const response = await fetch(`${serviceUrl}/v1/turns/${turn.turnId}/execution`, {
+      const response = await fetchAgentService(`${serviceUrl}/v1/turns/${turn.turnId}/execution`, {
         method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(submission)
       });
       if (!response.ok) throw await serviceResponseError(response, 'Agent Service 验证接口返回');
@@ -279,7 +312,7 @@ export function SidePanelApp() {
     try {
       if (sourceWorkspace) {
         setSnapshotBusy(true);
-        const response = await fetch(
+        const response = await fetchAgentService(
           `${serviceUrl.replace(/\/$/, '')}/v1/workspaces/${sourceWorkspace.workspaceId}/${type}`,
           { method: 'POST' }
         );
@@ -331,7 +364,7 @@ export function SidePanelApp() {
       const progressUrl = `${serviceUrl.replace(/\/$/, '')}/v1/workspaces/${workspace.workspaceId}/turns/${request.turnId}/progress`;
       const refreshProgress = async () => {
         try {
-          const progressResponse = await fetch(progressUrl, { cache: 'no-store' });
+          const progressResponse = await fetchAgentService(progressUrl, { cache: 'no-store' });
           if (!progressResponse.ok) return;
           setSourceProgress(sourceTurnProgressSchema.parse(await progressResponse.json()));
         } catch {
@@ -339,7 +372,7 @@ export function SidePanelApp() {
         }
       };
       progressTimer = window.setInterval(() => { void refreshProgress(); }, 650);
-      const response = await fetch(`${serviceUrl.replace(/\/$/, '')}/v1/workspaces/${workspace.workspaceId}/turns`, {
+      const response = await fetchAgentService(`${serviceUrl.replace(/\/$/, '')}/v1/workspaces/${workspace.workspaceId}/turns`, {
         method: 'POST',
         headers: { 'content-type': 'application/json' },
         body: JSON.stringify(request)
@@ -372,32 +405,27 @@ export function SidePanelApp() {
     }
   };
 
-  const createSourceWorkspace = async () => {
+  const openWorkspaceFromSnapshot = async (snapshot: StaticSnapshot, sourceTabId?: number) => {
     setSnapshotBusy(true);
     let loadingTabId: number | undefined;
     let previewReady = false;
     try {
-      const [sourceTab, captured] = await Promise.all([
-        browser.tabs.query({ active: true, currentWindow: true }).then(tabs => tabs[0]),
-        command({ type: 'capturePageSnapshot' })
-      ]);
-      if (!captured.snapshot) throw new Error('页面没有返回静态源码副本');
       const loadingTab = await browser.tabs.create({
         url: browser.runtime.getURL('/workspace-loading.html'),
         active: false
       });
       loadingTabId = loadingTab.id;
       if (!loadingTabId) throw new Error('静态副本标签页创建失败');
-      const response = await fetch(`${serviceUrl.replace(/\/$/, '')}/v1/workspaces`, {
+      const response = await fetchAgentService(`${serviceUrl.replace(/\/$/, '')}/v1/workspaces`, {
         method: 'POST',
         headers: { 'content-type': 'application/json' },
-        body: JSON.stringify(captured.snapshot)
+        body: JSON.stringify(snapshot)
       });
       if (!response.ok) throw await serviceResponseError(response, '静态源码工作区服务返回');
       const created = sourceWorkspaceCreatedSchema.parse(await response.json());
       const persistedWorkspace: SourceWorkspaceInfo = {
         ...created,
-        sourceUrl: captured.snapshot.sourceUrl,
+        sourceUrl: snapshot.sourceUrl,
         revision: 0,
         canUndo: false,
         canRedo: false
@@ -406,7 +434,7 @@ export function SidePanelApp() {
         workspace: persistedWorkspace,
         chat: [],
         editSessionId,
-        sourceTabId: sourceTab?.id
+        sourceTabId
       });
       setChat([]);
       setInstruction('');
@@ -416,7 +444,7 @@ export function SidePanelApp() {
       const workspace: ActiveWorkspace = {
         ...persistedWorkspace,
         tabId: tab.id,
-        sourceTabId: sourceTab?.id
+        sourceTabId
       };
       setSourceWorkspace(workspace);
       await command({ type: 'bindEditorTab', tabId: tab.id, previewUrl: created.previewUrl });
@@ -433,9 +461,61 @@ export function SidePanelApp() {
       setSnapshotBusy(false);
     }
   };
+  const createSourceWorkspace = async () => {
+    setSnapshotBusy(true);
+    try {
+      const [sourceTab, captured] = await Promise.all([
+        browser.tabs.query({ active: true, currentWindow: true }).then(tabs => tabs[0]),
+        command({ type: 'capturePageSnapshot' })
+      ]);
+      if (!captured.snapshot) throw new Error('页面没有返回静态源码副本');
+      await openWorkspaceFromSnapshot(captured.snapshot, sourceTab?.id);
+    } catch (error) {
+      fail(error);
+      setSnapshotBusy(false);
+    }
+  };
+  const exportPortableSnapshot = async () => {
+    setExportConfirmOpen(false);
+    setSnapshotBusy(true);
+    try {
+      const captured = await command({ type: 'capturePageSnapshot' });
+      if (!captured.snapshot) throw new Error('页面没有返回可导出的静态快照');
+      const portable = createPortableSnapshotPackage(captured.snapshot);
+      const blob = new Blob([serializePortableSnapshotPackage(portable)], { type: 'application/json' });
+      const url = URL.createObjectURL(blob);
+      try {
+        await browser.downloads.download({
+          url,
+          filename: portableSnapshotFilename(captured.snapshot.title, captured.snapshot.capturedAt),
+          saveAs: true
+        });
+      } finally {
+        window.setTimeout(() => URL.revokeObjectURL(url), 5_000);
+      }
+      send({ type: 'NOTICE', message: '离线快照包已导出' });
+    } catch (error) {
+      fail(error);
+    } finally {
+      setSnapshotBusy(false);
+    }
+  };
+  const importPortableSnapshot = async (file: File) => {
+    setSnapshotBusy(true);
+    try {
+      const portable = parsePortableSnapshotPackage(await file.text());
+      setEditSessionId(crypto.randomUUID());
+      await openWorkspaceFromSnapshot(portable.snapshot);
+    } catch (error) {
+      fail(error);
+      setSnapshotBusy(false);
+    } finally {
+      if (snapshotFileRef.current) snapshotFileRef.current.value = '';
+    }
+  };
   const fail = (error: unknown) => send({ type: 'FAIL', error: error instanceof Error ? error.message : '操作失败' });
   const selection = state.context.selection;
-  const examples = ['把按钮文案改成“确定”', '在右侧增加一个筛选项'];
+  const examples = ['把按钮文案改成“确定”', '在右侧增加一个筛选项', '点击按钮时展开下方内容'];
 
   return (
     <main className="panel">
@@ -457,7 +537,7 @@ export function SidePanelApp() {
               </Tooltip>
             )}
             <Tooltip title={`Agent Service：${serviceUrl}`}>
-              <span className="service-status"><i />已连接</span>
+              <span className={`service-status ${serviceStatus}`}><i />{serviceStatus === 'connected' ? '已连接' : serviceStatus === 'checking' ? '连接中' : '未连接'}</span>
             </Tooltip>
             <span className="demo-badge">DEMO</span>
           </div>
@@ -500,7 +580,7 @@ export function SidePanelApp() {
             <div className="empty-tip">
               <span className="empty-icon"><UiIcon name="sparkle" /></span>
               <strong>{selection ? '描述你想看到的页面效果' : '先选择需要调整的区域'}</strong>
-              <p>{selection ? '可以修改内容、样式和布局，或添加新的基础组件。' : '点击上方“选择”，然后在静态副本页面中点击目标元素。'}</p>
+              <p>{selection ? '可以修改内容、样式和布局，或添加安全的点击交互。' : '点击上方“选择”，然后在静态副本页面中点击目标元素。'}</p>
               <div className="example-list">
                 {examples.map(example => <button key={example} type="button" onClick={() => setInstruction(example)}>{example}</button>)}
               </div>
@@ -540,17 +620,38 @@ export function SidePanelApp() {
 
         {!sourceWorkspace && (
           <div className="source-workspace-cta">
-            <Button
-              block
-              type="primary"
-              icon={<UiIcon name="snapshot" />}
-              disabled={busy}
-              loading={snapshotBusy}
-              onClick={createSourceWorkspace}
-            >
-              进入副本编辑
-            </Button>
-            <span>复制当前页面并在新标签页打开</span>
+            <div className="source-workspace-primary">
+              <Button
+                block
+                type="primary"
+                icon={<UiIcon name="snapshot" />}
+                disabled={busy}
+                loading={snapshotBusy}
+                onClick={createSourceWorkspace}
+              >
+                进入副本编辑
+              </Button>
+              <span>复制当前页面并在新标签页打开</span>
+            </div>
+            <div className="snapshot-transfer-actions">
+              <Button type="text" icon={<UiIcon name="download" />} disabled={busy} onClick={() => setExportConfirmOpen(true)}>
+                导出快照包
+              </Button>
+              <i />
+              <Button type="text" icon={<UiIcon name="upload" />} disabled={busy} onClick={() => snapshotFileRef.current?.click()}>
+                导入快照包
+              </Button>
+              <input
+                ref={snapshotFileRef}
+                className="snapshot-file-input"
+                type="file"
+                accept=".json,application/json"
+                onChange={event => {
+                  const file = event.target.files?.[0];
+                  if (file) void importPortableSnapshot(file);
+                }}
+              />
+            </div>
           </div>
         )}
 
@@ -590,6 +691,17 @@ export function SidePanelApp() {
       <Modal open={state.matches('confirming')} title="确认删除页面已有元素" okText="确认删除" okButtonProps={{ danger: true }} cancelText="取消" onCancel={() => send({ type: 'DISMISS' })} onOk={() => state.context.pendingPlan && apply(state.context.pendingPlan, true)}>
         <p>拟删除：<strong>{selection?.selected.text || selection?.selected.tag}</strong></p>
         <p>该操作只影响当前页面会话，之后仍可撤销。</p>
+      </Modal>
+      <Modal
+        open={exportConfirmOpen}
+        title="导出离线快照包"
+        okText="确认并导出"
+        cancelText="取消"
+        onCancel={() => setExportConfirmOpen(false)}
+        onOk={() => void exportPortableSnapshot()}
+      >
+        <p>快照包不包含脚本、接口、Cookie 或浏览器 Storage，但会包含页面当前可见文字和输入框中的值。</p>
+        <p>请确认页面内容已经脱敏，并通过公司允许的方式传输文件。</p>
       </Modal>
     </main>
   );

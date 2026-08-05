@@ -2,12 +2,17 @@ import { changePlanSchema, type ContentCommandResult } from '@ui-agent/contracts
 import { DomEngine } from '../src/content/dom-engine';
 import { selectionTarget } from '../src/content/selection-target';
 import { captureStaticSnapshot } from '../src/content/snapshot-capture';
+import { ControlledInteractionRuntime } from '../src/content/controlled-interactions';
 import { onMessage, sendMessage } from '../src/messaging';
 
 export default defineContentScript({
   matches: ['http://127.0.0.1/*', 'http://localhost/*'],
   main() {
     const engine = new DomEngine();
+    const interactions = document.body.hasAttribute('data-ui-agent-static-snapshot')
+      ? new ControlledInteractionRuntime(document)
+      : undefined;
+    interactions?.mount();
     let selecting = false;
     let selectedElement: HTMLElement | undefined;
     let editorLeaseTimer: ReturnType<typeof setTimeout> | undefined;

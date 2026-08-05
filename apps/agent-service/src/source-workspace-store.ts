@@ -12,6 +12,8 @@ import { randomUUID } from 'node:crypto';
 import { type SourceConversationTurn, type SourceFileTools } from '@ui-agent/agent-runtime';
 import { staticSnapshotSchema, type SourceTurnResponse } from '@ui-agent/contracts';
 import { compileSourceWorkspace, refreshWorkspaceIndexes } from './source-workspace-compiler';
+import { validateControlledInteractions } from './source-workspace-interactions';
+import { analyzeStaticVisibility, staticVisibilityIssueKey } from './source-workspace-visibility';
 
 const WORKSPACE_FILES = ['index.html', 'snapshot.css', 'outline.json', 'source-map.json'] as const;
 type WorkspaceFile = typeof WORKSPACE_FILES[number];
@@ -42,7 +44,14 @@ interface WorkspaceManifest {
   revision: number;
   maxRevision: number;
   summaries: Array<{ revision: number; summary: string; timestamp: string }>;
-  conversation?: SourceConversationTurn[];
+  conversation?: WorkspaceConversationTurn[];
+}
+
+interface WorkspaceConversationTurn extends SourceConversationTurn {
+  /** Workspace revision visible immediately after this turn. */
+  revision?: number;
+  /** Clarification awaiting a successful source-changing follow-up. */
+  pending?: boolean;
 }
 
 export interface SourceWorkspace {
@@ -68,6 +77,7 @@ function validateHtml(html: string): string {
     throw new Error('源码包含脚本、事件、远程资源或其他不安全内容（检测到：CSS 外部 url()）');
   }
   validateTableStructure(html);
+  validateControlledInteractions(html);
   if (html.length > 10_000_000) throw new Error('index.html 超过 10 MB 限制');
   return 'HTML 与安全规则校验通过';
 }
@@ -269,14 +279,15 @@ function compactElementSource(outerHtml: string): string {
     .map(match => match[1]!.trim())
     .filter(Boolean)
     .slice(0, 20);
-  const visibleText = decodeBasicEntities(rawTextSegments.join(' ').replace(/\s+/g, ' ').trim());
+  const domText = decodeBasicEntities(rawTextSegments.join(' ').replace(/\s+/g, ' ').trim());
   const styleClasses = [...new Set(
     [...outerHtml.matchAll(/\bclass\s*=\s*["']([^"']+)["']/gi)]
       .flatMap(match => match[1]!.split(/\s+/))
       .filter(className => className.startsWith('ui-snapshot-style-'))
   )].slice(0, 40);
   return [
-    `visibleText: ${JSON.stringify(visibleText)}`,
+    `domText: ${JSON.stringify(domText)}`,
+    'visibilityNote: domText 仅表示源码中存在文字，不代表元素在渲染后可见；请使用 validate_workspace 检查静态裁剪风险。',
     `rawTextSegments: ${JSON.stringify(rawTextSegments)}`,
     `styleClasses: ${JSON.stringify(styleClasses)}`,
     `compactHtml: ${compactHtml}`
@@ -400,7 +411,11 @@ export class SourceWorkspaceStore {
   conversation(workspaceId: string): SourceConversationTurn[] {
     const directory = this.workspacePath(workspaceId);
     if (!this.get(workspaceId)) throw new Error('静态源码工作区不存在');
-    return [...(this.readManifest(directory).conversation ?? [])].slice(-8);
+    const manifest = this.readManifest(directory);
+    return (manifest.conversation ?? [])
+      .filter(turn => (turn.revision ?? 0) <= manifest.revision)
+      .slice(-8)
+      .map(({ instruction, result }) => ({ instruction, result }));
   }
 
   recordTurn(workspaceId: string, instruction: string, response: SourceTurnResponse): void {
@@ -408,13 +423,22 @@ export class SourceWorkspaceStore {
     const directory = this.workspacePath(workspaceId);
     const manifest = this.readManifest(directory);
     const result = response.kind === 'completed' ? response.summary : response.question;
+    const revision = response.kind === 'completed' ? response.revision : manifest.revision;
+    const retained = response.kind === 'completed'
+      ? (manifest.conversation ?? []).filter(turn => (turn.revision ?? 0) < response.revision)
+      : (manifest.conversation ?? []);
+    const linked = response.kind === 'completed'
+      ? retained.map(turn => turn.pending && turn.revision === response.revision - 1
+        ? { ...turn, revision: response.revision, pending: false }
+        : turn)
+      : retained;
     this.writeManifest(directory, {
       ...manifest,
       updatedAt: new Date().toISOString(),
       conversation: [
-        ...(manifest.conversation ?? []),
-        { instruction, result }
-      ].slice(-8)
+        ...linked,
+        { instruction, result, revision, ...(response.kind === 'clarification' && { pending: true }) }
+      ].slice(-40)
     });
   }
 
@@ -425,6 +449,10 @@ export class SourceWorkspaceStore {
     this.active.add(workspaceId);
     const original = this.readWorkspaceFiles(directory);
     let working: WorkspaceFiles = { ...original };
+    const initial = this.readWorkspaceFiles(resolve(directory, 'revisions', '000'));
+    const baselineVisibilityIssues = new Set(
+      analyzeStaticVisibility(initial['index.html'], initial['snapshot.css']).map(staticVisibilityIssueKey)
+    );
     let closed = false;
     const refreshIndexes = () => {
       const indexes = refreshWorkspaceIndexes(working['index.html']);
@@ -434,7 +462,14 @@ export class SourceWorkspaceStore {
     const validateWorking = () => {
       validateHtml(working['index.html']);
       validateCss(working['snapshot.css']);
-      return 'HTML、CSS、结构与安全规则校验通过';
+      const newVisibilityIssues = analyzeStaticVisibility(
+        working['index.html'],
+        working['snapshot.css']
+      ).filter(issue => !baselineVisibilityIssues.has(staticVisibilityIssueKey(issue)));
+      if (newVisibilityIssues.length) {
+        throw new Error(`静态可见性校验失败：${newVisibilityIssues.slice(0, 3).map(issue => issue.message).join('；')}。请调整父容器尺寸、overflow 或元素定位后重新校验。`);
+      }
+      return 'HTML、CSS、结构、安全与静态可见性规则校验通过';
     };
     const close = () => {
       if (closed) return;
@@ -684,6 +719,7 @@ export class SourceWorkspaceStore {
         if (working['index.html'] === original['index.html'] && working['snapshot.css'] === original['snapshot.css']) {
           throw new Error('Agent 没有对静态源码产生修改');
         }
+        validateWorking();
         const revision = this.commitWorkingCopy(workspaceId, working, summary);
         close();
         return revision;
@@ -808,7 +844,32 @@ export class SourceWorkspaceStore {
   }
 
   private readManifest(directory: string): WorkspaceManifest {
-    return JSON.parse(readFileSync(resolve(directory, 'workspace.json'), 'utf8')) as WorkspaceManifest;
+    const manifest = JSON.parse(readFileSync(resolve(directory, 'workspace.json'), 'utf8')) as WorkspaceManifest;
+    if (!manifest.conversation?.some(turn => turn.revision === undefined)) return manifest;
+
+    // Workspace V2 initially stored conversations without a revision. Recover completed
+    // turn revisions by matching their persisted summaries; clarification turns inherit
+    // the latest known revision. This keeps existing workspaces undo-aware.
+    const summaries = manifest.summaries.filter(item => item.revision > 0);
+    let latestRevision = 0;
+    const used = new Set<number>();
+    return {
+      ...manifest,
+      conversation: manifest.conversation.map(turn => {
+        if (turn.revision !== undefined) {
+          latestRevision = Math.max(latestRevision, turn.revision);
+          return turn;
+        }
+        const summary = summaries.find(item => !used.has(item.revision) && (
+          turn.result.startsWith(item.summary) || item.summary.startsWith(turn.result)
+        ));
+        if (summary) {
+          used.add(summary.revision);
+          latestRevision = summary.revision;
+        }
+        return { ...turn, revision: latestRevision };
+      })
+    };
   }
 
   private writeManifest(directory: string, manifest: WorkspaceManifest) {

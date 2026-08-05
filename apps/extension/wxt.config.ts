@@ -1,5 +1,8 @@
 import { defineConfig } from 'wxt';
 
+const serviceUrl = new URL(process.env.WXT_PUBLIC_AGENT_SERVICE_URL ?? 'http://127.0.0.1:8787');
+const serviceHostPermission = `${serviceUrl.origin}/*`;
+
 export default defineConfig({
   modules: ['@wxt-dev/module-react'],
   manifest: {
@@ -7,6 +10,7 @@ export default defineConfig({
     description: '选择页面区域，通过自然语言生成受控的静态 UI 需求示意。',
     version: '0.1.0',
     permissions: ['activeTab', 'scripting', 'sidePanel', 'storage', 'downloads'],
+    host_permissions: [serviceHostPermission],
     action: { default_title: '打开 UI 需求示意助手' }
   }
 });

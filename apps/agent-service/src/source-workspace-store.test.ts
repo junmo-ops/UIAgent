@@ -1,4 +1,4 @@
-import { mkdtempSync, rmSync } from 'node:fs';
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
@@ -46,7 +46,7 @@ describe('SourceWorkspaceStore', () => {
       expect.objectContaining({ path: 'outline.json' }),
       expect.objectContaining({ path: 'source-map.json' })
     ]));
-    expect(await tools.inspectElement('source-0')).toMatch(/visibleText: "查 询".+rawTextSegments: \["查 询"\].+compactHtml: <button[^>]+source-0[^>]*>.+<span[^>]+source-1[^>]*>查 询/s);
+    expect(await tools.inspectElement('source-0')).toMatch(/domText: "查 询".+visibilityNote:.+rawTextSegments: \["查 询"\].+compactHtml: <button[^>]+source-0[^>]*>.+<span[^>]+source-1[^>]*>查 询/s);
     expect(await tools.readStyleRule('ui-snapshot-style-0')).toContain('color:red');
     await tools.replaceInElement('source-0', '查 询', '确定');
     expect(await tools.validate()).toContain('校验通过');
@@ -96,13 +96,16 @@ describe('SourceWorkspaceStore', () => {
     );
   });
 
-  it('persists recent source-agent conversation with the workspace', () => {
+  it('persists recent source-agent conversation with the workspace', async () => {
     const store = createStore();
     const workspace = store.create(snapshot);
     store.recordTurn(workspace.workspaceId, '新增一行订单', {
       kind: 'clarification',
       question: '请提供订单信息'
     });
+    const tools = store.tools(workspace.workspaceId);
+    await tools.replaceInElement('source-0', '查 询', '新增订单');
+    await tools.commit('已新增随机订单');
     store.recordTurn(workspace.workspaceId, '随机生成', {
       kind: 'completed',
       summary: '已新增随机订单',
@@ -114,6 +117,47 @@ describe('SourceWorkspaceStore', () => {
       { instruction: '新增一行订单', result: '请提供订单信息' },
       { instruction: '随机生成', result: '已新增随机订单' }
     ]);
+    store.undo(workspace.workspaceId);
+    expect(store.conversation(workspace.workspaceId)).toEqual([]);
+  });
+
+  it('filters conversation by revision across undo, redo, and a new branch', async () => {
+    const store = createStore();
+    const workspace = store.create(snapshot);
+
+    const firstTools = store.tools(workspace.workspaceId);
+    await firstTools.replaceInElement('source-0', '查 询', '提交');
+    await firstTools.commit('修改为提交');
+    store.recordTurn(workspace.workspaceId, '把查询改成提交', {
+      kind: 'completed', summary: '修改为提交', revision: 1, modelCalls: 1, toolCalls: 1
+    });
+
+    const secondTools = store.tools(workspace.workspaceId);
+    await secondTools.replaceInElement('source-0', '提交', '确认');
+    await secondTools.commit('修改为确认');
+    store.recordTurn(workspace.workspaceId, '再改成确认', {
+      kind: 'completed', summary: '修改为确认', revision: 2, modelCalls: 1, toolCalls: 1
+    });
+
+    store.undo(workspace.workspaceId);
+    expect(store.conversation(workspace.workspaceId).map(turn => turn.instruction))
+      .toEqual(['把查询改成提交']);
+
+    store.redo(workspace.workspaceId);
+    expect(store.conversation(workspace.workspaceId).map(turn => turn.instruction))
+      .toEqual(['把查询改成提交', '再改成确认']);
+
+    store.undo(workspace.workspaceId);
+    const branchTools = store.tools(workspace.workspaceId);
+    await branchTools.replaceInElement('source-0', '提交', '审核');
+    await branchTools.commit('修改为审核');
+    store.recordTurn(workspace.workspaceId, '改成审核', {
+      kind: 'completed', summary: '修改为审核', revision: 2, modelCalls: 1, toolCalls: 1
+    });
+
+    expect(store.conversation(workspace.workspaceId).map(turn => turn.instruction))
+      .toEqual(['把查询改成提交', '改成审核']);
+    expect(() => store.redo(workspace.workspaceId)).toThrow('没有可重做的版本');
   });
 
   it('rejects unsafe output and paths outside index.html', async () => {
@@ -226,6 +270,40 @@ describe('SourceWorkspaceStore', () => {
       '</tbody>',
       '</tr></tbody>'
     )).rejects.toThrow('表格标签结构无效');
+    await tools.rollback();
+  });
+
+  it('rejects a newly visible element that is fully clipped by its parent', async () => {
+    const store = createStore();
+    const workspace = store.create({
+      ...snapshot,
+      html: '<!doctype html><html><body><div data-ui-source-id="source-10" style="width:48px;height:500px;overflow:hidden;position:relative"><div data-ui-source-id="source-11" style="display:none;position:absolute;left:48px;width:260px;height:100%">历史会话</div></div></body></html>'
+    });
+    const tools = store.tools(workspace.workspaceId);
+
+    await tools.replaceText('snapshot.css', 'display:none', 'display:flex');
+    await expect(tools.validate()).rejects.toThrow(/静态可见性校验失败.+source-11.+source-10/);
+    await expect(tools.commit('展开历史会话')).rejects.toThrow('静态可见性校验失败');
+    await tools.rollback();
+  });
+
+  it('keeps detecting a clipped element committed by an older revision until it is repaired', async () => {
+    const store = createStore();
+    const workspace = store.create({
+      ...snapshot,
+      html: '<!doctype html><html><body><div data-ui-source-id="source-10" style="width:48px;height:500px;overflow:hidden;position:relative"><div data-ui-source-id="source-11" style="display:none;position:absolute;left:48px;width:260px;height:100%">历史会话</div></div></body></html>'
+    });
+    const workspaceDirectory = join(roots.at(-1)!, workspace.workspaceId);
+    const cssPath = join(workspaceDirectory, 'snapshot.css');
+    const manifestPath = join(workspaceDirectory, 'workspace.json');
+    const css = readFileSync(cssPath, 'utf8').replace('display:none', 'display:flex');
+    const manifest = JSON.parse(readFileSync(manifestPath, 'utf8')) as Record<string, unknown>;
+    writeFileSync(cssPath, css);
+    writeFileSync(manifestPath, JSON.stringify({ ...manifest, revision: 1, maxRevision: 1 }));
+
+    const tools = store.tools(workspace.workspaceId);
+    await tools.replaceInElement('source-11', '历史会话', '历史记录');
+    await expect(tools.validate()).rejects.toThrow('静态可见性校验失败');
     await tools.rollback();
   });
 });

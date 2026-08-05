@@ -21,6 +21,7 @@ type SessionEvent =
   | { type: 'APPLIED'; message: string; selection?: SelectedContext; canUndo: boolean; canRedo: boolean }
   | { type: 'CLARIFY'; message: string }
   | { type: 'HISTORY'; canUndo: boolean; canRedo: boolean; selection?: SelectedContext }
+  | { type: 'NOTICE'; message: string }
   | { type: 'FAIL'; error: string }
   | { type: 'DISMISS' };
 
@@ -32,6 +33,7 @@ export const sessionMachine = setup({
     setApplied: assign(({ event }) => event.type === 'APPLIED' ? { pendingPlan: undefined, message: event.message, selection: event.selection, canUndo: event.canUndo, canRedo: event.canRedo, error: undefined } : {}),
     setClarification: assign(({ event }) => event.type === 'CLARIFY' ? { message: event.message, pendingPlan: undefined } : {}),
     setHistory: assign(({ context, event }) => event.type === 'HISTORY' ? { canUndo: event.canUndo, canRedo: event.canRedo, selection: event.selection ?? context.selection } : {}),
+    setNotice: assign(({ event }) => event.type === 'NOTICE' ? { message: event.message, error: undefined } : {}),
     setError: assign(({ event }) => event.type === 'FAIL' ? { error: event.error } : {}),
     clearError: assign({ error: undefined })
   }
@@ -42,6 +44,7 @@ export const sessionMachine = setup({
   on: {
     SELECTION_FOUND: { target: '.ready', actions: 'setSelection' },
     FAIL: { target: '.error', actions: 'setError' },
+    NOTICE: { actions: 'setNotice' },
     HISTORY: { actions: 'setHistory' }
   },
   states: {

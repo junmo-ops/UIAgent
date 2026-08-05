@@ -14,7 +14,7 @@ describe('agent service', () => {
     const root = mkdtempSync(join(tmpdir(), 'ui-agent-app-workspace-'));
     try {
       const app = createApp(
-        { MODEL_MODE: 'mock' },
+        { MODEL_MODE: 'mock', PUBLIC_BASE_URL: 'https://ui-agent.example.test' },
         new TurnLogStore({ persist: false }),
         new SnapshotStore(),
         new SourceWorkspaceStore(root)
@@ -35,6 +35,7 @@ describe('agent service', () => {
       });
       expect(response.status).toBe(201);
       const created = await response.json() as { workspaceId: string; previewUrl: string };
+      expect(created.previewUrl).toBe(`https://ui-agent.example.test/workspaces/${created.workspaceId}/preview`);
       const info = await app.request(`/v1/workspaces/${created.workspaceId}`);
       expect(await info.json()).toMatchObject({ workspaceId: created.workspaceId, revision: 0, canUndo: false });
       const preview = await app.request(`/workspaces/${created.workspaceId}/preview`);

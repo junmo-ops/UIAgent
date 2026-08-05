@@ -1,0 +1,22 @@
+import { describe, expect, it } from 'vitest';
+import { validateControlledInteractions } from './source-workspace-interactions';
+
+describe('validateControlledInteractions', () => {
+  it('accepts safe visibility and state declarations', () => {
+    expect(() => validateControlledInteractions(`<!doctype html><html><body>
+      <button data-ui-source-id="source-1" data-ui-agent-action="toggle" data-ui-agent-targets="source-2"></button>
+      <section data-ui-source-id="source-2" hidden></section>
+      <button data-ui-source-id="source-3" data-ui-agent-action="set-state" data-ui-agent-state-group="tabs" data-ui-agent-state-value="a"></button>
+      <section data-ui-source-id="source-4" data-ui-agent-state-group="tabs" data-ui-agent-state-when="a"></section>
+    </body></html>`)).not.toThrow();
+  });
+
+  it('rejects unknown actions, missing targets, and incomplete state groups', () => {
+    expect(() => validateControlledInteractions('<html><body><button data-ui-agent-action="run-script"></button></body></html>'))
+      .toThrow('不支持的受控交互动作');
+    expect(() => validateControlledInteractions('<html><body><button data-ui-agent-action="show" data-ui-agent-targets="source-99"></button></body></html>'))
+      .toThrow('目标 source-99 不存在');
+    expect(() => validateControlledInteractions('<html><body><button data-ui-agent-action="set-state" data-ui-agent-state-group="tabs" data-ui-agent-state-value="a"></button></body></html>'))
+      .toThrow('没有对应的展示面板');
+  });
+});

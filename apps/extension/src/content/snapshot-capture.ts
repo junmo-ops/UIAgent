@@ -11,7 +11,8 @@ const STYLE_PROPERTIES = [
   'flex-direction', 'flex-grow', 'flex-shrink', 'flex-wrap', 'font-family',
   'font-size', 'font-style', 'font-weight', 'gap', 'grid-auto-columns',
   'grid-auto-flow', 'grid-auto-rows', 'grid-column', 'grid-row',
-  'grid-template-columns', 'grid-template-rows', 'height', 'justify-content',
+  'grid-template-columns', 'grid-template-rows', 'height', 'inset', 'top', 'right',
+  'bottom', 'left', 'justify-content',
   'justify-items', 'justify-self', 'letter-spacing', 'line-height', 'list-style',
   'margin-bottom', 'margin-left', 'margin-right', 'margin-top', 'max-height',
   'max-width', 'min-height', 'min-width', 'object-fit', 'opacity', 'order',
@@ -28,6 +29,11 @@ const BLOCKED_TAGS = new Set([
   'STYLE', 'LINK', 'META', 'TEMPLATE'
 ]);
 const URL_ATTRIBUTES = new Set(['href', 'src', 'srcset', 'action', 'formaction', 'poster', 'xlink:href']);
+const CONTROLLED_INTERACTION_ATTRIBUTES = new Set([
+  'data-ui-agent-action', 'data-ui-agent-targets', 'data-ui-agent-state-group',
+  'data-ui-agent-state-value', 'data-ui-agent-state-when', 'data-ui-agent-active-class',
+  'data-ui-agent-state-active'
+]);
 
 function escapeHtml(value: string): string {
   return value
@@ -81,6 +87,10 @@ function sanitizeElement(source: Element, clone: Element): void {
   for (const attribute of [...clone.attributes]) {
     const name = attribute.name.toLowerCase();
     const value = attribute.value.trim();
+    if (CONTROLLED_INTERACTION_ATTRIBUTES.has(name)) {
+      clone.removeAttribute(attribute.name);
+      continue;
+    }
     if (name.startsWith('on') || name === 'srcdoc' || name === 'http-equiv') {
       clone.removeAttribute(attribute.name);
       continue;

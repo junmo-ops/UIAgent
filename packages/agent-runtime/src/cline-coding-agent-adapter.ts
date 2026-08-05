@@ -15,6 +15,7 @@ import {
   type CodingAgentTurn,
   type CodingWorkspaceTools
 } from './coding-agent-port';
+import { CONTROLLED_INTERACTION_INSTRUCTIONS } from './controlled-interaction-instructions';
 
 const objectSchema = (
   properties: Record<string, unknown>,
@@ -40,14 +41,15 @@ const clineSourceRules = [
   'outline.json 与 source-map.json 由系统维护，只能读取，不能修改。',
   'replace_text 的 search 必须来自刚刚读取的源码，且应足够唯一；不要猜测源码。',
   '需要在文件开头、末尾或明确锚点旁插入内容时使用 apply_patch，不要为了追加内容反复寻找唯一的文件尾字符串。',
-  'inspect_element 会返回 styleClasses；需要了解现有视觉样式时直接用 read_style_rule 读取完整规则，不要连续切片读取 snapshot.css。',
+  'inspect_element 会返回 domText 和 styleClasses；domText 只证明文字存在于源码，不能证明渲染后可见。需要了解现有视觉样式时直接用 read_style_rule 读取完整规则，不要连续切片读取 snapshot.css。',
   '移动已有元素必须使用 move_element，禁止用大段 replace_text 删除后重建或重排。',
   '新增与现有组件同款的结构时优先使用 clone_element，再用局部替换或 Patch 完成差异；不要手写复制整段组件源码。',
   '同一个工具错误重复出现时必须更换策略；不得用重复读取和重复替换消耗迭代次数。',
   '如果有 selectedSourceId，可用 inspect_element 读取该元素的紧凑源码。',
   '优先复用已有结构和 class；新增同类组件时复制相邻源码结构，再修改必要内容。',
   '不得添加 script、事件属性、远程资源、接口请求、表单 action 或 javascript: URL。',
-  '每次修改后检查工具结果；目标达成后调用 finish，无法安全确定时调用 clarify。',
+  CONTROLLED_INTERACTION_INSTRUCTIONS,
+  '每次修改后检查工具结果；目标达成后先调用 validate_workspace。若提示元素被 overflow 裁剪，必须调整父容器尺寸、overflow 或定位，不能直接声明完成。',
   '不要只用自然语言声称完成。没有调用 finish 或 clarify，本轮就不算完成。',
   '不要做与用户请求无关的重构。'
 ].join('\n');

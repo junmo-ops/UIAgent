@@ -1,7 +1,9 @@
 import { onMessage, sendMessage } from '../src/messaging';
 import type { ContentCommand, ContentCommandResult, ExtensionErrorCode } from '@ui-agent/contracts';
-import { isLocalWorkspacePreviewUrl, pageInjectionIssue } from '../src/url-policy';
+import { pageInjectionIssue } from '../src/url-policy';
 import { EditorTabRegistry } from '../src/editor-tab-registry';
+import { getAgentServiceUrl } from '../src/agent-service-config';
+import { isWorkspacePreviewUrl } from '../src/agent-service-url';
 
 class BrowserCommandError extends Error {
   constructor(readonly code: ExtensionErrorCode, message: string) {
@@ -19,10 +21,10 @@ async function activeTab() {
   return tab;
 }
 
-async function waitForWorkspacePreviewTab(tabId: number, timeoutMs = 3000): Promise<Browser.tabs.Tab> {
+async function waitForWorkspacePreviewTab(tabId: number, serviceUrl: string, timeoutMs = 3000): Promise<Browser.tabs.Tab> {
   const deadline = Date.now() + timeoutMs;
   let tab = await browser.tabs.get(tabId);
-  while (![tab.url, tab.pendingUrl].some(isLocalWorkspacePreviewUrl) && Date.now() < deadline) {
+  while (![tab.url, tab.pendingUrl].some(url => isWorkspacePreviewUrl(url, serviceUrl)) && Date.now() < deadline) {
     await new Promise(resolve => setTimeout(resolve, 50));
     tab = await browser.tabs.get(tabId);
   }
@@ -121,14 +123,15 @@ export default defineBackground(() => {
     try {
       const { editorClientId, command } = message.data;
       if (command.type === 'bindEditorTab') {
-        const trustedPreviewUrl = isLocalWorkspacePreviewUrl(command.previewUrl);
+        const serviceUrl = await getAgentServiceUrl();
+        const trustedPreviewUrl = isWorkspacePreviewUrl(command.previewUrl, serviceUrl);
         const tab = trustedPreviewUrl
           ? await browser.tabs.get(command.tabId)
-          : await waitForWorkspacePreviewTab(command.tabId);
-        if (!trustedPreviewUrl && ![tab.url, tab.pendingUrl].some(isLocalWorkspacePreviewUrl)) {
+          : await waitForWorkspacePreviewTab(command.tabId, serviceUrl);
+        if (!trustedPreviewUrl && ![tab.url, tab.pendingUrl].some(url => isWorkspacePreviewUrl(url, serviceUrl))) {
           throw new BrowserCommandError(
             'INVALID_PAGE_URL',
-            `只能将编辑会话绑定到本机静态源码副本。当前地址：${tab.url ?? '未知'}；待加载地址：${tab.pendingUrl ?? '无'}`
+            `只能将编辑会话绑定到当前 Agent Service 的静态源码副本。当前地址：${tab.url ?? '未知'}；待加载地址：${tab.pendingUrl ?? '无'}`
           );
         }
         const previousTabId = editorTabs.resolve(editorClientId);

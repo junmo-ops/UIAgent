@@ -115,6 +115,35 @@ http://127.0.0.1:8787/logs
 
 其他 OpenAI-compatible 模型仍可使用：将 `MODEL_PROVIDER` 改为 `openai-compatible`，并设置对应的 `MODEL_BASE_URL`、`MODEL_API_KEY` 和 `MODEL_NAME`。
 
+## 构建可安装即用的版本
+
+正式交付时不能让插件连接 `127.0.0.1`。需要先把 Agent Service 部署到公司内网或受控 HTTPS 环境，再把该地址写入插件产物。
+
+服务端已经支持容器运行：
+
+```bash
+docker build -t ui-agent-service .
+docker run --name ui-agent-service \
+  -p 8787:8787 \
+  -v ui-agent-data:/data \
+  --env-file apps/agent-service/.env \
+  -e HOST=0.0.0.0 \
+  ui-agent-service
+```
+
+线上环境应由网关提供 HTTPS，并限制为受信任的公司网络或增加统一鉴权。不要把 DeepSeek Key 写入插件或提交到仓库。
+反向代理或容器平台终止 HTTPS 时，还应设置 `PUBLIC_BASE_URL=https://实际服务域名`，确保服务返回的副本地址也是正确的 HTTPS 地址。
+
+构建插件时设置公开的服务根地址：
+
+```bash
+WXT_PUBLIC_AGENT_SERVICE_URL=https://ui-agent.example.com pnpm --filter @ui-agent/extension build
+```
+
+构建产物位于 `apps/extension/.output/chrome-mv3`。该服务地址会同时用于 API 请求、副本页面校验和精确的 Chrome 主机权限；安装这个构建产物的用户不需要在自己的电脑上启动 Agent Service。插件顶部会真实检测 `/health`，分别展示“连接中”“已连接”或“未连接”，网络失败时会提示实际服务地址，不再只显示 `Failed to fetch`。
+
+远程服务至少需要持久化 `/data`，其中包含静态工作区与操作日志。生产化前还需要根据公司环境接入鉴权、用户工作区隔离、自动过期清理和日志访问控制；当前容器配置用于受控 Demo 部署，不建议直接暴露到公共互联网。
+
 ## 验证
 
 ```bash
