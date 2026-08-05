@@ -10,13 +10,10 @@
   },
   "dependencies": {
     "@ui-agent/contracts": "workspace:*",
-    "@ui-agent/domain": "workspace:*",
     "@webext-core/messaging": "^2.3.0",
-    "@xstate/react": "^6.0.0",
     "antd": "^6.0.0",
     "react": "^19.1.0",
     "react-dom": "^19.1.0",
-    "xstate": "^5.20.0",
     "zod": "^4.0.0"
   },
   "devDependencies": {

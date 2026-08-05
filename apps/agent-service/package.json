@@ -14,7 +14,6 @@
     "@hono/zod-validator": "^0.7.0",
     "@ui-agent/agent-runtime": "workspace:*",
     "@ui-agent/contracts": "workspace:*",
-    "@ui-agent/ui-change-agent": "workspace:*",
     "hono": "^4.9.0",
     "linkedom": "^0.18.13",
     "zod": "^4.0.0"

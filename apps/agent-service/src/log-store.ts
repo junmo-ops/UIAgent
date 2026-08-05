@@ -1,18 +1,12 @@
 import { appendFileSync, existsSync, mkdirSync, readFileSync, renameSync, statSync, writeFileSync } from 'node:fs';
 import { dirname, resolve } from 'node:path';
 import type {
-  AgentTurnResponse,
-  ExecutionSubmission,
-  PlannerResult,
   SourceTurnRequest,
-  SourceTurnResponse,
-  StartTurnRequest
+  SourceTurnResponse
 } from '@ui-agent/contracts';
 import type {
-  ConversationTurn,
   CodingAgentStep,
   CodingAgentCheckpoint,
-  RuntimeTraceEvent,
   SourceConversationTurn
 } from '@ui-agent/agent-runtime';
 
@@ -22,25 +16,14 @@ export interface TurnLogEntry {
   updatedAt: string;
   status: 'running' | 'completed' | 'failed';
   model: { mode: string; provider: string; name?: string };
-  request: StartTurnRequest | SourceTurnRequest;
-  conversation: ConversationTurn[] | SourceConversationTurn[];
-  result?: PlannerResult | SourceTurnResponse;
+  request: SourceTurnRequest;
+  conversation: SourceConversationTurn[];
+  result?: SourceTurnResponse;
   sourceWorkspaceId?: string;
   codingAgent?: { adapterId: string; checkpoint: CodingAgentCheckpoint };
   sourceSteps?: CodingAgentStep[];
   error?: string;
   durationMs?: number;
-  modelAttempts?: Array<{
-    timestamp: string;
-    status: 'completed' | 'failed';
-    attempt: number;
-    durationMs: number;
-    promptChars: number;
-    systemChars: number;
-    repairReason?: string;
-    error?: string;
-  }>;
-  executions?: Array<{ timestamp: string; submission: ExecutionSubmission; response: AgentTurnResponse }>;
 }
 
 export interface TurnLogSummary {
@@ -88,58 +71,6 @@ export class TurnLogStore {
     this.load();
   }
 
-  observe = (event: RuntimeTraceEvent): void => {
-    if (event.type === 'model.attempt.completed' || event.type === 'model.attempt.failed') {
-      const entry = [...this.entries].reverse().find(item => item.request.turnId === event.request.turnId);
-      if (!entry) return;
-      entry.modelAttempts ??= [];
-      entry.modelAttempts.push(redact({
-        timestamp: event.timestamp,
-        status: event.type === 'model.attempt.completed' ? 'completed' : 'failed',
-        attempt: event.attempt,
-        durationMs: event.durationMs,
-        promptChars: event.promptChars,
-        systemChars: event.systemChars,
-        repairReason: event.repairReason,
-        error: event.error
-      }) as NonNullable<TurnLogEntry['modelAttempts']>[number]);
-      entry.updatedAt = event.timestamp;
-      this.persist(entry);
-      return;
-    }
-    if (event.type === 'turn.started') {
-      const entry = redact({
-        id: `log-${crypto.randomUUID()}`,
-        timestamp: event.timestamp,
-        updatedAt: event.timestamp,
-        status: 'running',
-        model: this.model,
-        request: event.request,
-        conversation: event.conversation
-      }) as TurnLogEntry;
-      this.entries.push(entry);
-      this.trim();
-      this.persist(entry);
-      console.info(`[agent-log] started session=${entry.request.editSessionId} turn=${entry.request.turnId}`);
-      return;
-    }
-
-    const entry = [...this.entries].reverse().find(item => item.request.turnId === event.request.turnId);
-    if (!entry) return;
-    entry.updatedAt = event.timestamp;
-    entry.durationMs = event.durationMs;
-    entry.conversation = redact(event.conversation) as ConversationTurn[];
-    if (event.type === 'turn.completed') {
-      entry.status = 'completed';
-      entry.result = redact(event.result) as PlannerResult;
-    } else {
-      entry.status = 'failed';
-      entry.error = event.error;
-    }
-    this.persist(entry);
-    console.info(`[agent-log] ${entry.status} session=${entry.request.editSessionId} turn=${entry.request.turnId} durationMs=${entry.durationMs}`);
-  };
-
   list(): TurnLogSummary[] {
     return [...this.entries].reverse().map(entry => ({
       id: entry.id,
@@ -158,16 +89,6 @@ export class TurnLogStore {
 
   get(id: string): TurnLogEntry | undefined {
     return this.entries.find(entry => entry.id === id);
-  }
-
-  recordExecution(submission: ExecutionSubmission, response: AgentTurnResponse): void {
-    const entry = [...this.entries].reverse().find(item => item.request.turnId === submission.turnId);
-    if (!entry) return;
-    const timestamp = new Date().toISOString();
-    entry.updatedAt = timestamp;
-    entry.executions ??= [];
-    entry.executions.push(redact({ timestamp, submission, response }) as NonNullable<TurnLogEntry['executions']>[number]);
-    this.persist(entry);
   }
 
   recordSourceTurn(

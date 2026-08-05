@@ -7,16 +7,10 @@ module.exports = {
       to: { circular: true }
     },
     {
-      name: 'domain-does-not-depend-on-apps',
-      severity: 'error',
-      from: { path: '^packages/ui-change-domain/' },
-      to: { path: '^apps/' }
-    },
-    {
       name: 'contracts-do-not-depend-on-implementation',
       severity: 'error',
       from: { path: '^packages/ui-change-contracts/' },
-      to: { path: '^(apps/|packages/ui-change-domain/)' }
+      to: { path: '^apps/' }
     },
     {
       name: 'agent-runtime-does-not-depend-on-browser',
