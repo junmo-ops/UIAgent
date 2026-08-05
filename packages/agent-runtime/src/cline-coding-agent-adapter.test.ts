@@ -103,6 +103,7 @@ describe('ClineCodingAgentAdapter', () => {
   it('exposes only restricted source tools and completes through finish', async () => {
     const workspace = workspaceTools();
     let configuredTools: string[] = [];
+    let configuredMaxIterations = 0;
     const adapter = new ClineCodingAgentAdapter({
       baseUrl: 'https://example.test',
       apiKey: 'test-key',
@@ -110,6 +111,7 @@ describe('ClineCodingAgentAdapter', () => {
       factory: config => ({
         run: async () => {
           configuredTools = config.tools.map(tool => tool.name);
+          configuredMaxIterations = config.maxIterations;
           await findTool<Record<string, never>>(config, 'list_files').execute({}, context(1));
           await findTool<{ sourceId: string }>(config, 'inspect_element').execute(
             { sourceId: 'source-0' },
@@ -139,18 +141,22 @@ describe('ClineCodingAgentAdapter', () => {
       'search_text',
       'read_file',
       'inspect_element',
+      'inspect_elements',
       'read_style_rule',
+      'read_style_rules',
       'replace_text',
       'apply_patch',
       'replace_in_element',
       'move_element',
       'clone_element',
+      'validate_spatial_scope',
       'validate_workspace',
       'finish',
       'clarify'
     ]);
     expect(configuredTools).not.toContain('shell');
     expect(configuredTools).not.toContain('browser');
+    expect(configuredMaxIterations).toBe(45);
     expect(run.response).toMatchObject({
       kind: 'completed',
       revision: 2,
@@ -309,6 +315,161 @@ describe('ClineCodingAgentAdapter', () => {
       toolCalls: 0,
       lastAction: 'clarify'
     });
+    expect(workspace.state().rolledBack).toBe(true);
+  });
+
+  it('reserves the final iterations for validation and completion', async () => {
+    const workspace = workspaceTools();
+    let inspected = 0;
+    workspace.tools.inspectElement = async () => {
+      inspected += 1;
+      return '不应继续读取';
+    };
+    let budgetMessage = '';
+    const adapter = new ClineCodingAgentAdapter({
+      baseUrl: 'https://example.test',
+      apiKey: 'test-key',
+      modelName: 'test-model',
+      maxIterations: 6,
+      factory: config => ({
+        run: async () => {
+          expect(config.systemPrompt).toContain('从第 4 轮起必须停止扩展读取');
+          budgetMessage = await findTool<{ sourceId: string }>(config, 'inspect_element').execute(
+            { sourceId: 'source-0' },
+            context(4)
+          );
+          await findTool<{ question: string }>(config, 'clarify').execute(
+            { question: '当前范围过大，请拆分后重试' },
+            context(5)
+          );
+          return result(5);
+        }
+      })
+    });
+
+    const run = await adapter.run({
+      workspaceId: '11111111-1111-4111-8111-111111111111',
+      request,
+      conversation: []
+    }, workspace.tools);
+
+    expect(budgetMessage).toContain('停止继续读取');
+    expect(inspected).toBe(0);
+    expect(run.response.kind).toBe('clarification');
+    expect(workspace.state().rolledBack).toBe(true);
+  });
+
+  it('requires new modules to validate against the selected spatial container', async () => {
+    const workspace = workspaceTools();
+    workspace.tools.inspectElement = async sourceId => sourceId === 'source-9'
+      ? '结构路径: source-0<button> > source-9<span>\ncompactHtml: <span data-ui-source-id="source-9">提示</span>'
+      : '结构路径: source-0<button>\ncompactHtml: <button data-ui-source-id="source-0">查询</button>';
+    let prematureFinishError = '';
+    const adapter = new ClineCodingAgentAdapter({
+      baseUrl: 'https://example.test',
+      apiKey: 'test-key',
+      modelName: 'test-model',
+      factory: config => ({
+        run: async () => {
+          await findTool<{ path: string; search: string; replace: string }>(config, 'replace_text').execute({
+            path: 'index.html',
+            search: '<button data-ui-source-id="source-0">查询</button>',
+            replace: '<button data-ui-source-id="source-0">查询<span data-ui-source-id="source-9">提示</span></button>'
+          }, context(1));
+          try {
+            await findTool<{ summary: string }>(config, 'finish').execute(
+              { summary: '新增提示' },
+              context(2)
+            );
+          } catch (error) {
+            prematureFinishError = error instanceof Error ? error.message : String(error);
+          }
+          await findTool<{
+            scope: 'selected-context';
+            containerSourceId: string;
+            createdSourceIds: string[];
+            reason: string;
+          }>(config, 'validate_spatial_scope').execute({
+            scope: 'selected-context',
+            containerSourceId: 'source-0',
+            createdSourceIds: ['source-9'],
+            reason: '提示位于选中按钮内部'
+          }, context(3));
+          await findTool<{ summary: string }>(config, 'finish').execute(
+            { summary: '已在选中按钮内新增提示' },
+            context(4)
+          );
+          return result(4);
+        }
+      })
+    });
+
+    const run = await adapter.run({
+      workspaceId: '11111111-1111-4111-8111-111111111111',
+      request,
+      conversation: []
+    }, workspace.tools);
+
+    expect(prematureFinishError).toContain('必须调用 validate_spatial_scope');
+    expect(run.response.kind).toBe('completed');
+    expect(workspace.state()).toMatchObject({ committed: true, rolledBack: false });
+  });
+
+  it('rejects global fixed positioning when the user only gave a local relative position', async () => {
+    const workspace = workspaceTools();
+    workspace.tools.inspectElement = async sourceId => sourceId === 'source-9'
+      ? '结构路径: source-0<button> > source-9<span>'
+      : '结构路径: source-0<button>';
+    let spatialError = '';
+    const adapter = new ClineCodingAgentAdapter({
+      baseUrl: 'https://example.test',
+      apiKey: 'test-key',
+      modelName: 'test-model',
+      factory: config => ({
+        run: async () => {
+          await findTool<{ path: string; search: string; replace: string }>(config, 'replace_text').execute({
+            path: 'index.html',
+            search: '<button data-ui-source-id="source-0">查询</button>',
+            replace: '<button data-ui-source-id="source-0">查询<span class="floating-tip" data-ui-source-id="source-9">提示</span></button>'
+          }, context(1));
+          await findTool<{
+            path: string;
+            edits: Array<{ kind: 'insert'; position: 'end'; text: string }>;
+          }>(config, 'apply_patch').execute({
+            path: 'snapshot.css',
+            edits: [{ kind: 'insert', position: 'end', text: '.floating-tip{position:fixed;bottom:0}' }]
+          }, context(2));
+          try {
+            await findTool<{
+              scope: 'selected-context'; containerSourceId: string;
+              createdSourceIds: string[]; positioningClassNames: string[]; reason: string;
+            }>(config, 'validate_spatial_scope').execute({
+              scope: 'selected-context',
+              containerSourceId: 'source-0',
+              createdSourceIds: ['source-9'],
+              positioningClassNames: ['floating-tip'],
+              reason: '用户说在按钮下方增加提示'
+            }, context(3));
+          } catch (error) {
+            spatialError = error instanceof Error ? error.message : String(error);
+          }
+          await findTool<{ question: string }>(config, 'clarify').execute(
+            { question: '请确认是否需要固定在浏览器视口底部' },
+            context(4)
+          );
+          return result(4);
+        }
+      })
+    });
+
+    const run = await adapter.run({
+      workspaceId: '11111111-1111-4111-8111-111111111111',
+      request: { ...request, instruction: '在按钮下方增加提示' },
+      conversation: []
+    }, workspace.tools);
+
+    expect(spatialError).toContain('position:fixed');
+    expect(run.response.kind).toBe('clarification');
     expect(workspace.state().rolledBack).toBe(true);
   });
 

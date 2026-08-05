@@ -3,7 +3,11 @@ import type { SourceTurnProgress } from '@ui-agent/contracts';
 
 function phaseForAction(action: string): SourceTurnProgress['phase'] {
   if (action === 'list_files' || action === 'search_text' || action === 'search') return 'locating';
-  if (action === 'read_file' || action === 'read_style_rule' || action === 'read' || action === 'inspect_element' || action === 'inspect') return 'reading';
+  if (
+    action === 'read_file' || action === 'read_style_rule' || action === 'read_style_rules'
+    || action === 'read' || action === 'inspect_element' || action === 'inspect_elements'
+    || action === 'inspect'
+  ) return 'reading';
   if (
     action === 'replace_text'
     || action === 'replace'
@@ -16,6 +20,7 @@ function phaseForAction(action: string): SourceTurnProgress['phase'] {
     || action === 'cloneElement'
   ) return 'editing';
   if (action === 'validate_workspace') return 'validating';
+  if (action === 'validate_spatial_scope') return 'validating';
   if (action === 'finish' || action === 'clarify') return 'finishing';
   return 'analyzing';
 }
@@ -27,8 +32,10 @@ function labelForAction(action: string): string {
     search: '搜索页面结构',
     read_file: '读取局部源码',
     read_style_rule: '读取完整样式规则',
+    read_style_rules: '批量读取样式规则',
     read: '读取局部源码',
     inspect_element: '检查选中元素',
+    inspect_elements: '批量检查页面元素',
     inspect: '检查选中元素',
     replace_text: '修改页面源码',
     replace: '修改页面源码',
@@ -40,6 +47,7 @@ function labelForAction(action: string): string {
     moveElement: '调整元素位置',
     cloneElement: '复用现有组件',
     validate_workspace: '校验页面结构与安全',
+    validate_spatial_scope: '校验新增模块位置',
     finish: '提交页面修改',
     clarify: '整理待确认问题'
   };
@@ -57,6 +65,8 @@ function detailForStep(step: CodingAgentStep): string | undefined {
   if (typeof input.path === 'string') return input.path;
   if (typeof input.className === 'string') return `.${input.className.replace(/^\./, '')}`;
   if (typeof input.sourceId === 'string') return `元素 ${input.sourceId}`;
+  if (Array.isArray(input.sourceIds)) return `${input.sourceIds.length} 个元素`;
+  if (Array.isArray(input.classNames)) return `${input.classNames.length} 条样式规则`;
   if (typeof input.query === 'string') {
     return `“${input.query.slice(0, 40)}${input.query.length > 40 ? '…' : ''}”`;
   }

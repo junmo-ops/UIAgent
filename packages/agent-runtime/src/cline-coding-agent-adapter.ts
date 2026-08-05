@@ -42,10 +42,14 @@ const clineSourceRules = [
   'replace_text 的 search 必须来自刚刚读取的源码，且应足够唯一；不要猜测源码。',
   '需要在文件开头、末尾或明确锚点旁插入内容时使用 apply_patch，不要为了追加内容反复寻找唯一的文件尾字符串。',
   'inspect_element 会返回 domText 和 styleClasses；domText 只证明文字存在于源码，不能证明渲染后可见。需要了解现有视觉样式时直接用 read_style_rule 读取完整规则，不要连续切片读取 snapshot.css。',
+  '需要检查多个元素或样式时，优先使用 inspect_elements 和 read_style_rules 批量读取，避免逐个调用消耗迭代次数。',
   '移动已有元素必须使用 move_element，禁止用大段 replace_text 删除后重建或重排。',
   '新增与现有组件同款的结构时优先使用 clone_element，再用局部替换或 Patch 完成差异；不要手写复制整段组件源码。',
   '同一个工具错误重复出现时必须更换策略；不得用重复读取和重复替换消耗迭代次数。',
   '如果有 selectedSourceId，可用 inspect_element 读取该元素的紧凑源码。',
+  '空间定位优先级：用户明确指定页面、视口、弹窗、表格等容器时以该容器为准；否则所有“顶部、底部、左侧、右侧、中间、附近”等位置都必须以 selectedSourceId 或其最近语义祖先为锚点。',
+  '需求涉及选中元素的相邻组件时，只扩展到最近公共父容器。除非用户明确说页面、浏览器视口、全局、悬浮或固定，否则禁止把新增模块放到页面根节点或使用 position:fixed。',
+  '新增元素后必须调用 validate_spatial_scope，说明实际容器和新增顶层 sourceId；无法确定参照容器时调用 clarify，不得自行猜测全局位置。',
   '优先复用已有结构和 class；新增同类组件时复制相邻源码结构，再修改必要内容。',
   '不得添加 script、事件属性、远程资源、接口请求、表单 action 或 javascript: URL。',
   CONTROLLED_INTERACTION_INSTRUCTIONS,
@@ -53,6 +57,13 @@ const clineSourceRules = [
   '不要只用自然语言声称完成。没有调用 finish 或 clarify，本轮就不算完成。',
   '不要做与用户请求无关的重构。'
 ].join('\n');
+
+const DEFAULT_MAX_ITERATIONS = 45;
+const FINALIZATION_WINDOW = 3;
+const BUDGETED_READ_ACTIONS = new Set([
+  'list_files', 'search_text', 'read_file', 'inspect_element', 'inspect_elements',
+  'read_style_rule', 'read_style_rules'
+]);
 
 export interface ClineAgentInstance {
   run(input: string): Promise<AgentRunResult>;
@@ -98,13 +109,28 @@ function failedResponse(error: unknown): SourceTurnResponse {
   };
 }
 
+function sourceIdsIn(value: string): Set<string> {
+  return new Set([...value.matchAll(/\bdata-ui-source-id\s*=\s*["'](source-\d+)["']/gi)]
+    .map(match => match[1]!));
+}
+
+function hasExplicitGlobalPlacement(instruction: string): boolean {
+  return /(?:页面|浏览器|视口|全局).{0,12}(?:顶部|中部|中间|底部|左侧|右侧|悬浮|固定)/.test(instruction)
+    || /(?:悬浮|固定).{0,12}(?:页面|浏览器|视口|全局)/.test(instruction);
+}
+
+function ancestrySourceIds(inspection: string): string[] {
+  const path = inspection.match(/结构路径:\s*([^\n]+)/)?.[1] ?? '';
+  return [...path.matchAll(/(source-\d+)</g)].map(match => match[1]!);
+}
+
 export class ClineCodingAgentAdapter implements CodingAgentPort {
   readonly adapterId = 'cline-sdk';
   private readonly maxIterations: number;
   private readonly factory: ClineAgentFactory;
 
   constructor(private readonly options: ClineCodingAgentOptions) {
-    this.maxIterations = options.maxIterations ?? 30;
+    this.maxIterations = options.maxIterations ?? DEFAULT_MAX_ITERATIONS;
     this.factory = options.factory ?? (input => new Agent({
       providerId: input.providerId,
       modelId: input.modelId,
@@ -127,6 +153,9 @@ export class ClineCodingAgentAdapter implements CodingAgentPort {
     const steps: CodingAgentStep[] = [];
     let completion: Completion | undefined;
     let rolledBack = false;
+    const newSourceIds = new Set<string>();
+    let spatialScopeValidated = false;
+    let introducedFixedPosition = false;
     const repeatedFailures = new Map<string, number>();
     let checkpoint: CodingAgentCheckpoint = {
       version: 1,
@@ -195,10 +224,20 @@ export class ClineCodingAgentAdapter implements CodingAgentPort {
       context: AgentToolContext,
       operation: () => Promise<string>
     ): Promise<string> => {
+      const remainingAfterThisCall = Math.max(0, this.maxIterations - context.iteration);
+      const finalizationStartsAt = Math.max(1, this.maxIterations - FINALIZATION_WINDOW + 1);
+      if (BUDGETED_READ_ACTIONS.has(action) && context.iteration >= finalizationStartsAt) {
+        const message = `[运行预算] 当前第 ${context.iteration}/${this.maxIterations} 轮，已进入最后 ${FINALIZATION_WINDOW} 轮，停止继续读取。若修改已完成，请立即调用 validate_workspace 后 finish；若关键信息仍不足，请调用 clarify。`;
+        record(action, input, context, message);
+        return message;
+      }
       try {
         const result = await operation();
-        record(action, input, context, result);
-        return result;
+        const guidedResult = remainingAfterThisCall <= 5
+          ? `[运行预算] 当前第 ${context.iteration}/${this.maxIterations} 轮，本次后最多剩余 ${remainingAfterThisCall} 轮。请停止扩展范围，完成必要修改并预留 validate_workspace 与 finish。\n\n${result}`
+          : result;
+        record(action, input, context, guidedResult);
+        return guidedResult;
       } catch (error) {
         const baseMessage = error instanceof Error ? error.message : String(error);
         const failureKey = `${action}:${baseMessage}`;
@@ -209,6 +248,24 @@ export class ClineCodingAgentAdapter implements CodingAgentPort {
           : baseMessage;
         record(action, input, context, undefined, message);
         throw new Error(message);
+      }
+    };
+
+    const trackNewSourceIds = (before: string, after: string) => {
+      const existing = sourceIdsIn(before);
+      let changed = false;
+      for (const sourceId of sourceIdsIn(after)) {
+        if (existing.has(sourceId)) continue;
+        newSourceIds.add(sourceId);
+        changed = true;
+      }
+      if (changed) spatialScopeValidated = false;
+    };
+
+    const trackPositioningChange = (before: string, after: string) => {
+      if (!/\bposition\s*:\s*fixed\b/i.test(before) && /\bposition\s*:\s*fixed\b/i.test(after)) {
+        introducedFixedPosition = true;
+        spatialScopeValidated = false;
       }
     };
 
@@ -280,6 +337,26 @@ export class ClineCodingAgentAdapter implements CodingAgentPort {
           () => workspace.inspectElement(input.sourceId)
         )
       }),
+      createTool<{ sourceIds: string[] }, string>({
+        name: 'inspect_elements',
+        description: '批量读取多个 data-ui-source-id 元素的局部源码、文字和样式线索，减少重复调用。',
+        inputSchema: objectSchema({
+          sourceIds: {
+            type: 'array',
+            minItems: 1,
+            maxItems: 8,
+            items: stringProperty('元素的 data-ui-source-id。')
+          }
+        }, ['sourceIds']),
+        execute: (input, context) => execute(
+          'inspect_elements',
+          input,
+          context,
+          async () => (await Promise.all(input.sourceIds.map(
+            sourceId => workspace.inspectElement(sourceId)
+          ))).join('\n\n---\n\n')
+        )
+      }),
       createTool<{ className: string }, string>({
         name: 'read_style_rule',
         description: '按 inspect_element 返回的 class 名一次读取 snapshot.css 中对应的完整样式规则。',
@@ -291,6 +368,26 @@ export class ClineCodingAgentAdapter implements CodingAgentPort {
           input,
           context,
           () => workspace.readStyleRule(input.className)
+        )
+      }),
+      createTool<{ classNames: string[] }, string>({
+        name: 'read_style_rules',
+        description: '批量读取多个 snapshot.css 完整样式规则，适合一次比较相关组件。',
+        inputSchema: objectSchema({
+          classNames: {
+            type: 'array',
+            minItems: 1,
+            maxItems: 12,
+            items: stringProperty('样式类名，可带或不带开头的点。')
+          }
+        }, ['classNames']),
+        execute: (input, context) => execute(
+          'read_style_rules',
+          input,
+          context,
+          async () => (await Promise.all(input.classNames.map(
+            className => workspace.readStyleRule(className)
+          ))).join('\n\n---\n\n')
         )
       }),
       createTool<{ path: string; search: string; replace: string }, string>({
@@ -305,7 +402,12 @@ export class ClineCodingAgentAdapter implements CodingAgentPort {
           'replace_text',
           input,
           context,
-          () => workspace.replaceText(input.path, input.search, input.replace)
+          async () => {
+            const result = await workspace.replaceText(input.path, input.search, input.replace);
+            if (input.path === 'index.html') trackNewSourceIds(input.search, input.replace);
+            else trackPositioningChange(input.search, input.replace);
+            return result;
+          }
         )
       }),
       createTool<{
@@ -337,7 +439,21 @@ export class ClineCodingAgentAdapter implements CodingAgentPort {
           'apply_patch',
           input,
           context,
-          () => workspace.applyPatch(input.path, input.edits)
+          async () => {
+            const result = await workspace.applyPatch(input.path, input.edits);
+            if (input.path === 'index.html') {
+              for (const edit of input.edits) {
+                if (edit.kind === 'replace') trackNewSourceIds(edit.search, edit.replace);
+                else trackNewSourceIds('', edit.text);
+              }
+            } else {
+              for (const edit of input.edits) {
+                if (edit.kind === 'replace') trackPositioningChange(edit.search, edit.replace);
+                else trackPositioningChange('', edit.text);
+              }
+            }
+            return result;
+          }
         )
       }),
       createTool<{ sourceId: string; search: string; replace: string }, string>({
@@ -352,7 +468,11 @@ export class ClineCodingAgentAdapter implements CodingAgentPort {
           'replace_in_element',
           input,
           context,
-          () => workspace.replaceInElement(input.sourceId, input.search, input.replace)
+          async () => {
+            const result = await workspace.replaceInElement(input.sourceId, input.search, input.replace);
+            trackNewSourceIds(input.search, input.replace);
+            return result;
+          }
         )
       }),
       createTool<{
@@ -399,12 +519,82 @@ export class ClineCodingAgentAdapter implements CodingAgentPort {
           'clone_element',
           input,
           context,
-          () => workspace.cloneElement(
-            input.templateSourceId,
-            input.position,
-            input.targetSourceId,
-            input.replacements
-          )
+          async () => {
+            const result = await workspace.cloneElement(
+              input.templateSourceId,
+              input.position,
+              input.targetSourceId,
+              input.replacements
+            );
+            const clonedSourceId = result.match(/克隆元素\s+(source-\d+)/)?.[1];
+            if (clonedSourceId) {
+              newSourceIds.add(clonedSourceId);
+              spatialScopeValidated = false;
+            }
+            return result;
+          }
+        )
+      }),
+      createTool<{
+        scope: 'selected-context' | 'explicit-container' | 'global';
+        containerSourceId?: string;
+        createdSourceIds: string[];
+        positioningClassNames?: string[];
+        reason: string;
+      }, string>({
+        name: 'validate_spatial_scope',
+        description: '校验新增模块是否围绕选区或用户明确指定的容器定位。新增元素后、finish 前必须调用。',
+        inputSchema: objectSchema({
+          scope: { type: 'string', enum: ['selected-context', 'explicit-container', 'global'] },
+          containerSourceId: stringProperty('实际承载新增顶层模块的容器 sourceId；global 可省略。'),
+          createdSourceIds: {
+            type: 'array', minItems: 1, maxItems: 20,
+            items: stringProperty('本轮新增的顶层模块 sourceId。')
+          },
+          positioningClassNames: {
+            type: 'array', maxItems: 20,
+            items: stringProperty('控制新增模块定位的 CSS 类名。')
+          },
+          reason: stringProperty('为何选择该容器，以及它与用户位置描述或选区的关系。')
+        }, ['scope', 'createdSourceIds', 'reason']),
+        execute: (input, context) => execute(
+          'validate_spatial_scope',
+          input,
+          context,
+          async () => {
+            const selectedSourceId = turn.request.sourceId;
+            if (input.scope === 'global' && !hasExplicitGlobalPlacement(turn.request.instruction)) {
+              throw new Error('用户没有明确指定页面、浏览器视口、全局、悬浮或固定位置，禁止使用 global 定位；请围绕当前选区选择语义容器，无法判断则 clarify');
+            }
+            if (input.scope !== 'global') {
+              if (!input.containerSourceId) throw new Error('非全局定位必须提供 containerSourceId');
+              if (input.scope === 'selected-context' && selectedSourceId) {
+                const selectedPath = ancestrySourceIds(await workspace.inspectElement(selectedSourceId));
+                if (!selectedPath.includes(input.containerSourceId)) {
+                  throw new Error(`容器 ${input.containerSourceId} 不在选中元素 ${selectedSourceId} 的祖先路径中；请使用选区语义祖先或最近公共父容器`);
+                }
+              }
+              for (const sourceId of newSourceIds) {
+                const createdPath = ancestrySourceIds(await workspace.inspectElement(sourceId));
+                if (!createdPath.includes(input.containerSourceId)) {
+                  throw new Error(`新增元素 ${sourceId} 不在声明的容器 ${input.containerSourceId} 内`);
+                }
+              }
+            }
+            if (input.scope !== 'global') {
+              if (introducedFixedPosition) {
+                throw new Error('本轮新增样式包含 position:fixed，但用户没有明确要求页面、浏览器视口或全局固定定位；请改为选区容器内的普通、absolute 或 sticky 布局');
+              }
+              for (const className of input.positioningClassNames ?? []) {
+                const rule = await workspace.readStyleRule(className);
+                if (/\bposition\s*:\s*fixed\b/i.test(rule)) {
+                  throw new Error(`样式 .${className.replace(/^\./, '')} 使用了 position:fixed，但用户没有声明全局视口定位`);
+                }
+              }
+            }
+            spatialScopeValidated = true;
+            return `空间归属校验通过：scope=${input.scope}${input.containerSourceId ? `，container=${input.containerSourceId}` : ''}；${input.reason}`;
+          }
         )
       }),
       createTool<Record<string, never>, string>({
@@ -427,6 +617,12 @@ export class ClineCodingAgentAdapter implements CodingAgentPort {
         lifecycle: { completesRun: true },
         execute: async (input, context) => {
           try {
+            if (introducedFixedPosition && !hasExplicitGlobalPlacement(turn.request.instruction)) {
+              throw new Error('用户没有明确要求全局定位，本轮却新增了 position:fixed；请围绕当前选区或其语义容器重新定位');
+            }
+            if (newSourceIds.size > 0 && !spatialScopeValidated) {
+              throw new Error(`本轮新增了 ${newSourceIds.size} 个源码元素，finish 前必须调用 validate_spatial_scope 校验其参照容器`);
+            }
             const validation = await workspace.validate();
             const revision = await workspace.commit(input.summary);
             completion = { kind: 'completed', summary: input.summary, validation, revision };
@@ -464,7 +660,7 @@ export class ClineCodingAgentAdapter implements CodingAgentPort {
         modelId: this.options.modelName,
         apiKey: this.options.apiKey,
         baseUrl: this.options.baseUrl,
-        systemPrompt: clineSourceRules,
+        systemPrompt: `${clineSourceRules}\n单轮最多 ${this.maxIterations} 次模型决策；从第 ${Math.max(1, this.maxIterations - FINALIZATION_WINDOW + 1)} 轮起必须停止扩展读取，只能完成必要修改、校验并 finish，或 clarify。`,
         tools,
         maxIterations: this.maxIterations
       });
@@ -534,7 +730,7 @@ export function clineCodingAgentFromEnvironment(
   if (!env.MODEL_BASE_URL || !env.MODEL_API_KEY || !env.MODEL_NAME) {
     throw new Error('Cline Adapter 必须设置 MODEL_BASE_URL、MODEL_API_KEY 和 MODEL_NAME');
   }
-  const parsedMaxIterations = Number(env.CLINE_MAX_ITERATIONS ?? 30);
+  const parsedMaxIterations = Number(env.CLINE_MAX_ITERATIONS ?? DEFAULT_MAX_ITERATIONS);
   if (!Number.isInteger(parsedMaxIterations) || parsedMaxIterations < 1) {
     throw new Error('CLINE_MAX_ITERATIONS 必须是大于 0 的整数');
   }
