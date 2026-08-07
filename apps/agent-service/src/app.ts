@@ -1,6 +1,6 @@
 import { zValidator } from '@hono/zod-validator';
 import {
-  codingAgentPortFromEnvironment,
+  clineCodingAgentFromEnvironment,
   type CodingAgentPort
 } from '@ui-agent/agent-runtime';
 import {
@@ -36,7 +36,7 @@ export function createApp(
   const workspaceStore = providedWorkspaceStore ?? new SourceWorkspaceStore(
     env.SOURCE_WORKSPACE_DIR ?? '.snapshots/source-workspaces'
   );
-  const codingAgent = providedCodingAgent ?? codingAgentPortFromEnvironment(env);
+  const codingAgent = providedCodingAgent ?? clineCodingAgentFromEnvironment(env);
   const sourceProgress = new SourceTurnProgressStore();
   return new Hono()
     .use('*', cors({
@@ -114,7 +114,7 @@ export function createApp(
           run.checkpoint.modelCalls,
           run.checkpoint.toolCalls
         );
-        workspaceStore.recordTurn(workspaceId, request.instruction, result);
+        workspaceStore.recordTurn(workspaceId, request, result);
         logStore.recordSourceTurn(
           workspaceId,
           request,

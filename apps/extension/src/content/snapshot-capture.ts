@@ -154,6 +154,13 @@ function sanitizeElement(source: Element, clone: Element): void {
   }
 }
 
+function capturedRect(source: Element): string {
+  const rect = source.getBoundingClientRect();
+  return [rect.x, rect.y, rect.width, rect.height]
+    .map(value => Math.round(value * 100) / 100)
+    .join(',');
+}
+
 function sanitizeTree(sourceRoot: HTMLElement, cloneRoot: HTMLElement): string[] {
   const sourceElements = [sourceRoot, ...sourceRoot.querySelectorAll('*')];
   const cloneElements = [cloneRoot, ...cloneRoot.querySelectorAll('*')];
@@ -169,6 +176,7 @@ function sanitizeTree(sourceRoot: HTMLElement, cloneRoot: HTMLElement): string[]
     }
     const sourceId = `source-${index}`;
     clone.setAttribute('data-ui-source-id', sourceId);
+    clone.setAttribute('data-ui-agent-source-rect', capturedRect(source));
     sanitizeElement(source, clone);
     for (const pseudo of ['::before', '::after'] as const) {
       const rule = capturePseudoStyle(source, sourceId, pseudo);

@@ -72,6 +72,7 @@ describe('captureStaticSnapshot', () => {
     expect(snapshot.html).toContain('value="当前值"');
     expect(snapshot.html).toContain('当前备注');
     expect(snapshot.html).toContain('display:flex');
+    expect(snapshot.html).toContain('data-ui-agent-source-rect="0,0,600,300"');
     expect(snapshot.html).not.toContain('cursor:url');
     expect(snapshot.html).not.toMatch(/<script|<iframe|<link|<template|<!--/i);
     expect(snapshot.html.match(/<style\b/gi)).toHaveLength(1);

@@ -24,15 +24,15 @@ describe('TurnLogStore', () => {
       [{
         modelCall: 1,
         action: 'search',
-        decision: { action: 'search', query: 'source-0', reason: '定位目标' },
+        input: { query: 'source-0', path: 'index.html' },
         result: '命中字符 100'
       }],
       850,
       {
-        adapterId: 'legacy-source-agent',
+        adapterId: 'cline-sdk',
         checkpoint: {
           version: 1,
-          adapterId: 'legacy-source-agent',
+          adapterId: 'cline-sdk',
           workspaceId: '11111111-1111-4111-8111-111111111111',
           turnId: 'source-turn',
           status: 'completed',
@@ -51,7 +51,7 @@ describe('TurnLogStore', () => {
     });
     expect(store.get(store.list()[0]!.id)).toMatchObject({
       sourceWorkspaceId: '11111111-1111-4111-8111-111111111111',
-      codingAgent: { adapterId: 'legacy-source-agent', checkpoint: { status: 'completed' } },
+      codingAgent: { adapterId: 'cline-sdk', checkpoint: { status: 'completed' } },
       sourceSteps: [expect.objectContaining({ modelCall: 1 })]
     });
   });

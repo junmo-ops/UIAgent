@@ -13,7 +13,13 @@ describe('agent service', () => {
     const root = mkdtempSync(join(tmpdir(), 'ui-agent-app-workspace-'));
     try {
       const app = createApp(
-        { MODEL_MODE: 'mock', PUBLIC_BASE_URL: 'https://ui-agent.example.test' },
+        {
+          MODEL_MODE: 'remote',
+          MODEL_BASE_URL: 'https://example.test',
+          MODEL_API_KEY: 'test-key',
+          MODEL_NAME: 'test-model',
+          PUBLIC_BASE_URL: 'https://ui-agent.example.test'
+        },
         new TurnLogStore({ persist: false }),
         new SourceWorkspaceStore(root)
       );
@@ -67,13 +73,7 @@ describe('agent service', () => {
           steps: [{
             modelCall: 1,
             action: 'replaceInElement',
-            decision: {
-              action: 'replaceInElement',
-              sourceId: 'source-0',
-              search: '查询',
-              replace: '确定',
-              reason: '修改按钮文案'
-            },
+            input: { sourceId: 'source-0', search: '查询', replace: '确定' },
             result: '元素内替换成功'
           }],
           checkpoint: {
@@ -150,12 +150,17 @@ describe('agent service', () => {
   });
 
   it('returns health for the configured source agent', async () => {
-    const app = createApp({ MODEL_MODE: 'mock' }, new TurnLogStore({ persist: false }));
+    const app = createApp({
+      MODEL_MODE: 'remote',
+      MODEL_BASE_URL: 'https://example.test',
+      MODEL_API_KEY: 'test-key',
+      MODEL_NAME: 'test-model'
+    }, new TurnLogStore({ persist: false }));
     const health = await app.request('/health');
     expect(await health.json()).toMatchObject({
       ok: true,
-      modelMode: 'mock',
-      codingAgentAdapter: 'legacy-source-agent'
+      modelMode: 'remote',
+      codingAgentAdapter: 'cline-sdk'
     });
     expect((await app.request('/v1/turns', { method: 'POST' })).status).toBe(404);
     const pageResponse = await app.request('/logs');

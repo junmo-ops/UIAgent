@@ -13,6 +13,22 @@ function phaseForAction(action: string): SourceTurnProgress['phase'] {
     || action === 'replace'
     || action === 'replace_in_element'
     || action === 'replaceInElement'
+    || action === 'remove_element'
+    || action === 'removeElement'
+    || action === 'set_element_text'
+    || action === 'setElementText'
+    || action === 'set_element_attributes'
+    || action === 'setElementAttributes'
+    || action === 'insert_element'
+    || action === 'insertElement'
+    || action === 'wrap_element'
+    || action === 'wrapElement'
+    || action === 'unwrap_element'
+    || action === 'unwrapElement'
+    || action === 'reorder_children'
+    || action === 'reorderChildren'
+    || action === 'apply_dom_operations'
+    || action === 'applyDomOperations'
     || action === 'apply_patch'
     || action === 'move_element'
     || action === 'clone_element'
@@ -41,6 +57,22 @@ function labelForAction(action: string): string {
     replace: '修改页面源码',
     replace_in_element: '修改选中元素',
     replaceInElement: '修改选中元素',
+    remove_element: '删除页面元素',
+    removeElement: '删除页面元素',
+    set_element_text: '设置元素文本',
+    setElementText: '设置元素文本',
+    set_element_attributes: '更新元素属性',
+    setElementAttributes: '更新元素属性',
+    insert_element: '插入页面元素',
+    insertElement: '插入页面元素',
+    wrap_element: '包裹页面元素',
+    wrapElement: '包裹页面元素',
+    unwrap_element: '解除元素包裹',
+    unwrapElement: '解除元素包裹',
+    reorder_children: '重排子元素',
+    reorderChildren: '重排子元素',
+    apply_dom_operations: '批量修改页面结构',
+    applyDomOperations: '批量修改页面结构',
     apply_patch: '应用源码补丁',
     move_element: '移动现有元素',
     clone_element: '复用现有组件',

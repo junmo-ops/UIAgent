@@ -29,10 +29,10 @@ apps/agent-service         Hono Agent Service
   src/workspace            静态源码工作区、编译、校验与版本历史
   src/progress             Agent Turn 进度
   src/observability        会话日志与日志页面
-packages/agent-runtime     Source Agent、Coding Agent Port 与 Adapter
+packages/agent-runtime     Cline SDK Runtime 与 Coding Agent Port
   src/core                 通用 Agent Port 与 Checkpoint
-  src/adapters             Cline 和 Legacy Adapter
-  src/source-editing       静态源码编辑 Agent 与约束指令
+  src/adapters             Cline SDK Adapter
+  src/source-editing       受控交互约束指令
 packages/contracts          版本化 DTO 和 Zod Schema
 ```
 
@@ -94,12 +94,9 @@ pnpm dev:service
 
 默认使用 `deepseek-v4-flash`，适合 Demo 的低延迟规划；如需更强的复杂指令理解，可改为 `deepseek-v4-pro`。不要把长期 Key 写入插件代码、浏览器存储或提交到 Git。
 
-可打开 `http://127.0.0.1:8787/health` 确认当前模型和 Coding Agent。静态源码模式支持两套可切换实现：
+可打开 `http://127.0.0.1:8787/health` 确认当前模型和 Coding Agent。静态源码模式统一使用 Cline SDK，需要 Node.js 22 或更高版本；可用 `CLINE_MAX_ITERATIONS` 调整单轮最大迭代数，默认 45。最后 3 轮会停止扩展读取，强制转入校验、完成或澄清，避免修改完成后因未调用 `finish` 被回滚。
 
-- `CODING_AGENT_ADAPTER=legacy`：现有 Source Editing Agent，作为稳定回退。
-- `CODING_AGENT_ADAPTER=cline`：Cline SDK 通用源码 Agent POC，需要 Node.js 22 或更高版本；可用 `CLINE_MAX_ITERATIONS` 调整单轮最大迭代数，默认 45。最后 3 轮会停止扩展读取，强制转入校验、完成或澄清，避免修改完成后因未调用 `finish` 被回滚。
-
-Cline 只会获得当前静态副本的搜索、局部读取、样式规则直读、结构化移动与克隆、精确替换、受控 Patch、校验、提交和澄清工具；除正常调用模型接口外，不向 Agent 开放 Shell、任意网络请求、浏览器或任意文件访问工具。移动和克隆按 `sourceId` 操作并保留完整结构与样式；Patch 只允许修改 `index.html` 和 `snapshot.css`，支持原子替换及在文件开头、末尾或唯一锚点旁插入，校验失败不会形成 Revision。切换 Adapter 不改变插件、工作区或预览协议。修改配置后需要停止并重启 Agent Service，Chrome 插件本身无需重新构建。
+Cline 只会获得当前静态副本的搜索、局部读取、样式规则直读、结构化 DOM 操作、精确替换、受控 Patch、校验、提交和澄清工具；除正常调用模型接口外，不向 Agent 开放 Shell、任意网络请求、浏览器或任意文件访问工具。DOM 工具按 `sourceId` 操作并保留完整结构与样式；Patch 只允许修改 `index.html` 和 `snapshot.css`，支持原子替换及在文件开头、末尾或唯一锚点旁插入，校验失败不会形成 Revision。修改配置后需要停止并重启 Agent Service，Chrome 插件本身无需重新构建。
 
 源码 Agent 的新增模块默认以当前 `selectedSourceId` 或其最近语义祖先为定位锚点；涉及相邻组件时扩展到最近公共父容器。只有用户明确指定页面、浏览器视口、全局、悬浮或固定位置时才允许全局定位。新增元素在提交前必须通过 `validate_spatial_scope` 校验；局部位置描述下新增 `position: fixed` 会被拒绝并要求改用选区容器，无法确定参照容器时返回澄清问题。
 

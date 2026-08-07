@@ -2,6 +2,13 @@ import { z } from 'zod';
 
 export const PROTOCOL_VERSION = '1.0' as const;
 
+export const clarificationOptionSchema = z.object({
+  id: z.string().min(1).max(100),
+  label: z.string().min(1).max(200),
+  description: z.string().min(1).max(500).optional()
+});
+export type ClarificationOption = z.infer<typeof clarificationOptionSchema>;
+
 export const staticSnapshotSchema = z.object({
   protocolVersion: z.literal(PROTOCOL_VERSION),
   title: z.string().min(1).max(200),
@@ -36,69 +43,54 @@ export const portableSnapshotPackageSchema = z.object({
 });
 export type PortableSnapshotPackage = z.infer<typeof portableSnapshotPackageSchema>;
 
-export const sourceAgentDecisionSchema = z.discriminatedUnion('action', [
+const domAttributeNameSchema = z.string().regex(/^[A-Za-z_:][A-Za-z0-9_.:-]*$/).max(120);
+const domAttributesSchema = z.record(domAttributeNameSchema, z.string().max(5_000));
+
+export const domOperationSchema = z.discriminatedUnion('kind', [
+  z.object({ kind: z.literal('setText'), sourceId: z.string().min(1).max(100), text: z.string().max(100_000) }),
   z.object({
-    action: z.literal('search'),
-    query: z.string().min(1).max(500),
-    path: z.string().min(1).max(200).optional(),
-    reason: z.string().min(1).max(500)
-  }),
-  z.object({
-    action: z.literal('read'),
-    path: z.string().min(1).max(200),
-    startLine: z.number().int().nonnegative().optional(),
-    endLine: z.number().int().nonnegative().optional(),
-    startChar: z.number().int().nonnegative().optional(),
-    endChar: z.number().int().positive().optional(),
-    reason: z.string().min(1).max(500)
-  }),
-  z.object({
-    action: z.literal('replace'),
-    path: z.string().min(1).max(200),
-    search: z.string().min(1).max(30_000),
-    replace: z.string().max(40_000),
-    reason: z.string().min(1).max(500)
-  }),
-  z.object({
-    action: z.literal('inspect'),
+    kind: z.literal('setAttributes'),
     sourceId: z.string().min(1).max(100),
-    reason: z.string().min(1).max(500)
+    set: domAttributesSchema.default({}),
+    remove: z.array(domAttributeNameSchema).max(50).default([])
   }),
   z.object({
-    action: z.literal('replaceInElement'),
+    kind: z.literal('insert'),
+    targetSourceId: z.string().min(1).max(100),
+    position: z.enum(['parentStart', 'parentEnd', 'before', 'after']),
+    html: z.string().min(1).max(100_000)
+  }),
+  z.object({
+    kind: z.literal('wrap'),
     sourceId: z.string().min(1).max(100),
-    search: z.string().min(1).max(10_000),
-    replace: z.string().max(20_000),
-    reason: z.string().min(1).max(500)
+    tagName: z.string().regex(/^[A-Za-z][A-Za-z0-9-]*$/).max(40),
+    attributes: domAttributesSchema.default({})
   }),
+  z.object({ kind: z.literal('unwrap'), sourceId: z.string().min(1).max(100) }),
+  z.object({ kind: z.literal('remove'), sourceId: z.string().min(1).max(100) }),
   z.object({
-    action: z.literal('moveElement'),
+    kind: z.literal('move'),
     sourceId: z.string().min(1).max(100),
     position: z.enum(['parentStart', 'parentEnd', 'before', 'after']),
-    targetSourceId: z.string().min(1).max(100).optional(),
-    reason: z.string().min(1).max(500)
+    targetSourceId: z.string().min(1).max(100).optional()
   }),
   z.object({
-    action: z.literal('cloneElement'),
+    kind: z.literal('clone'),
     templateSourceId: z.string().min(1).max(100),
     position: z.enum(['replace', 'parentStart', 'parentEnd', 'before', 'after']),
     targetSourceId: z.string().min(1).max(100).optional(),
     replacements: z.array(z.object({
       search: z.string().min(1).max(2_000),
       replace: z.string().max(4_000)
-    })).max(50).default([]),
-    reason: z.string().min(1).max(500)
+    })).max(50).default([])
   }),
   z.object({
-    action: z.literal('finish'),
-    summary: z.string().min(1).max(1_000)
-  }),
-  z.object({
-    action: z.literal('clarify'),
-    question: z.string().min(1).max(1_000)
+    kind: z.literal('reorderChildren'),
+    parentSourceId: z.string().min(1).max(100),
+    orderedSourceIds: z.array(z.string().min(1).max(100)).min(1).max(200)
   })
 ]);
-export type SourceAgentDecision = z.infer<typeof sourceAgentDecisionSchema>;
+export type DomOperation = z.infer<typeof domOperationSchema>;
 
 export const sourceTurnRequestSchema = z.object({
   protocolVersion: z.literal(PROTOCOL_VERSION),
@@ -106,7 +98,9 @@ export const sourceTurnRequestSchema = z.object({
   turnId: z.string().min(1),
   traceId: z.string().min(1),
   instruction: z.string().min(1).max(10_000),
-  sourceId: z.string().min(1).max(100).optional()
+  sourceId: z.string().min(1).max(100).optional(),
+  replyToClarificationId: z.string().uuid().optional(),
+  clarificationOptionId: z.string().min(1).max(100).optional()
 });
 export type SourceTurnRequest = z.infer<typeof sourceTurnRequestSchema>;
 
@@ -120,7 +114,10 @@ export const sourceTurnResponseSchema = z.discriminatedUnion('kind', [
   }),
   z.object({
     kind: z.literal('clarification'),
-    question: z.string()
+    clarificationId: z.string().uuid().optional(),
+    question: z.string(),
+    options: z.array(clarificationOptionSchema).min(2).max(4).optional(),
+    allowFreeText: z.boolean().default(true)
   }),
   z.object({
     kind: z.literal('failed'),

@@ -9,8 +9,13 @@ import {
 } from 'node:fs';
 import { basename, dirname, resolve, sep } from 'node:path';
 import { randomUUID } from 'node:crypto';
-import { type SourceConversationTurn, type SourceFileTools } from '@ui-agent/agent-runtime';
-import { staticSnapshotSchema, type SourceTurnResponse } from '@ui-agent/contracts';
+import { parseHTML } from 'linkedom';
+import { type CodingAgentConversationTurn, type CodingWorkspaceTools } from '@ui-agent/agent-runtime';
+import {
+  staticSnapshotSchema,
+  type SourceTurnRequest,
+  type SourceTurnResponse
+} from '@ui-agent/contracts';
 import { compileSourceWorkspace, refreshWorkspaceIndexes } from './compiler';
 import { validateControlledInteractions } from './interactions';
 import { analyzeStaticVisibility, staticVisibilityIssueKey } from './visibility';
@@ -47,11 +52,17 @@ interface WorkspaceManifest {
   conversation?: WorkspaceConversationTurn[];
 }
 
-interface WorkspaceConversationTurn extends SourceConversationTurn {
+interface WorkspaceConversationTurn extends CodingAgentConversationTurn {
   /** Workspace revision visible immediately after this turn. */
   revision?: number;
   /** Clarification awaiting a successful source-changing follow-up. */
   pending?: boolean;
+  /** Stable identifier used to associate a user's follow-up with this question. */
+  clarificationId?: string;
+  /** Clarification answered by this turn. */
+  replyToClarificationId?: string;
+  /** Structured option selected for the clarification, when applicable. */
+  clarificationOptionId?: string;
 }
 
 export interface SourceWorkspace {
@@ -239,7 +250,7 @@ function elementClosingTagStart(
 function cloneWithFreshSourceIds(
   content: string,
   outerHtml: string
-): { html: string; rootSourceId: string } {
+): { html: string; rootSourceId: string; sourceIdMap: Map<string, string> } {
   let nextId = Math.max(
     -1,
     ...[...content.matchAll(/\bdata-ui-source-id\s*=\s*["']source-(\d+)["']/gi)]
@@ -247,16 +258,134 @@ function cloneWithFreshSourceIds(
       .filter(Number.isFinite)
   ) + 1;
   let rootSourceId: string | undefined;
+  const sourceIdMap = new Map<string, string>();
   const html = outerHtml.replace(
-    /(\bdata-ui-source-id\s*=\s*["'])[^"']+(["'])/gi,
-    (_match, prefix: string, suffix: string) => {
+    /(\bdata-ui-source-id\s*=\s*["'])([^"']+)(["'])/gi,
+    (_match, prefix: string, previousSourceId: string, suffix: string) => {
       const sourceId = `source-${nextId++}`;
       rootSourceId ??= sourceId;
+      sourceIdMap.set(previousSourceId, sourceId);
       return `${prefix}${sourceId}${suffix}`;
     }
-  );
+  ).replace(/\sdata-ui-agent-source-rect\s*=\s*(["'])[^"']*\1/gi, '');
   if (!rootSourceId) throw new Error('模板元素缺少 data-ui-source-id，无法安全克隆');
-  return { html, rootSourceId };
+  return { html, rootSourceId, sourceIdMap };
+}
+
+function clonedSourceScopedCss(css: string, sourceIdMap: ReadonlyMap<string, string>): string {
+  const clonedRules: string[] = [];
+  for (const [previousSourceId, nextSourceId] of sourceIdMap) {
+    const selector = `\\[data-ui-source-id\\s*=\\s*(["'])${escapeRegExp(previousSourceId)}\\1\\]`;
+    const rule = new RegExp(`${selector}(?:::(?:before|after))?\\s*\\{[^}]*\\}`, 'gi');
+    for (const match of css.matchAll(rule)) {
+      clonedRules.push(match[0].replace(previousSourceId, nextSourceId));
+    }
+  }
+  return clonedRules.join('\n');
+}
+
+function sourceElementInnerRange(
+  content: string,
+  range: { start: number; end: number; tag: string }
+): { start: number; end: number } {
+  if (VOID_HTML_TAGS.has(range.tag)) throw new Error(`<${range.tag}> 是空元素，没有可编辑的内部内容`);
+  return {
+    start: findTagEnd(content, range.start) + 1,
+    end: elementClosingTagStart(content, range)
+  };
+}
+
+function escapeHtmlText(value: string): string {
+  return value.replaceAll('&', '&amp;').replaceAll('<', '&lt;').replaceAll('>', '&gt;');
+}
+
+function escapeHtmlAttribute(value: string): string {
+  return escapeHtmlText(value).replaceAll('"', '&quot;');
+}
+
+const PROTECTED_DOM_ATTRIBUTES = new Set(['data-ui-source-id', 'data-ui-agent-source-rect', 'style']);
+
+function assertMutableAttributeName(name: string): void {
+  const normalized = name.toLowerCase();
+  if (!/^[a-z_:][a-z0-9_.:-]*$/i.test(name)) throw new Error(`属性名 ${name} 无效`);
+  if (PROTECTED_DOM_ATTRIBUTES.has(normalized)) {
+    throw new Error(`属性 ${name} 由工作区维护，不能通过结构化属性工具修改`);
+  }
+}
+
+function updateOpeningTagAttributes(
+  openingTag: string,
+  set: Readonly<Record<string, string>>,
+  remove: readonly string[]
+): string {
+  let next = openingTag;
+  const requested = new Map<string, string>();
+  for (const [name, value] of Object.entries(set)) {
+    assertMutableAttributeName(name);
+    requested.set(name.toLowerCase(), value);
+  }
+  for (const name of remove) {
+    assertMutableAttributeName(name);
+    if (requested.has(name.toLowerCase())) throw new Error(`属性 ${name} 不能同时设置和删除`);
+    const pattern = new RegExp(`\\s${escapeRegExp(name)}(?:\\s*=\\s*(?:"[^"]*"|'[^']*'|[^\\s>]+))?`, 'i');
+    next = next.replace(pattern, '');
+  }
+  for (const [name, value] of Object.entries(set)) {
+    const rendered = `${name}="${escapeHtmlAttribute(value)}"`;
+    const pattern = new RegExp(`(\\s)${escapeRegExp(name)}(?:\\s*=\\s*(?:"[^"]*"|'[^']*'|[^\\s>]+))?(?=\\s|/?>)`, 'i');
+    if (pattern.test(next)) next = next.replace(pattern, `$1${rendered}`);
+    else next = next.replace(/\s*\/?>$/, match => ` ${rendered}${match}`);
+  }
+  return next;
+}
+
+function nextSourceNumber(content: string): number {
+  return Math.max(
+    -1,
+    ...[...content.matchAll(/\bdata-ui-source-id\s*=\s*["']source-(\d+)["']/gi)]
+      .map(match => Number(match[1]))
+      .filter(Number.isFinite)
+  ) + 1;
+}
+
+function fragmentWithFreshSourceIds(
+  content: string,
+  fragmentHtml: string
+): { html: string; rootSourceIds: string[] } {
+  const { document } = parseHTML('<!doctype html><html><body></body></html>');
+  const container = document.createElement('div');
+  container.innerHTML = fragmentHtml;
+  const elements = [...container.querySelectorAll('*')];
+  if (!elements.length) throw new Error('插入内容必须至少包含一个 HTML 元素');
+  let nextId = nextSourceNumber(content);
+  for (const element of elements) {
+    element.removeAttribute('data-ui-agent-source-rect');
+    element.setAttribute('data-ui-source-id', `source-${nextId++}`);
+  }
+  const rootSourceIds = [...container.children]
+    .map(element => element.getAttribute('data-ui-source-id'))
+    .filter((value): value is string => Boolean(value));
+  return { html: container.innerHTML, rootSourceIds };
+}
+
+function wrapperOpeningTag(tagName: string, sourceId: string, attributes: Readonly<Record<string, string>>): string {
+  if (!/^[a-z][a-z0-9-]*$/i.test(tagName) || VOID_HTML_TAGS.has(tagName.toLowerCase())) {
+    throw new Error(`包装标签 ${tagName} 无效或不能包含子节点`);
+  }
+  const renderedAttributes = Object.entries(attributes).map(([name, value]) => {
+    assertMutableAttributeName(name);
+    return `${name}="${escapeHtmlAttribute(value)}"`;
+  });
+  return `<${tagName} data-ui-source-id="${sourceId}"${renderedAttributes.length ? ` ${renderedAttributes.join(' ')}` : ''}>`;
+}
+
+function withoutSourceScopedCss(css: string, sourceIds: readonly string[]): string {
+  let next = css;
+  for (const sourceId of sourceIds) {
+    const selector = `\\[data-ui-source-id\\s*=\\s*(["'])${escapeRegExp(sourceId)}\\1\\]`;
+    next = next.replace(new RegExp(`${selector}(?:::(?:before|after))?\\s*\\{[^}]*\\}\\s*`, 'gi'), '');
+  }
+  return next;
 }
 
 function decodeBasicEntities(value: string): string {
@@ -292,6 +421,46 @@ function compactElementSource(outerHtml: string): string {
     `styleClasses: ${JSON.stringify(styleClasses)}`,
     `compactHtml: ${compactHtml}`
   ].join('\n');
+}
+
+const LAYOUT_PROPERTIES = [
+  'display', 'position', 'width', 'height', 'min-width', 'min-height',
+  'max-width', 'max-height', 'overflow', 'overflow-x', 'overflow-y',
+  'flex-direction', 'flex-wrap', 'flex-basis', 'flex-grow', 'flex-shrink',
+  'align-items', 'align-content', 'justify-content', 'gap', 'row-gap', 'column-gap',
+  'grid-template-columns', 'grid-template-rows', 'grid-auto-flow', 'grid-column', 'grid-row'
+] as const;
+
+function sourceLayoutFacts(html: string, css: string, sourceId: string): Record<string, unknown> {
+  const range = sourceElementRange(html, sourceId);
+  const openingTag = html.slice(range.start, findTagEnd(html, range.start) + 1);
+  const rectValues = /\bdata-ui-agent-source-rect\s*=\s*["']([^"']+)["']/i.exec(openingTag)?.[1]
+    ?.split(',')
+    .map(Number);
+  const classNames = /\bclass\s*=\s*["']([^"']+)["']/i.exec(openingTag)?.[1]?.split(/\s+/) ?? [];
+  const declarations = new Map<string, string>();
+  for (const className of classNames.filter(value => value.startsWith('ui-snapshot-style-'))) {
+    for (const rule of cssRulesForClass(css, className)) {
+      const body = rule.slice(rule.indexOf('{') + 1, rule.lastIndexOf('}'));
+      for (const declaration of body.split(';')) {
+        const separator = declaration.indexOf(':');
+        if (separator < 1) continue;
+        const property = declaration.slice(0, separator).trim().toLowerCase();
+        if (!LAYOUT_PROPERTIES.includes(property as typeof LAYOUT_PROPERTIES[number])) continue;
+        declarations.set(property, declaration.slice(separator + 1).trim());
+      }
+    }
+  }
+  return {
+    sourceId,
+    tag: range.tag,
+    ...(rectValues?.length === 4 && rectValues.every(Number.isFinite) ? {
+      capturedRect: {
+        x: rectValues[0], y: rectValues[1], width: rectValues[2], height: rectValues[3]
+      }
+    } : { capturedRect: null }),
+    computedLayout: Object.fromEntries(declarations)
+  };
 }
 
 function cssRulesForClass(content: string, className: string): string[] {
@@ -408,7 +577,7 @@ export class SourceWorkspaceStore {
       : html.replace(/<body\b/i, `${style}\n<body`);
   }
 
-  conversation(workspaceId: string): SourceConversationTurn[] {
+  conversation(workspaceId: string): CodingAgentConversationTurn[] {
     const directory = this.workspacePath(workspaceId);
     if (!this.get(workspaceId)) throw new Error('静态源码工作区不存在');
     const manifest = this.readManifest(directory);
@@ -418,7 +587,7 @@ export class SourceWorkspaceStore {
       .map(({ instruction, result }) => ({ instruction, result }));
   }
 
-  recordTurn(workspaceId: string, instruction: string, response: SourceTurnResponse): void {
+  recordTurn(workspaceId: string, request: SourceTurnRequest, response: SourceTurnResponse): void {
     if (response.kind === 'failed') return;
     const directory = this.workspacePath(workspaceId);
     const manifest = this.readManifest(directory);
@@ -428,7 +597,11 @@ export class SourceWorkspaceStore {
       ? (manifest.conversation ?? []).filter(turn => (turn.revision ?? 0) < response.revision)
       : (manifest.conversation ?? []);
     const linked = response.kind === 'completed'
-      ? retained.map(turn => turn.pending && turn.revision === response.revision - 1
+      ? retained.map(turn => turn.pending && (
+        request.replyToClarificationId
+          ? turn.clarificationId === request.replyToClarificationId
+          : turn.revision === response.revision - 1
+      )
         ? { ...turn, revision: response.revision, pending: false }
         : turn)
       : retained;
@@ -437,12 +610,26 @@ export class SourceWorkspaceStore {
       updatedAt: new Date().toISOString(),
       conversation: [
         ...linked,
-        { instruction, result, revision, ...(response.kind === 'clarification' && { pending: true }) }
+        {
+          instruction: request.instruction,
+          result,
+          revision,
+          ...(request.replyToClarificationId && {
+            replyToClarificationId: request.replyToClarificationId
+          }),
+          ...(request.clarificationOptionId && {
+            clarificationOptionId: request.clarificationOptionId
+          }),
+          ...(response.kind === 'clarification' && {
+            pending: true,
+            clarificationId: response.clarificationId ?? request.turnId
+          })
+        }
       ].slice(-40)
     });
   }
 
-  tools(workspaceId: string): SourceFileTools {
+  tools(workspaceId: string): CodingWorkspaceTools {
     const directory = this.workspacePath(workspaceId);
     if (!this.get(workspaceId)) throw new Error('静态源码工作区不存在');
     if (this.active.has(workspaceId)) throw new Error('当前工作区已有正在执行的修改');
@@ -477,7 +664,8 @@ export class SourceWorkspaceStore {
       this.active.delete(workspaceId);
     };
 
-    return {
+    let toolset!: CodingWorkspaceTools;
+    toolset = {
       listFiles: async () => WORKSPACE_FILES.map(path => ({ path, chars: working[path].length })),
       searchText: async (query, path = 'index.html') => {
         this.assertReadablePath(path);
@@ -523,9 +711,37 @@ export class SourceWorkspaceStore {
         const html = working['index.html'];
         const range = sourceElementRange(html, sourceId);
         const ancestry = sourceElementAncestry(html, sourceId);
+        const outline = JSON.parse(working['outline.json']) as {
+          nodes: Array<{
+            sourceId: string;
+            parentSourceId?: string;
+            childrenSourceIds: string[];
+          }>;
+        };
+        const node = outline.nodes.find(item => item.sourceId === sourceId);
+        const parent = node?.parentSourceId
+          ? outline.nodes.find(item => item.sourceId === node.parentSourceId)
+          : undefined;
+        const siblingIds = (parent?.childrenSourceIds ?? [])
+          .filter(candidate => candidate !== sourceId)
+          .slice(0, 12);
+        const layoutContext = {
+          target: sourceLayoutFacts(html, working['snapshot.css'], sourceId),
+          ancestors: ancestry
+            .slice(0, -1)
+            .slice(-6)
+            .reverse()
+            .map(item => sourceLayoutFacts(html, working['snapshot.css'], item.sourceId)),
+          siblings: siblingIds.map(candidate => sourceLayoutFacts(
+            html,
+            working['snapshot.css'],
+            candidate
+          ))
+        };
         return [
           `元素 ${sourceId}：tag=${range.tag}，字符 ${range.start}-${range.end}`,
           `结构路径: ${ancestry.map(item => `${item.sourceId}<${item.tag}>`).join(' > ')}`,
+          `布局上下文: ${JSON.stringify(layoutContext)}`,
           compactElementSource(html.slice(range.start, range.end))
         ].join('\n');
       },
@@ -632,6 +848,129 @@ export class SourceWorkspaceStore {
         refreshIndexes();
         return `元素 ${sourceId} 内替换成功；HTML 与安全规则校验通过`;
       },
+      setElementText: async (sourceId, text) => {
+        const html = working['index.html'];
+        const range = sourceElementRange(html, sourceId);
+        const inner = sourceElementInnerRange(html, range);
+        const removedSourceIds = [...html.slice(inner.start, inner.end).matchAll(
+          /\bdata-ui-source-id\s*=\s*["']([^"']+)["']/gi
+        )].map(match => match[1]!);
+        const next = `${html.slice(0, inner.start)}${escapeHtmlText(text)}${html.slice(inner.end)}`;
+        validateHtml(next);
+        working['index.html'] = next;
+        working['snapshot.css'] = withoutSourceScopedCss(working['snapshot.css'], removedSourceIds);
+        validateCss(working['snapshot.css']);
+        refreshIndexes();
+        return `元素 ${sourceId} 的文本内容已设置；${removedSourceIds.length} 个原后代元素已移除；HTML、CSS 与安全规则校验通过`;
+      },
+      setElementAttributes: async (sourceId, set, remove) => {
+        if (!Object.keys(set).length && !remove.length) throw new Error('属性操作不能为空');
+        const html = working['index.html'];
+        const range = sourceElementRange(html, sourceId);
+        const openingEnd = findTagEnd(html, range.start);
+        const openingTag = html.slice(range.start, openingEnd + 1);
+        const updatedTag = updateOpeningTagAttributes(openingTag, set, remove);
+        const next = `${html.slice(0, range.start)}${updatedTag}${html.slice(openingEnd + 1)}`;
+        validateHtml(next);
+        working['index.html'] = next;
+        refreshIndexes();
+        return `元素 ${sourceId} 的属性已更新（设置 ${Object.keys(set).length} 项，删除 ${remove.length} 项）；HTML 与安全规则校验通过`;
+      },
+      insertElement: async (targetSourceId, position, fragmentHtml) => {
+        const html = working['index.html'];
+        const fragment = fragmentWithFreshSourceIds(html, fragmentHtml);
+        const targetRange = sourceElementRange(html, targetSourceId);
+        let insertionIndex: number;
+        if (position === 'parentStart') {
+          insertionIndex = findTagEnd(html, targetRange.start) + 1;
+        } else if (position === 'parentEnd') {
+          insertionIndex = elementClosingTagStart(html, targetRange);
+        } else {
+          insertionIndex = position === 'before' ? targetRange.start : targetRange.end;
+        }
+        const next = `${html.slice(0, insertionIndex)}${fragment.html}${html.slice(insertionIndex)}`;
+        validateHtml(next);
+        working['index.html'] = next;
+        refreshIndexes();
+        return `已在元素 ${targetSourceId} 的 ${position} 位置插入 ${fragment.rootSourceIds.length} 个顶层元素：${fragment.rootSourceIds.join(', ')}；HTML、结构与安全规则校验通过`;
+      },
+      wrapElement: async (sourceId, tagName, attributes) => {
+        const html = working['index.html'];
+        const range = sourceElementRange(html, sourceId);
+        const wrapperSourceId = `source-${nextSourceNumber(html)}`;
+        const openingTag = wrapperOpeningTag(tagName, wrapperSourceId, attributes);
+        const outerHtml = html.slice(range.start, range.end);
+        const wrapped = `${openingTag}${outerHtml}</${tagName}>`;
+        const next = `${html.slice(0, range.start)}${wrapped}${html.slice(range.end)}`;
+        validateHtml(next);
+        working['index.html'] = next;
+        refreshIndexes();
+        return `元素 ${sourceId} 已由新容器 ${wrapperSourceId}<${tagName.toLowerCase()}> 包裹；HTML、结构与安全规则校验通过`;
+      },
+      unwrapElement: async sourceId => {
+        const html = working['index.html'];
+        const range = sourceElementRange(html, sourceId);
+        const inner = sourceElementInnerRange(html, range);
+        const innerHtml = html.slice(inner.start, inner.end);
+        const next = `${html.slice(0, range.start)}${innerHtml}${html.slice(range.end)}`;
+        validateHtml(next);
+        working['index.html'] = next;
+        working['snapshot.css'] = withoutSourceScopedCss(working['snapshot.css'], [sourceId]);
+        validateCss(working['snapshot.css']);
+        refreshIndexes();
+        return `容器元素 ${sourceId} 已解除包裹，其原有子节点保留在原位置；HTML、CSS、结构与安全规则校验通过`;
+      },
+      removeElement: async sourceId => {
+        const html = working['index.html'];
+        const range = sourceElementRange(html, sourceId);
+        const removedHtml = html.slice(range.start, range.end);
+        const removedSourceIds = [...removedHtml.matchAll(
+          /\bdata-ui-source-id\s*=\s*["']([^"']+)["']/gi
+        )].map(match => match[1]!);
+        const next = `${html.slice(0, range.start)}${html.slice(range.end)}`;
+        validateHtml(next);
+        working['index.html'] = next;
+        working['snapshot.css'] = withoutSourceScopedCss(working['snapshot.css'], removedSourceIds);
+        validateCss(working['snapshot.css']);
+        refreshIndexes();
+        return `元素 ${sourceId} 已完整删除；其 ${Math.max(0, removedSourceIds.length - 1)} 个后代节点及对应 sourceId 专属样式已同步移除；HTML、CSS、结构与安全规则校验通过`;
+      },
+      reorderChildren: async (parentSourceId, orderedSourceIds) => {
+        if (new Set(orderedSourceIds).size !== orderedSourceIds.length) throw new Error('排序列表包含重复 sourceId');
+        const html = working['index.html'];
+        const parentRange = sourceElementRange(html, parentSourceId);
+        const parentInner = sourceElementInnerRange(html, parentRange);
+        const outline = JSON.parse(working['outline.json']) as {
+          nodes: Array<{ sourceId: string; childrenSourceIds: string[] }>;
+        };
+        const directChildren = outline.nodes.find(node => node.sourceId === parentSourceId)?.childrenSourceIds ?? [];
+        if (
+          directChildren.length !== orderedSourceIds.length
+          || directChildren.some(sourceId => !orderedSourceIds.includes(sourceId))
+        ) {
+          throw new Error(`orderedSourceIds 必须恰好包含父元素 ${parentSourceId} 的全部直接 source 子节点`);
+        }
+        const ranges = directChildren
+          .map(sourceId => ({ sourceId, ...sourceElementRange(html, sourceId) }))
+          .sort((left, right) => left.start - right.start);
+        const outerById = new Map(ranges.map(range => [range.sourceId, html.slice(range.start, range.end)]));
+        const gaps: string[] = [];
+        let cursor = parentInner.start;
+        for (const range of ranges) {
+          gaps.push(html.slice(cursor, range.start));
+          cursor = range.end;
+        }
+        gaps.push(html.slice(cursor, parentInner.end));
+        const reorderedInner = orderedSourceIds
+          .map((sourceId, index) => `${gaps[index]}${outerById.get(sourceId)!}`)
+          .join('') + gaps.at(-1)!;
+        const next = `${html.slice(0, parentInner.start)}${reorderedInner}${html.slice(parentInner.end)}`;
+        if (next === html) throw new Error('子节点已经是指定顺序');
+        validateHtml(next);
+        working['index.html'] = next;
+        refreshIndexes();
+        return `父元素 ${parentSourceId} 的 ${orderedSourceIds.length} 个直接子节点已按指定顺序重排；HTML、结构与安全规则校验通过`;
+      },
       moveElement: async (sourceId, position, targetSourceId) => {
         const html = working['index.html'];
         const sourceRange = sourceElementRange(html, sourceId);
@@ -684,6 +1023,7 @@ export class SourceWorkspaceStore {
         }
 
         const clone = cloneWithFreshSourceIds(html, clonedHtml);
+        const clonedScopedCss = clonedSourceScopedCss(working['snapshot.css'], clone.sourceIdMap);
         let base = html;
         let insertionIndex: number;
         let destination: string;
@@ -711,8 +1051,53 @@ export class SourceWorkspaceStore {
         const next = `${base.slice(0, insertionIndex)}${clone.html}${base.slice(insertionIndex)}`;
         validateHtml(next);
         working['index.html'] = next;
+        working['snapshot.css'] = [
+          working['snapshot.css'].trimEnd(),
+          clonedScopedCss
+        ].filter(Boolean).join('\n') + '\n';
+        validateCss(working['snapshot.css']);
         refreshIndexes();
-        return `已从模板 ${templateSourceId} 完整克隆元素 ${clone.rootSourceId}${destination}；内联样式和结构保持一致；HTML 与安全规则校验通过`;
+        return `已从模板 ${templateSourceId} 完整克隆元素 ${clone.rootSourceId}${destination}；结构、冻结样式和伪元素样式已同步；HTML、CSS 与安全规则校验通过`;
+      },
+      applyDomOperations: async operations => {
+        if (!operations.length || operations.length > 20) throw new Error('批量 DOM 操作必须包含 1-20 项');
+        const before = { ...working };
+        const results: string[] = [];
+        try {
+          for (const operation of operations) {
+            const result = operation.kind === 'setText'
+              ? await toolset.setElementText(operation.sourceId, operation.text)
+              : operation.kind === 'setAttributes'
+                ? await toolset.setElementAttributes(operation.sourceId, operation.set, operation.remove)
+                : operation.kind === 'insert'
+                  ? await toolset.insertElement(operation.targetSourceId, operation.position, operation.html)
+                  : operation.kind === 'wrap'
+                    ? await toolset.wrapElement(operation.sourceId, operation.tagName, operation.attributes)
+                    : operation.kind === 'unwrap'
+                      ? await toolset.unwrapElement(operation.sourceId)
+                      : operation.kind === 'remove'
+                        ? await toolset.removeElement(operation.sourceId)
+                        : operation.kind === 'move'
+                          ? await toolset.moveElement(operation.sourceId, operation.position, operation.targetSourceId)
+                          : operation.kind === 'clone'
+                            ? await toolset.cloneElement(
+                              operation.templateSourceId,
+                              operation.position,
+                              operation.targetSourceId,
+                              operation.replacements
+                            )
+                            : await toolset.reorderChildren(
+                              operation.parentSourceId,
+                              operation.orderedSourceIds
+                            );
+            results.push(result);
+          }
+          validateWorking();
+          return `已原子应用 ${operations.length} 项 DOM 操作并完成统一校验：\n${results.map((result, index) => `${index + 1}. ${result}`).join('\n')}`;
+        } catch (error) {
+          working = before;
+          throw new Error(`批量 DOM 操作已全部回滚：${error instanceof Error ? error.message : String(error)}`);
+        }
       },
       validate: async () => validateWorking(),
       commit: async summary => {
@@ -726,6 +1111,7 @@ export class SourceWorkspaceStore {
       },
       rollback: async () => close()
     };
+    return toolset;
   }
 
   undo(workspaceId: string): SourceWorkspace {

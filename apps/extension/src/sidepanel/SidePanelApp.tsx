@@ -9,6 +9,7 @@ import {
   sourceTurnResponseSchema,
   sourceWorkspaceCreatedSchema,
   sourceWorkspaceInfoSchema,
+  type ClarificationOption,
   type ContentCommand,
   type ContentCommandResult,
   type PageSelection,
@@ -31,7 +32,17 @@ const editorPort = browser.runtime.connect({ name: `ui-agent-editor:${editorClie
 // 保留 Port 引用，避免扩展重载或长时间空闲时被垃圾回收而提前触发 onDisconnect。
 void editorPort;
 
-interface ChatEntry { id: string; role: 'user' | 'assistant'; text: string }
+interface ClarificationPrompt {
+  clarificationId: string;
+  options?: ClarificationOption[];
+  allowFreeText: boolean;
+}
+interface ChatEntry {
+  id: string;
+  role: 'user' | 'assistant';
+  text: string;
+  clarification?: ClarificationPrompt;
+}
 type ServiceStatus = 'checking' | 'connected' | 'unavailable';
 interface ActiveWorkspace extends SourceWorkspaceInfo {
   tabId: number;
@@ -42,6 +53,7 @@ interface PersistedWorkspaceSession {
   chat: ChatEntry[];
   editSessionId: string;
   sourceTabId?: number;
+  pendingClarification?: ClarificationPrompt;
 }
 const sourceWorkspaceSessionItem = storage.defineItem<PersistedWorkspaceSession | null>(
   'local:sourceWorkspaceSession',
@@ -108,6 +120,7 @@ export function SidePanelApp() {
   const [editSessionId, setEditSessionId] = useState<string>(() => crypto.randomUUID());
   const [sourceWorkspace, setSourceWorkspace] = useState<ActiveWorkspace>();
   const [sourceProgress, setSourceProgress] = useState<SourceTurnProgress>();
+  const [pendingClarification, setPendingClarification] = useState<ClarificationPrompt>();
   const [snapshotBusy, setSnapshotBusy] = useState(false);
   const [exportConfirmOpen, setExportConfirmOpen] = useState(false);
   const composerRef = useRef<TextAreaRef>(null);
@@ -140,6 +153,7 @@ export function SidePanelApp() {
         if (persisted?.workspace.workspaceId === workspace.workspaceId) {
           setChat(persisted.chat);
           setEditSessionId(persisted.editSessionId);
+          setPendingClarification(persisted.pendingClarification);
         }
         await command({ type: 'bindEditorTab', tabId: tab.id, previewUrl: workspace.previewUrl });
       } catch { /* Keep the regular page mode when workspace restoration fails. */ }
@@ -165,9 +179,10 @@ export function SidePanelApp() {
       workspace,
       chat,
       editSessionId,
-      sourceTabId: sourceWorkspace.sourceTabId
+      sourceTabId: sourceWorkspace.sourceTabId,
+      pendingClarification
     });
-  }, [sourceWorkspace, chat, editSessionId]);
+  }, [sourceWorkspace, chat, editSessionId, pendingClarification]);
   useEffect(() => {
     const heartbeat = () => { void command({ type: 'editorHeartbeat' }).catch(() => undefined); };
     const deactivate = () => { void command({ type: 'deactivateEditor' }).catch(() => undefined); };
@@ -192,16 +207,26 @@ export function SidePanelApp() {
     catch (error) { fail(error); }
   };
 
-  const submit = async () => {
-    const text = instruction.trim();
+  const submitText = async (
+    text: string,
+    replyToClarificationId?: string,
+    clarificationOptionId?: string
+  ) => {
     if (!text) return;
-    if (!sourceWorkspace || !selection) {
+    if (!sourceWorkspace || (!selection && !replyToClarificationId)) {
       fail(new Error('请先在副本页面中选择需要调整的区域'));
       return;
     }
     setChat(entries => [...entries, { id: crypto.randomUUID(), role: 'user', text }]);
     setInstruction('');
-    await runSourceTurn(text, sourceWorkspace);
+    if (replyToClarificationId) setPendingClarification(undefined);
+    await runSourceTurn(text, sourceWorkspace, replyToClarificationId, clarificationOptionId);
+  };
+
+  const submit = async () => {
+    const text = instruction.trim();
+    if (!text) return;
+    await submitText(text, pendingClarification?.clarificationId);
   };
 
   const history = async (type: 'undo' | 'redo' | 'reset') => {
@@ -229,7 +254,12 @@ export function SidePanelApp() {
       fail(new Error('原页面标签页已关闭'));
     }
   };
-  const runSourceTurn = async (text: string, workspace: ActiveWorkspace) => {
+  const runSourceTurn = async (
+    text: string,
+    workspace: ActiveWorkspace,
+    replyToClarificationId?: string,
+    clarificationOptionId?: string
+  ) => {
     setSnapshotBusy(true);
     let progressTimer: number | undefined;
     try {
@@ -239,7 +269,9 @@ export function SidePanelApp() {
         turnId: crypto.randomUUID(),
         traceId: crypto.randomUUID(),
         instruction: text,
-        sourceId: workspace.selectedSourceId
+        sourceId: workspace.selectedSourceId,
+        ...(replyToClarificationId && { replyToClarificationId }),
+        ...(clarificationOptionId && { clarificationOptionId })
       });
       setSourceProgress({
         workspaceId: workspace.workspaceId,
@@ -271,7 +303,18 @@ export function SidePanelApp() {
       if (!response.ok) throw await serviceResponseError(response, '源码 Agent 返回');
       const outcome = sourceTurnResponseSchema.parse(await response.json());
       if (outcome.kind === 'clarification') {
-        setChat(entries => [...entries, { id: crypto.randomUUID(), role: 'assistant', text: outcome.question }]);
+        const clarification = {
+          clarificationId: outcome.clarificationId ?? crypto.randomUUID(),
+          options: outcome.options,
+          allowFreeText: outcome.allowFreeText
+        };
+        setPendingClarification(clarification);
+        setChat(entries => [...entries, {
+          id: crypto.randomUUID(),
+          role: 'assistant',
+          text: outcome.question,
+          clarification
+        }]);
         return;
       }
       if (outcome.kind === 'failed') throw new Error(`[${outcome.code}] ${outcome.message}`);
@@ -328,6 +371,7 @@ export function SidePanelApp() {
         sourceTabId
       });
       setChat([]);
+      setPendingClarification(undefined);
       setInstruction('');
       setSelection(undefined);
       const tab = await browser.tabs.update(loadingTabId, { url: created.previewUrl, active: false });
@@ -481,7 +525,37 @@ export function SidePanelApp() {
               </div>
             </div>
           )}
-          {chat.map(entry => <div key={entry.id} className={`bubble ${entry.role}`}>{entry.text}</div>)}
+          {chat.map(entry => {
+            const activeClarification = entry.clarification
+              && pendingClarification?.clarificationId === entry.clarification.clarificationId;
+            return (
+              <div key={entry.id} className={`bubble ${entry.role}${entry.clarification ? ' clarification' : ''}`}>
+                <div>{entry.text}</div>
+                {entry.clarification?.options && (
+                  <div className="clarification-options">
+                    {entry.clarification.options.map(option => (
+                      <button
+                        key={option.id}
+                        type="button"
+                        disabled={!activeClarification || busy}
+                        onClick={() => void submitText(
+                          option.label,
+                          entry.clarification?.clarificationId,
+                          option.id
+                        )}
+                      >
+                        <strong>{option.label}</strong>
+                        {option.description && <span>{option.description}</span>}
+                      </button>
+                    ))}
+                  </div>
+                )}
+                {entry.clarification && !activeClarification && (
+                  <span className="clarification-resolved">已回答</span>
+                )}
+              </div>
+            );
+          })}
           {busy && sourceWorkspace && snapshotBusy && sourceProgress ? (
             <div className="agent-progress-card">
               <div className="agent-progress-head">
@@ -556,8 +630,13 @@ export function SidePanelApp() {
             value={instruction}
             variant="borderless"
             onChange={event => setInstruction(event.target.value)}
+            disabled={Boolean(pendingClarification && !pendingClarification.allowFreeText)}
             autoSize={{ minRows: 2, maxRows: 5 }}
-            placeholder={selection ? '描述你想怎样修改这个区域…' : '请先选择一个页面区域'}
+            placeholder={pendingClarification
+              ? pendingClarification.allowFreeText
+                ? '选择一个方案，或直接补充你的要求…'
+                : '请从上方选择一个方案'
+              : selection ? '描述你想怎样修改这个区域…' : '请先选择一个页面区域'}
             onPressEnter={event => { if (!event.shiftKey) { event.preventDefault(); void submit(); } }}
           />
           <div className="composer-toolbar">
@@ -573,7 +652,12 @@ export function SidePanelApp() {
                 type="primary"
                 shape="circle"
                 aria-label="生成示意"
-                disabled={!selection || busy || !instruction.trim()}
+                disabled={
+                  (!selection && !pendingClarification)
+                  || busy
+                  || !instruction.trim()
+                  || Boolean(pendingClarification && !pendingClarification.allowFreeText)
+                }
                 loading={busy}
                 icon={!busy && <UiIcon name="arrow" />}
                 onClick={submit}

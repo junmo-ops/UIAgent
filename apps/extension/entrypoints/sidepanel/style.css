@@ -277,6 +277,47 @@ button, textarea { font: inherit; }
   padding: 3px 1px;
 }
 
+.bubble.clarification {
+  width: min(360px, 96%);
+  max-width: 96%;
+}
+
+.clarification-options {
+  display: grid;
+  gap: 7px;
+  margin-top: 10px;
+}
+
+.clarification-options button {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  width: 100%;
+  padding: 9px 11px;
+  color: #373330;
+  text-align: left;
+  background: #fff;
+  border: 1px solid #e4dfdb;
+  border-radius: 10px;
+  cursor: pointer;
+  transition: border-color .16s ease, background .16s ease, transform .16s ease;
+}
+
+.clarification-options button:hover:not(:disabled) {
+  background: #faf8f7;
+  border-color: #cfc7c1;
+  transform: translateY(-1px);
+}
+
+.clarification-options button:disabled {
+  cursor: default;
+  opacity: .58;
+}
+
+.clarification-options strong { font-size: 12px; }
+.clarification-options span { color: #77716d; font-size: 11px; line-height: 1.45; }
+.clarification-resolved { display: block; margin-top: 6px; color: #9a948f; font-size: 11px; }
+
 .bubble.working {
   display: flex;
   align-items: center;

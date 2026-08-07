@@ -2,7 +2,7 @@ import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
-import { PROTOCOL_VERSION } from '@ui-agent/contracts';
+import { PROTOCOL_VERSION, type SourceTurnRequest } from '@ui-agent/contracts';
 import { SourceWorkspaceStore } from './store';
 
 const roots: string[] = [];
@@ -23,6 +23,20 @@ const snapshot = {
   selectedSourceId: 'source-0',
   viewport: { width: 1280, height: 800 }
 };
+
+function turnRequest(
+  instruction: string,
+  values: Partial<SourceTurnRequest> = {}
+): SourceTurnRequest {
+  return {
+    protocolVersion: PROTOCOL_VERSION,
+    editSessionId: 'edit-session-1',
+    turnId: crypto.randomUUID(),
+    traceId: crypto.randomUUID(),
+    instruction,
+    ...values
+  };
+}
 
 describe('SourceWorkspaceStore', () => {
   afterEach(() => {
@@ -47,6 +61,7 @@ describe('SourceWorkspaceStore', () => {
       expect.objectContaining({ path: 'source-map.json' })
     ]));
     expect(await tools.inspectElement('source-0')).toMatch(/domText: "查 询".+visibilityNote:.+rawTextSegments: \["查 询"\].+compactHtml: <button[^>]+source-0[^>]*>.*<span[^>]+source-1[^>]*>查 询/s);
+    expect(await tools.inspectElement('source-0')).toContain('布局上下文:');
     expect(await tools.readStyleRule('ui-snapshot-style-0')).toContain('color:red');
     await tools.replaceInElement('source-0', '查 询', '确定');
     expect(await tools.validate()).toContain('校验通过');
@@ -99,14 +114,26 @@ describe('SourceWorkspaceStore', () => {
   it('persists recent source-agent conversation with the workspace', async () => {
     const store = createStore();
     const workspace = store.create(snapshot);
-    store.recordTurn(workspace.workspaceId, '新增一行订单', {
+    const clarificationId = crypto.randomUUID();
+    store.recordTurn(workspace.workspaceId, turnRequest('新增一行订单', {
+      turnId: clarificationId
+    }), {
       kind: 'clarification',
-      question: '请提供订单信息'
+      clarificationId,
+      question: '请提供订单信息',
+      options: [
+        { id: 'manual', label: '手动填写' },
+        { id: 'random', label: '随机生成' }
+      ],
+      allowFreeText: true
     });
     const tools = store.tools(workspace.workspaceId);
     await tools.replaceInElement('source-0', '查 询', '新增订单');
     await tools.commit('已新增随机订单');
-    store.recordTurn(workspace.workspaceId, '随机生成', {
+    store.recordTurn(workspace.workspaceId, turnRequest('随机生成', {
+      replyToClarificationId: clarificationId,
+      clarificationOptionId: 'random'
+    }), {
       kind: 'completed',
       summary: '已新增随机订单',
       revision: 1,
@@ -117,6 +144,17 @@ describe('SourceWorkspaceStore', () => {
       { instruction: '新增一行订单', result: '请提供订单信息' },
       { instruction: '随机生成', result: '已新增随机订单' }
     ]);
+    const manifest = JSON.parse(readFileSync(
+      join(roots.at(-1)!, workspace.workspaceId, 'workspace.json'),
+      'utf8'
+    )) as { conversation: Array<Record<string, unknown>> };
+    expect(manifest.conversation).toEqual(expect.arrayContaining([
+      expect.objectContaining({ clarificationId, pending: false }),
+      expect.objectContaining({
+        replyToClarificationId: clarificationId,
+        clarificationOptionId: 'random'
+      })
+    ]));
     store.undo(workspace.workspaceId);
     expect(store.conversation(workspace.workspaceId)).toEqual([]);
   });
@@ -128,14 +166,14 @@ describe('SourceWorkspaceStore', () => {
     const firstTools = store.tools(workspace.workspaceId);
     await firstTools.replaceInElement('source-0', '查 询', '提交');
     await firstTools.commit('修改为提交');
-    store.recordTurn(workspace.workspaceId, '把查询改成提交', {
+    store.recordTurn(workspace.workspaceId, turnRequest('把查询改成提交'), {
       kind: 'completed', summary: '修改为提交', revision: 1, modelCalls: 1, toolCalls: 1
     });
 
     const secondTools = store.tools(workspace.workspaceId);
     await secondTools.replaceInElement('source-0', '提交', '确认');
     await secondTools.commit('修改为确认');
-    store.recordTurn(workspace.workspaceId, '再改成确认', {
+    store.recordTurn(workspace.workspaceId, turnRequest('再改成确认'), {
       kind: 'completed', summary: '修改为确认', revision: 2, modelCalls: 1, toolCalls: 1
     });
 
@@ -151,7 +189,7 @@ describe('SourceWorkspaceStore', () => {
     const branchTools = store.tools(workspace.workspaceId);
     await branchTools.replaceInElement('source-0', '提交', '审核');
     await branchTools.commit('修改为审核');
-    store.recordTurn(workspace.workspaceId, '改成审核', {
+    store.recordTurn(workspace.workspaceId, turnRequest('改成审核'), {
       kind: 'completed', summary: '修改为审核', revision: 2, modelCalls: 1, toolCalls: 1
     });
 
@@ -216,6 +254,139 @@ describe('SourceWorkspaceStore', () => {
     expect(html.indexOf('风险提示')).toBeLessThan(html.indexOf('</main>'));
   });
 
+  it('removes a complete element subtree by source id and refreshes indexes', async () => {
+    const store = createStore();
+    const workspace = store.create({
+      ...snapshot,
+      html: [
+        '<!doctype html><html><head><style>[data-ui-source-id="source-12"]::after{content:"!"}.shared{color:red}</style></head><body><main data-ui-source-id="source-10">',
+        '<section data-ui-source-id="source-11"><span data-ui-source-id="source-12">删除内容</span></section>',
+        '<section data-ui-source-id="source-13">保留内容</section>',
+        '</main></body></html>'
+      ].join('')
+    });
+    const tools = store.tools(workspace.workspaceId);
+
+    await expect(tools.removeElement('source-11')).resolves.toContain('对应 sourceId 专属样式已同步移除');
+    await expect(tools.inspectElement('source-11')).rejects.toThrow('不存在元素');
+    await expect(tools.inspectElement('source-12')).rejects.toThrow('不存在元素');
+    expect(await tools.inspectElement('source-13')).toContain('保留内容');
+    await tools.commit('删除元素');
+
+    const html = store.html(workspace.workspaceId)!;
+    expect(html).not.toContain('删除内容');
+    expect(html).toContain('保留内容');
+    const preview = store.previewHtml(workspace.workspaceId)!;
+    expect(preview).not.toContain('[data-ui-source-id="source-12"]::after');
+    expect(preview).toContain('.shared{color:red}');
+  });
+
+  it('sets escaped text and removes replaced descendant metadata', async () => {
+    const store = createStore();
+    const workspace = store.create({
+      ...snapshot,
+      html: '<!doctype html><html><head><style>[data-ui-source-id="source-12"]::after{content:"!"}</style></head><body><button data-ui-source-id="source-11"><span data-ui-source-id="source-12">旧文案</span></button></body></html>'
+    });
+    const tools = store.tools(workspace.workspaceId);
+
+    await tools.setElementText('source-11', '<确认 & 继续>');
+    await tools.commit('设置文本');
+
+    const html = store.html(workspace.workspaceId)!;
+    expect(html).toContain('&lt;确认 &amp; 继续&gt;');
+    expect(html).not.toContain('source-12');
+    expect(store.previewHtml(workspace.workspaceId)).not.toContain('[data-ui-source-id="source-12"]::after');
+  });
+
+  it('updates safe attributes while protecting workspace identity and active behavior', async () => {
+    const store = createStore();
+    const workspace = store.create({
+      ...snapshot,
+      html: '<!doctype html><html><body><button data-ui-source-id="source-11" title="旧标题" disabled>操作</button></body></html>'
+    });
+    const tools = store.tools(workspace.workspaceId);
+
+    await tools.setElementAttributes('source-11', { title: '新"标题', 'aria-label': '主要操作' }, ['disabled']);
+    await expect(tools.setElementAttributes('source-11', { 'data-ui-source-id': 'source-99' }, []))
+      .rejects.toThrow('工作区维护');
+    await expect(tools.setElementAttributes('source-11', { onclick: 'alert(1)' }, []))
+      .rejects.toThrow('DOM 事件属性');
+    await tools.commit('更新属性');
+
+    const html = store.html(workspace.workspaceId)!;
+    expect(html).toContain('title="新&quot;标题"');
+    expect(html).toContain('aria-label="主要操作"');
+    expect(html).not.toMatch(/\sdisabled(?:\s|>)/);
+  });
+
+  it('inserts static element trees with fresh source ids', async () => {
+    const store = createStore();
+    const workspace = store.create({
+      ...snapshot,
+      html: '<!doctype html><html><body><main data-ui-source-id="source-10"><p data-ui-source-id="source-11">原内容</p></main></body></html>'
+    });
+    const tools = store.tools(workspace.workspaceId);
+
+    await expect(tools.insertElement(
+      'source-10',
+      'parentEnd',
+      '<section data-ui-source-id="source-10"><strong>新增</strong></section><aside>说明</aside>'
+    )).resolves.toContain('source-12, source-14');
+    await expect(tools.insertElement('source-10', 'parentEnd', '<script>bad()</script>'))
+      .rejects.toThrow('活动或嵌入式标签');
+    await tools.commit('插入元素');
+
+    const html = store.html(workspace.workspaceId)!;
+    expect(html).toMatch(/source-12[^>]*><strong[^>]+source-13[^>]*>新增/);
+    expect(html).toMatch(/aside[^>]+source-14[^>]*>说明/);
+  });
+
+  it('wraps, unwraps and reorders element subtrees without rebuilding their contents', async () => {
+    const store = createStore();
+    const workspace = store.create({
+      ...snapshot,
+      html: '<!doctype html><html><body><main data-ui-source-id="source-10"><div data-ui-source-id="source-11"><span data-ui-source-id="source-12">甲</span></div><span data-ui-source-id="source-13">乙</span></main></body></html>'
+    });
+    const tools = store.tools(workspace.workspaceId);
+
+    await expect(tools.wrapElement('source-13', 'section', { class: 'group' })).resolves.toContain('source-14<section>');
+    await tools.unwrapElement('source-11');
+    await tools.reorderChildren('source-10', ['source-14', 'source-12']);
+    await tools.commit('调整结构');
+
+    const html = store.html(workspace.workspaceId)!;
+    expect(html).not.toContain('data-ui-source-id="source-11"');
+    expect(html.indexOf('乙')).toBeLessThan(html.indexOf('甲'));
+    expect(html).toMatch(/section[^>]+source-14[^>]+class="group"/);
+  });
+
+  it('applies DOM operations atomically and rolls all changes back on failure', async () => {
+    const store = createStore();
+    const workspace = store.create({
+      ...snapshot,
+      html: '<!doctype html><html><body><main data-ui-source-id="source-10"><button data-ui-source-id="source-11">旧文案</button></main></body></html>'
+    });
+    const tools = store.tools(workspace.workspaceId);
+
+    await expect(tools.applyDomOperations([
+      { kind: 'setText', sourceId: 'source-11', text: '不应保留' },
+      { kind: 'remove', sourceId: 'source-missing' }
+    ])).rejects.toThrow('已全部回滚');
+    expect(await tools.inspectElement('source-11')).toContain('旧文案');
+
+    await tools.applyDomOperations([
+      { kind: 'setText', sourceId: 'source-11', text: '确认' },
+      { kind: 'setAttributes', sourceId: 'source-11', set: { 'aria-label': '确认操作' }, remove: [] },
+      { kind: 'insert', targetSourceId: 'source-10', position: 'parentEnd', html: '<p>说明</p>' }
+    ]);
+    await tools.commit('批量修改');
+
+    const html = store.html(workspace.workspaceId)!;
+    expect(html).toContain('>确认</button>');
+    expect(html).toContain('aria-label="确认操作"');
+    expect(html).toContain('>说明</p>');
+  });
+
   it('moves an existing element before or after an explicit target', async () => {
     const store = createStore();
     const workspace = store.create({
@@ -255,6 +426,31 @@ describe('SourceWorkspaceStore', () => {
       '.ui-snapshot-style-0{height:56px}'
     );
     expect(html.match(/data-ui-source-id="source-12"/g)).toHaveLength(1);
+  });
+
+  it('clones source-scoped pseudo styles without guessing ancestor layout changes', async () => {
+    const store = createStore();
+    const workspace = store.create({
+      ...snapshot,
+      html: [
+        '<!doctype html><html><head><style>',
+        '[data-ui-source-id="source-13"]::after{content:"";position:absolute}',
+        '</style></head><body>',
+        '<section data-ui-source-id="source-10" style="height:120px">',
+        '<div data-ui-source-id="source-11" style="display:flex;flex-wrap:wrap;height:56px">',
+        '<button data-ui-source-id="source-12" style="height:56px">充值',
+        '<span data-ui-source-id="source-13">去充值</span></button>',
+        '</div></section></body></html>'
+      ].join('')
+    });
+    const tools = store.tools(workspace.workspaceId);
+
+    await tools.cloneElement('source-12', 'parentEnd', undefined, []);
+    await tools.commit('复制充值模块');
+
+    const preview = store.previewHtml(workspace.workspaceId)!;
+    expect(preview).toContain('[data-ui-source-id="source-15"]::after');
+    expect(preview).not.toContain('height:auto!important');
   });
 
   it('rejects malformed table nesting before committing', async () => {

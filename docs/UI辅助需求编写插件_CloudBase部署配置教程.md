@@ -78,7 +78,6 @@ MODEL_PROVIDER=deepseek
 MODEL_BASE_URL=https://api.deepseek.com
 MODEL_API_KEY=替换为新创建的DeepSeek密钥
 MODEL_NAME=deepseek-v4-flash
-CODING_AGENT_ADAPTER=cline
 SOURCE_WORKSPACE_DIR=/tmp/ui-agent/source-workspaces
 LOG_FILE=/tmp/ui-agent/logs/agent-turns.jsonl
 ```
@@ -88,7 +87,6 @@ LOG_FILE=/tmp/ui-agent/logs/agent-turns.jsonl
 - `HOST=0.0.0.0`：允许 CloudBase 网关访问容器中的服务；
 - `PORT=8787`：与服务端口保持一致；
 - `MODEL_API_KEY`：只保存在 CloudBase，不进入插件；
-- `CODING_AGENT_ADAPTER=cline`：使用 Cline 通用源码 Agent；
 - `/tmp/ui-agent`：CloudBase 容器中的临时工作目录。
 
 ### 4.4 网络、规格和运行模式
@@ -128,7 +126,7 @@ https://你的默认域名/health
   "modelMode": "remote",
   "modelProvider": "deepseek",
   "modelName": "deepseek-v4-flash",
-  "codingAgentAdapter": "cline"
+  "codingAgentAdapter": "cline-sdk"
 }
 ```
 

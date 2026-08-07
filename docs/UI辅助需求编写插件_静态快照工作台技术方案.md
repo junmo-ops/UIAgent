@@ -842,19 +842,19 @@ clarify
    - 保持现有插件交互和预览 URL 不变。
 3. **M2：CodingAgentPort**
    - 定义与供应商无关的 Turn、事件、Tool 和 Checkpoint 契约；
-   - 将现有 Agent 包装成 Legacy Adapter，保证可回退。
-   - **状态：已于 2026-07-31 完成。** Agent Service 已只依赖 `CodingAgentPort`；当前默认 `CODING_AGENT_ADAPTER=legacy`，日志保存 Adapter ID、统一步骤轨迹和最终 Checkpoint。
+   - Agent Service 通过 `CodingAgentPort` 调用唯一的 Cline SDK 运行时。
+   - **状态：已完成。** 日志保存 Adapter ID、统一步骤轨迹和最终 Checkpoint。
 4. **M3：Cline Adapter POC**
    - 只开放受限文件工具；
    - 继续使用当前 DeepSeek 配置；
-   - 与 Legacy Adapter 执行同一组未知测试用例。
-   - **状态：已于 2026-07-31 完成工程接入。** 使用 `@cline/sdk@0.0.65` 的独立 `Agent`，只注册 `CodingWorkspaceTools` 的受限桥接；支持 `CODING_AGENT_ADAPTER=cline` 切换、统一步骤日志、Checkpoint、受控原子 Patch、重复失败换策略提示、`finish` 提交和 `clarify`/异常回滚。Side Panel 通过独立进度投影展示可审计操作摘要，不展示模型隐式推理。默认仍保持 `legacy`，待未知场景人工对照后再决定 M5 切换。
+   - 使用未知测试用例验证通用能力。
+   - **状态：已完成工程接入并设为唯一运行时。** 使用 `@cline/sdk@0.0.65` 的独立 `Agent`，只注册 `CodingWorkspaceTools` 的受限桥接；支持统一步骤日志、Checkpoint、受控原子 Patch、重复失败换策略提示、`finish` 提交和 `clarify`/异常回滚。Side Panel 通过独立进度投影展示可审计操作摘要，不展示模型隐式推理。
 5. **M4：验证闭环**
    - 增加结构、选区、Diff 和静态预览验证；
    - Agent 可根据验证失败自动修复一次以上。
-6. **M5：切换默认实现**
-   - 依据成功率、token、耗时和安全测试决定；
-   - 保留配置开关和 Legacy Adapter 回退能力。
+6. **M5：统一运行时**
+   - 依据成功率、token、耗时和安全测试完成 Cline SDK 验证；
+   - 删除旧实现和运行时切换开关，避免测试环境与生产路径不一致。
 
 ### 16.7 重构验收标准
 
