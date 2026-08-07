@@ -60,6 +60,7 @@ const clineSourceRules = [
 
 const DEFAULT_MAX_ITERATIONS = 45;
 const FINALIZATION_WINDOW = 3;
+const MAX_IDENTICAL_TOOL_FAILURES = 3;
 const BUDGETED_READ_ACTIONS = new Set([
   'list_files', 'search_text', 'read_file', 'inspect_element', 'inspect_elements',
   'read_style_rule', 'read_style_rules'
@@ -124,6 +125,11 @@ function ancestrySourceIds(inspection: string): string[] {
   return [...path.matchAll(/(source-\d+)</g)].map(match => match[1]!);
 }
 
+function cssClassNamesIn(css: string): Set<string> {
+  return new Set([...css.matchAll(/(?:^|[}\s])\.([A-Za-z_][A-Za-z0-9_-]*)/g)]
+    .map(match => match[1]!));
+}
+
 export class ClineCodingAgentAdapter implements CodingAgentPort {
   readonly adapterId = 'cline-sdk';
   private readonly maxIterations: number;
@@ -156,6 +162,7 @@ export class ClineCodingAgentAdapter implements CodingAgentPort {
     const newSourceIds = new Set<string>();
     let spatialScopeValidated = false;
     let introducedFixedPosition = false;
+    const changedPositioningClassNames = new Set<string>();
     const repeatedFailures = new Map<string, number>();
     let checkpoint: CodingAgentCheckpoint = {
       version: 1,
@@ -247,6 +254,9 @@ export class ClineCodingAgentAdapter implements CodingAgentPort {
           ? `${baseMessage}。同一错误已重复 ${repeated} 次，请停止当前策略；追加内容请改用 apply_patch 的 start/end，无法安全继续则调用 clarify。`
           : baseMessage;
         record(action, input, context, undefined, message);
+        if (repeated >= MAX_IDENTICAL_TOOL_FAILURES) {
+          throw new Error(`${message} 已达到单个错误的重试上限（${MAX_IDENTICAL_TOOL_FAILURES} 次），请调用 clarify 或改用其他策略。`);
+        }
         throw new Error(message);
       }
     };
@@ -266,6 +276,9 @@ export class ClineCodingAgentAdapter implements CodingAgentPort {
       if (!/\bposition\s*:\s*fixed\b/i.test(before) && /\bposition\s*:\s*fixed\b/i.test(after)) {
         introducedFixedPosition = true;
         spatialScopeValidated = false;
+      }
+      for (const className of cssClassNamesIn(after)) {
+        changedPositioningClassNames.add(className);
       }
     };
 
@@ -586,6 +599,11 @@ export class ClineCodingAgentAdapter implements CodingAgentPort {
                 throw new Error('本轮新增样式包含 position:fixed，但用户没有明确要求页面、浏览器视口或全局固定定位；请改为选区容器内的普通、absolute 或 sticky 布局');
               }
               for (const className of input.positioningClassNames ?? []) {
+                const normalizedClassName = className.replace(/^\./, '');
+                // readStyleRule may return a pre-existing snapshot rule. Only treat
+                // fixed positioning as a new violation when this turn actually
+                // changed or created that CSS class.
+                if (!changedPositioningClassNames.has(normalizedClassName)) continue;
                 const rule = await workspace.readStyleRule(className);
                 if (/\bposition\s*:\s*fixed\b/i.test(rule)) {
                   throw new Error(`样式 .${className.replace(/^\./, '')} 使用了 position:fixed，但用户没有声明全局视口定位`);
