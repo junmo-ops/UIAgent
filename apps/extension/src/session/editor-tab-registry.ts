@@ -7,12 +7,14 @@ export class EditorTabRegistry {
   private readonly editorTabs = new Map<string, number>();
   private readonly tabEditors = new Map<number, Set<string>>();
 
-  bind(editorClientId: string, tabId: number): void {
-    this.unbind(editorClientId);
+  bind(editorClientId: string, tabId: number): boolean {
+    const existingTabId = this.editorTabs.get(editorClientId);
+    if (existingTabId !== undefined) return existingTabId === tabId;
     this.editorTabs.set(editorClientId, tabId);
     const editors = this.tabEditors.get(tabId) ?? new Set<string>();
     editors.add(editorClientId);
     this.tabEditors.set(tabId, editors);
+    return true;
   }
 
   resolve(editorClientId: string): number | undefined {

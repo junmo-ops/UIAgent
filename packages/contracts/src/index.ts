@@ -127,6 +127,69 @@ export const sourceTurnResponseSchema = z.discriminatedUnion('kind', [
 ]);
 export type SourceTurnResponse = z.infer<typeof sourceTurnResponseSchema>;
 
+export const assistantConversationEntrySchema = z.object({
+  role: z.enum(['user', 'assistant']),
+  text: z.string().min(1).max(10_000)
+});
+export type AssistantConversationEntry = z.infer<typeof assistantConversationEntrySchema>;
+
+export const assistantTurnRequestSchema = z.object({
+  protocolVersion: z.literal(PROTOCOL_VERSION),
+  turnId: z.string().uuid(),
+  traceId: z.string().uuid(),
+  instruction: z.string().trim().min(1).max(10_000),
+  context: z.object({
+    hasWorkspace: z.boolean(),
+    hasSelection: z.boolean(),
+    selection: z.object({
+      sourceId: z.string().min(1).max(100).optional(),
+      tag: z.string().min(1).max(80),
+      role: z.string().max(100).optional(),
+      text: z.string().max(1_000)
+    }).optional()
+  }),
+  conversation: z.array(assistantConversationEntrySchema).max(12).default([]),
+  replyToClarificationId: z.string().uuid().optional(),
+  clarificationOptionId: z.string().min(1).max(100).optional()
+});
+export type AssistantTurnRequest = z.infer<typeof assistantTurnRequestSchema>;
+
+export const assistantTurnResponseSchema = z.discriminatedUnion('kind', [
+  z.object({
+    kind: z.literal('answered'),
+    answer: z.string().min(1).max(30_000)
+  }),
+  z.object({
+    kind: z.literal('page_edit'),
+    instruction: z.string().min(1).max(10_000),
+    targetScope: z.enum(['selection', 'workspace'])
+  }),
+  z.object({
+    kind: z.literal('clarification'),
+    clarificationId: z.string().uuid(),
+    question: z.string().min(1).max(2_000),
+    options: z.array(clarificationOptionSchema).min(2).max(4).optional(),
+    allowFreeText: z.boolean().default(true)
+  }),
+  z.object({
+    kind: z.literal('failed'),
+    code: z.string().min(1),
+    message: z.string().min(1)
+  })
+]);
+export type AssistantTurnResponse = z.infer<typeof assistantTurnResponseSchema>;
+
+export const assistantStreamEventSchema = z.discriminatedUnion('type', [
+  z.object({ type: z.literal('answer_delta'), text: z.string().min(1) }),
+  z.object({ type: z.literal('result'), result: assistantTurnResponseSchema }),
+  z.object({
+    type: z.literal('error'),
+    code: z.string().min(1),
+    message: z.string().min(1)
+  })
+]);
+export type AssistantStreamEvent = z.infer<typeof assistantStreamEventSchema>;
+
 export const sourceTurnProgressSchema = z.object({
   workspaceId: z.string().uuid(),
   turnId: z.string().min(1),
@@ -162,6 +225,31 @@ export const sourceWorkspaceInfoSchema = sourceWorkspaceCreatedSchema.extend({
   canRedo: z.boolean()
 });
 export type SourceWorkspaceInfo = z.infer<typeof sourceWorkspaceInfoSchema>;
+
+export const managedWorkspaceSchema = sourceWorkspaceInfoSchema.extend({
+  createdAt: z.string().datetime(),
+  updatedAt: z.string().datetime(),
+  deletedAt: z.string().datetime().optional()
+});
+export type ManagedWorkspace = z.infer<typeof managedWorkspaceSchema>;
+
+export const workspaceListResponseSchema = z.object({
+  items: z.array(managedWorkspaceSchema),
+  total: z.number().int().nonnegative(),
+  offset: z.number().int().nonnegative(),
+  limit: z.number().int().positive()
+});
+export type WorkspaceListResponse = z.infer<typeof workspaceListResponseSchema>;
+
+export const workspaceUpdateRequestSchema = z.object({
+  title: z.string().trim().min(1).max(200)
+});
+
+export const installationCredentialSchema = z.object({
+  accessToken: z.string().min(32),
+  expiresAt: z.string().datetime()
+});
+export type InstallationCredential = z.infer<typeof installationCredentialSchema>;
 
 export const elementRefSchema = z.object({
   id: z.string().min(1),

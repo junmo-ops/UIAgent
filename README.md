@@ -130,6 +130,17 @@ docker run --name ui-agent-service \
   ui-agent-service
 ```
 
+公司内网试点不需要登录或数据库。部署前在服务端 `.env` 中启用安装身份，并使用密码管理器生成随机密钥：
+
+```env
+AUTH_MODE=installation
+INSTALLATION_TOKEN_SECRET=至少32字符且不可提交到仓库的随机密钥
+INSTALLATION_TENANT_ID=internal-pilot
+CORS_ORIGIN=chrome-extension://正式插件ID
+```
+
+插件首次访问会自动领取服务端签名的安装身份并保存在当前 Chrome Profile；工作区列表、预览、修改、Revision 和回收站均按该身份隔离。更换电脑或 Chrome Profile 会形成新身份，试点阶段不提供跨设备同步。`INSTALLATION_TOKEN_SECRET` 必须持续保留，随意更换会使已安装插件的凭证失效。
+
 线上环境应由网关提供 HTTPS，并限制为受信任的公司网络或增加统一鉴权。不要把 DeepSeek Key 写入插件或提交到仓库。
 反向代理或容器平台终止 HTTPS 时，还应设置 `PUBLIC_BASE_URL=https://实际服务域名`，确保服务返回的副本地址也是正确的 HTTPS 地址。
 
@@ -141,7 +152,7 @@ WXT_PUBLIC_AGENT_SERVICE_URL=https://ui-agent.example.com pnpm --filter @ui-agen
 
 构建产物位于 `apps/extension/.output/chrome-mv3`。该服务地址会同时用于 API 请求、副本页面校验和精确的 Chrome 主机权限；安装这个构建产物的用户不需要在自己的电脑上启动 Agent Service。插件顶部会真实检测 `/health`，分别展示“连接中”“已连接”或“未连接”，网络失败时会提示实际服务地址，不再只显示 `Failed to fetch`。
 
-远程服务至少需要持久化 `/data`，其中包含静态工作区与操作日志。生产化前还需要根据公司环境接入鉴权、用户工作区隔离、自动过期清理和日志访问控制；当前容器配置用于受控 Demo 部署，不建议直接暴露到公共互联网。
+远程服务至少需要持久化 `/data`，其中包含静态工作区与操作日志。当前安装身份适合公司内网受控试点：它提供浏览器安装级隔离，但不等同于员工账号登录；服务仍不应直接暴露到公共互联网。正式多端使用时再接入公司 SSO，并将安装身份下的工作区迁移给员工账号。
 
 ## 验证
 

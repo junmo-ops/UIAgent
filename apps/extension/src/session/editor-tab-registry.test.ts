@@ -10,6 +10,15 @@ describe('EditorTabRegistry', () => {
     expect(registry.resolve('editor-b')).toBe(22);
   });
 
+  it('does not migrate an existing side-panel client to another tab', () => {
+    const registry = new EditorTabRegistry();
+    expect(registry.bind('editor-a', 11)).toBe(true);
+    expect(registry.bind('editor-a', 22)).toBe(false);
+    expect(registry.resolve('editor-a')).toBe(11);
+    expect(registry.removeTab(22)).toEqual([]);
+    expect(registry.removeTab(11)).toEqual(['editor-a']);
+  });
+
   it('only marks the last editor disconnect as a reason to deactivate a tab', () => {
     const registry = new EditorTabRegistry();
     registry.bind('editor-a', 11);

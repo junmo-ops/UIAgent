@@ -254,6 +254,38 @@ describe('SourceWorkspaceStore', () => {
     expect(html.indexOf('风险提示')).toBeLessThan(html.indexOf('</main>'));
   });
 
+  it('lists, searches, renames, trashes and restores workspaces', () => {
+    const store = createStore();
+    const first = store.create(snapshot);
+    const second = store.create({ ...snapshot, title: '结算页副本', sourceUrl: 'https://example.test/checkout' });
+
+    expect(store.list()).toMatchObject({ total: 2, items: expect.arrayContaining([
+      expect.objectContaining({ workspaceId: first.workspaceId }),
+      expect.objectContaining({ workspaceId: second.workspaceId })
+    ]) });
+    expect(store.list({ offset: 1, limit: 1 })).toMatchObject({
+      total: 2,
+      offset: 1,
+      limit: 1,
+      items: [expect.objectContaining({ workspaceId: expect.any(String) })]
+    });
+    expect(store.list({ query: 'checkout' })).toMatchObject({
+      total: 1,
+      items: [expect.objectContaining({ workspaceId: second.workspaceId })]
+    });
+
+    expect(store.rename(first.workspaceId, '订单筛选方案')).toMatchObject({ title: '订单筛选方案' });
+    expect(store.trash(first.workspaceId).deletedAt).toBeTruthy();
+    expect(store.get(first.workspaceId)).toBeUndefined();
+    expect(store.list()).toMatchObject({ total: 1 });
+    expect(store.list({ status: 'trashed' })).toMatchObject({
+      total: 1,
+      items: [expect.objectContaining({ workspaceId: first.workspaceId })]
+    });
+    expect(store.restoreWorkspace(first.workspaceId)).not.toHaveProperty('deletedAt');
+    expect(store.get(first.workspaceId)).toMatchObject({ title: '订单筛选方案' });
+  });
+
   it('removes a complete element subtree by source id and refreshes indexes', async () => {
     const store = createStore();
     const workspace = store.create({

@@ -41,11 +41,14 @@ const UNSAFE_HTML_RULES = [
 interface WorkspaceManifest {
   workspaceVersion?: 1 | 2;
   workspaceId: string;
+  ownerId?: string;
+  tenantId?: string;
   title: string;
   sourceUrl: string;
   selectedSourceId: string;
   createdAt: string;
   updatedAt: string;
+  deletedAt?: string;
   revision: number;
   maxRevision: number;
   summaries: Array<{ revision: number; summary: string; timestamp: string }>;
@@ -284,6 +287,29 @@ function clonedSourceScopedCss(css: string, sourceIdMap: ReadonlyMap<string, str
   return clonedRules.join('\n');
 }
 
+export interface WorkspaceOwner {
+  userId: string;
+  tenantId: string;
+}
+
+const LOCAL_WORKSPACE_OWNER: WorkspaceOwner = {
+  userId: 'local-developer',
+  tenantId: 'local'
+};
+
+export interface ManagedSourceWorkspace extends SourceWorkspace {
+  createdAt: string;
+  updatedAt: string;
+  deletedAt?: string;
+}
+
+export interface WorkspaceListOptions {
+  query?: string;
+  status?: 'active' | 'trashed' | 'all';
+  offset?: number;
+  limit?: number;
+}
+
 function sourceElementInnerRange(
   content: string,
   range: { start: number; end: number; tag: string }
@@ -508,7 +534,7 @@ export class SourceWorkspaceStore {
     mkdirSync(this.root, { recursive: true, mode: 0o700 });
   }
 
-  create(input: unknown): SourceWorkspace {
+  create(input: unknown, owner: WorkspaceOwner = LOCAL_WORKSPACE_OWNER): SourceWorkspace {
     const snapshot = staticSnapshotSchema.parse(input);
     validateHtml(snapshot.html);
     const compiled = compileSourceWorkspace(snapshot.html, { viewport: snapshot.viewport });
@@ -530,6 +556,8 @@ export class SourceWorkspaceStore {
     this.writeManifest(directory, {
       workspaceVersion: 2,
       workspaceId,
+      ownerId: owner.userId,
+      tenantId: owner.tenantId,
       title: snapshot.title,
       sourceUrl: snapshot.sourceUrl,
       selectedSourceId: snapshot.selectedSourceId,
@@ -547,15 +575,76 @@ export class SourceWorkspaceStore {
     const directory = this.workspacePath(workspaceId);
     if (!existsSync(resolve(directory, 'workspace.json'))) return undefined;
     const manifest = this.readManifest(directory);
-    return {
-      workspaceId,
-      title: manifest.title,
-      sourceUrl: manifest.sourceUrl,
-      selectedSourceId: manifest.selectedSourceId,
-      revision: manifest.revision,
-      canUndo: manifest.revision > 0,
-      canRedo: manifest.revision < manifest.maxRevision
-    };
+    if (manifest.deletedAt) return undefined;
+    return this.workspaceFromManifest(manifest);
+  }
+
+  list(
+    options: WorkspaceListOptions = {},
+    owner: WorkspaceOwner = LOCAL_WORKSPACE_OWNER
+  ): { items: ManagedSourceWorkspace[]; total: number; offset: number; limit: number } {
+    const status = options.status ?? 'active';
+    const query = options.query?.trim().toLocaleLowerCase() ?? '';
+    const offset = Math.max(0, options.offset ?? 0);
+    const limit = Math.min(100, Math.max(1, options.limit ?? 30));
+    const items = readdirSync(this.root, { withFileTypes: true })
+      .filter(entry => entry.isDirectory() && /^[0-9a-f-]{36}$/i.test(entry.name))
+      .flatMap(entry => {
+        const directory = this.workspacePath(entry.name);
+        if (!existsSync(resolve(directory, 'workspace.json'))) return [];
+        try {
+          const manifest = this.readManifest(directory);
+          if (!this.manifestBelongsTo(manifest, owner)) return [];
+          if (status === 'active' && manifest.deletedAt) return [];
+          if (status === 'trashed' && !manifest.deletedAt) return [];
+          if (query && !`${manifest.title}\n${manifest.sourceUrl}`.toLocaleLowerCase().includes(query)) return [];
+          return [this.workspaceFromManifest(manifest)];
+        } catch {
+          return [];
+        }
+      })
+      .sort((left, right) => right.updatedAt.localeCompare(left.updatedAt));
+    return { items: items.slice(offset, offset + limit), total: items.length, offset, limit };
+  }
+
+  owns(workspaceId: string, owner: WorkspaceOwner): boolean {
+    const directory = this.workspacePath(workspaceId);
+    if (!existsSync(resolve(directory, 'workspace.json'))) return false;
+    try {
+      return this.manifestBelongsTo(this.readManifest(directory), owner);
+    } catch {
+      return false;
+    }
+  }
+
+  rename(workspaceId: string, title: string): ManagedSourceWorkspace {
+    const normalized = title.trim();
+    if (!normalized || normalized.length > 200) throw new Error('副本名称长度必须为 1-200 个字符');
+    const directory = this.workspacePath(workspaceId);
+    const manifest = this.readManifest(directory);
+    if (manifest.deletedAt) throw new Error('回收站中的副本不能重命名');
+    const updated = { ...manifest, title: normalized, updatedAt: new Date().toISOString() };
+    this.writeManifest(directory, updated);
+    return this.workspaceFromManifest(updated);
+  }
+
+  trash(workspaceId: string): ManagedSourceWorkspace {
+    if (this.active.has(workspaceId)) throw new Error('Agent 修改执行期间不能删除副本');
+    const directory = this.workspacePath(workspaceId);
+    const manifest = this.readManifest(directory);
+    const deletedAt = manifest.deletedAt ?? new Date().toISOString();
+    const updated = { ...manifest, deletedAt, updatedAt: deletedAt };
+    this.writeManifest(directory, updated);
+    return this.workspaceFromManifest(updated);
+  }
+
+  restoreWorkspace(workspaceId: string): ManagedSourceWorkspace {
+    const directory = this.workspacePath(workspaceId);
+    const manifest = this.readManifest(directory);
+    const { deletedAt: _deletedAt, ...retained } = manifest;
+    const updated = { ...retained, updatedAt: new Date().toISOString() };
+    this.writeManifest(directory, updated);
+    return this.workspaceFromManifest(updated);
   }
 
   html(workspaceId: string): string | undefined {
@@ -564,6 +653,7 @@ export class SourceWorkspaceStore {
   }
 
   previewHtml(workspaceId: string): string | undefined {
+    if (!this.get(workspaceId)) return undefined;
     const directory = this.workspacePath(workspaceId);
     const html = this.readOptionalFile(resolve(directory, 'index.html'));
     if (!html) return undefined;
@@ -1227,6 +1317,27 @@ export class SourceWorkspaceStore {
     const directory = resolve(this.root, workspaceId);
     if (!directory.startsWith(`${this.root}${sep}`)) throw new Error('Workspace 路径越界');
     return directory;
+  }
+
+  private workspaceFromManifest(manifest: WorkspaceManifest): ManagedSourceWorkspace {
+    return {
+      workspaceId: manifest.workspaceId,
+      title: manifest.title,
+      sourceUrl: manifest.sourceUrl,
+      selectedSourceId: manifest.selectedSourceId,
+      revision: manifest.revision,
+      canUndo: manifest.revision > 0,
+      canRedo: manifest.revision < manifest.maxRevision,
+      createdAt: manifest.createdAt,
+      updatedAt: manifest.updatedAt,
+      ...(manifest.deletedAt && { deletedAt: manifest.deletedAt })
+    };
+  }
+
+  private manifestBelongsTo(manifest: WorkspaceManifest, owner: WorkspaceOwner): boolean {
+    const ownerId = manifest.ownerId ?? LOCAL_WORKSPACE_OWNER.userId;
+    const tenantId = manifest.tenantId ?? LOCAL_WORKSPACE_OWNER.tenantId;
+    return ownerId === owner.userId && tenantId === owner.tenantId;
   }
 
   private readManifest(directory: string): WorkspaceManifest {
