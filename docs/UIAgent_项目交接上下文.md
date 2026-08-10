@@ -57,7 +57,7 @@ UIAgent 是一个面向产品经理的 Chrome 插件 Demo，用于快速生成 U
 - 按 Revision 撤销、重做和恢复初始状态。
 - 当前可视区域截图导出。
 - 离线快照包导出和导入。
-- Mock Agent、Legacy Source Agent 和 Cline Adapter。
+- Cline SDK Agent 与受控源码工具。
 - DeepSeek/OpenAI-compatible 模型接入。
 - Agent 会话日志和实时进度展示。
 
@@ -98,7 +98,7 @@ packages/agent-runtime
   src/core/
     CodingAgentPort、Checkpoint 等通用 Agent 接口
   src/adapters/
-    Cline Adapter、Legacy Adapter
+    Cline SDK Adapter
   src/source-editing/
     静态源码编辑 Agent 和受控交互指令
 
@@ -232,19 +232,6 @@ MODEL_PROVIDER=deepseek
 MODEL_BASE_URL=https://api.deepseek.com
 MODEL_API_KEY=你的Key
 MODEL_NAME=deepseek-v4-flash
-CODING_AGENT_ADAPTER=legacy
-```
-
-可选 Adapter：
-
-```env
-CODING_AGENT_ADAPTER=legacy
-```
-
-或：
-
-```env
-CODING_AGENT_ADAPTER=cline
 ```
 
 修改 `.env` 后需要重启 Agent Service，插件无需重新构建。

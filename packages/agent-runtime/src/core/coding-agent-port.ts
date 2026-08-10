@@ -1,5 +1,5 @@
 import type {
-  SourceAgentDecision,
+  DomOperation,
   SourceTurnRequest,
   SourceTurnResponse
 } from '@ui-agent/contracts';
@@ -19,6 +19,18 @@ export interface CodingWorkspaceTools {
     >
   ): Promise<string>;
   replaceInElement(sourceId: string, search: string, replace: string): Promise<string>;
+  setElementText(sourceId: string, text: string): Promise<string>;
+  setElementAttributes(sourceId: string, set: Record<string, string>, remove: string[]): Promise<string>;
+  insertElement(
+    targetSourceId: string,
+    position: 'parentStart' | 'parentEnd' | 'before' | 'after',
+    html: string
+  ): Promise<string>;
+  wrapElement(sourceId: string, tagName: string, attributes: Record<string, string>): Promise<string>;
+  unwrapElement(sourceId: string): Promise<string>;
+  removeElement(sourceId: string): Promise<string>;
+  reorderChildren(parentSourceId: string, orderedSourceIds: string[]): Promise<string>;
+  applyDomOperations(operations: DomOperation[]): Promise<string>;
   moveElement(
     sourceId: string,
     position: 'parentStart' | 'parentEnd' | 'before' | 'after',
@@ -50,9 +62,12 @@ export interface CodingAgentStep {
   modelCall: number;
   action: string;
   input?: unknown;
-  decision?: SourceAgentDecision;
   result?: string;
   error?: string;
+  /** Wall-clock time spent waiting for the model decision, including internal repair retries. */
+  modelDurationMs?: number;
+  /** Actual provider attempts used to obtain this decision. */
+  modelAttempts?: number;
 }
 
 export interface CodingAgentCheckpoint {

@@ -7,7 +7,7 @@ import type {
 import type {
   CodingAgentStep,
   CodingAgentCheckpoint,
-  SourceConversationTurn
+  CodingAgentConversationTurn
 } from '@ui-agent/agent-runtime';
 
 export interface TurnLogEntry {
@@ -17,7 +17,7 @@ export interface TurnLogEntry {
   status: 'running' | 'completed' | 'failed';
   model: { mode: string; provider: string; name?: string };
   request: SourceTurnRequest;
-  conversation: SourceConversationTurn[];
+  conversation: CodingAgentConversationTurn[];
   result?: SourceTurnResponse;
   sourceWorkspaceId?: string;
   codingAgent?: { adapterId: string; checkpoint: CodingAgentCheckpoint };
@@ -94,7 +94,7 @@ export class TurnLogStore {
   recordSourceTurn(
     workspaceId: string,
     request: SourceTurnRequest,
-    conversation: SourceConversationTurn[],
+    conversation: CodingAgentConversationTurn[],
     response: SourceTurnResponse,
     sourceSteps: CodingAgentStep[],
     durationMs: number,

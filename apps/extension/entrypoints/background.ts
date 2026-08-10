@@ -2,6 +2,10 @@ import { onMessage, sendMessage } from '../src/messaging';
 import type { ContentCommand, ContentCommandResult, ExtensionErrorCode } from '@ui-agent/contracts';
 import { pageInjectionIssue } from '../src/session/url-policy';
 import { EditorTabRegistry } from '../src/session/editor-tab-registry';
+import {
+  disableGlobalSidePanel,
+  openTabScopedSidePanel
+} from '../src/session/tab-scoped-side-panel';
 import { getAgentServiceUrl } from '../src/service/agent-service-config';
 import { isWorkspacePreviewUrl } from '../src/service/agent-service-url';
 
@@ -78,6 +82,12 @@ async function exportScreenshot(tab: Browser.tabs.Tab): Promise<ContentCommandRe
 export default defineBackground(() => {
   const editorTabs = new EditorTabRegistry();
 
+  // The manifest path is a global fallback. Disable it so Chrome hides this
+  // extension's panel on every tab that has not explicitly opened its own.
+  void disableGlobalSidePanel(browser.sidePanel).catch(error => {
+    console.error('[ui-agent] Failed to disable the global side panel', error);
+  });
+
   // Chrome 没有可靠的 sidePanel.onClosed。每个 Side Panel 使用唯一 clientId
   // 建立长连接，同时固定它创建时对应的标签页，避免后续命令误发到其他活动标签。
   browser.runtime.onConnect.addListener(port => {
@@ -116,7 +126,9 @@ export default defineBackground(() => {
   });
 
   browser.action.onClicked.addListener(tab => {
-    if (tab.id) browser.sidePanel.open({ tabId: tab.id }).catch(() => undefined);
+    if (tab.id) void openTabScopedSidePanel(browser.sidePanel, tab.id).catch(error => {
+      console.error(`[ui-agent] Failed to open the side panel for tab ${tab.id}`, error);
+    });
   });
 
   onMessage('browserCommand', async message => {
@@ -134,11 +146,14 @@ export default defineBackground(() => {
             `只能将编辑会话绑定到当前 Agent Service 的静态源码副本。当前地址：${tab.url ?? '未知'}；待加载地址：${tab.pendingUrl ?? '无'}`
           );
         }
-        const previousTabId = editorTabs.resolve(editorClientId);
-        editorTabs.bind(editorClientId, command.tabId);
-        if (previousTabId !== undefined && previousTabId !== command.tabId) {
-          void sendMessage('contentCommand', { type: 'deactivateEditor' }, previousTabId).catch(() => undefined);
+        const panelTabId = await editorTabs.waitFor(editorClientId);
+        if (panelTabId !== undefined && panelTabId !== command.tabId) {
+          throw new BrowserCommandError(
+            'TAB_CHANGED',
+            '当前 Side Panel 实例属于另一个标签页，不能迁移到静态副本。请在静态副本标签页点击插件图标。'
+          );
         }
+        if (panelTabId === undefined) editorTabs.bind(editorClientId, command.tabId);
         return { ok: true };
       }
       let tabId = await editorTabs.waitFor(editorClientId);

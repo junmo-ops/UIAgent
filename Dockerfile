@@ -2,6 +2,7 @@ FROM node:24-bookworm-slim
 
 ENV PNPM_HOME=/pnpm
 ENV PATH=$PNPM_HOME:$PATH
+ENV NODE_ENV=production
 ENV HOST=0.0.0.0
 ENV PORT=8787
 ENV SOURCE_WORKSPACE_DIR=/data/source-workspaces
