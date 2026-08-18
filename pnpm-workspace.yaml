@@ -8,10 +8,3 @@ allowBuilds:
   spawn-sync: false
 
 confirmModulesPurge: false
-
-minimumReleaseAgeExclude:
-  - '@dabaoabc/ui-agent-agents@0.2.0 || 0.2.2'
-  - '@dabaoabc/ui-agent-core@0.2.0 || 0.2.2'
-  - '@dabaoabc/ui-agent-llms@0.2.0 || 0.2.2'
-  - '@dabaoabc/ui-agent-sdk@0.2.0 || 0.2.2'
-  - '@dabaoabc/ui-agent-shared@0.2.0 || 0.2.2'

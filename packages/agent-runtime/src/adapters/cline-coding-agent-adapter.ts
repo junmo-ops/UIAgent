@@ -4,7 +4,7 @@ import {
   type AgentRunResult,
   type AgentTool,
   type AgentToolContext
-} from '@dabaoabc/ui-agent-sdk';
+} from '../../vendor/ui-agent-runtime/index.js';
 import {
   domOperationSchema,
   type ClarificationOption,

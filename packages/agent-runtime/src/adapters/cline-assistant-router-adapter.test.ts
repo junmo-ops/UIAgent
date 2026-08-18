@@ -1,4 +1,4 @@
-import type { AgentRunResult, AgentTool, AgentToolContext } from '@dabaoabc/ui-agent-sdk';
+import type { AgentRunResult, AgentTool, AgentToolContext } from '../../vendor/ui-agent-runtime/index.js';
 import { describe, expect, it } from 'vitest';
 import { PROTOCOL_VERSION, type AssistantTurnRequest } from '@ui-agent/contracts';
 import {

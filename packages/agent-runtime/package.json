@@ -10,8 +10,9 @@
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
-    "@dabaoabc/ui-agent-sdk": "0.2.2",
+    "@ai-sdk/openai-compatible": "^3.0.27",
     "@ui-agent/contracts": "workspace:*",
+    "ai": "^7.0.58",
     "zod": "^4.0.0"
   },
   "devDependencies": {

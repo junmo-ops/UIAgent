@@ -1,4 +1,4 @@
-import { Agent, type AgentRunResult } from '@dabaoabc/ui-agent-sdk';
+import { Agent, type AgentRunResult } from '../../vendor/ui-agent-runtime/index.js';
 import type { AssistantTurnRequest } from '@ui-agent/contracts';
 import type { AssistantChatPort, AssistantTextObserver } from '../core/assistant-chat-port';
 

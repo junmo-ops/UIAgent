@@ -1,4 +1,4 @@
-FROM node:24-bookworm-slim
+FROM node:22-bookworm-slim
 
 ENV PNPM_HOME=/pnpm
 ENV PATH=$PNPM_HOME:$PATH
@@ -16,7 +16,7 @@ COPY package.json pnpm-lock.yaml pnpm-workspace.yaml ./
 COPY apps/agent-service/package.json apps/agent-service/package.json
 COPY packages/agent-runtime/package.json packages/agent-runtime/package.json
 COPY packages/contracts/package.json packages/contracts/package.json
-RUN pnpm install --frozen-lockfile
+RUN pnpm install --prod --frozen-lockfile
 
 COPY apps/agent-service apps/agent-service
 COPY packages/agent-runtime packages/agent-runtime

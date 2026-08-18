@@ -1,4 +1,4 @@
-import { Agent, createTool, type AgentRunResult, type AgentTool } from '@dabaoabc/ui-agent-sdk';
+import { Agent, createTool, type AgentRunResult, type AgentTool } from '../../vendor/ui-agent-runtime/index.js';
 import {
   type AssistantTurnRequest,
   type ClarificationOption

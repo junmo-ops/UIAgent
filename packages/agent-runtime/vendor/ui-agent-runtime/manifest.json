@@ -1,0 +1,35 @@
+{
+  "schemaVersion": 1,
+  "builtAt": "2026-08-18T04:45:32Z",
+  "entry": {
+    "source": "DeepSeek-compatible Agent implementation aligned to the Cline Agent API subset used by UIAgent",
+    "output": "index.js",
+    "format": "esm",
+    "target": "node",
+    "minimumNodeVersion": "22"
+  },
+  "upstream": {
+    "project": "cline/cline",
+    "repository": "https://github.com/cline/cline",
+    "commit": "d50be161e4e7a9d4f90ec3be13bc85bb90535c25",
+    "sdkVersion": "0.0.75",
+    "license": "Apache-2.0"
+  },
+  "includedModules": ["deepseek-compatible-agent-loop"],
+  "externalDependencies": {
+    "npm": ["ai", "@ai-sdk/openai-compatible"],
+    "runtime": ["Node.js built-in modules"]
+  },
+  "files": {
+    "index.js": {
+      "sha256": "a54e22a1539efe2ccf38111b40d0120cbcfe3e58dc92147553b78cac3d4ce5d6"
+    },
+    "index.d.ts": {
+      "sha256": "38dd99c6be06e43af20038fc9a9380de97a5a51bda85591a8a384e94dac7d201"
+    },
+    "UPSTREAM_NOTICE.md": {
+      "sha256": "6a657834629df7058fa58ea8b07f4be0758b7fae0e83f5ca26f2fb206bc1855d"
+    }
+  },
+  "checksumNote": "manifest.json is excluded to avoid a self-referential checksum."
+}

@@ -16,7 +16,8 @@
     "@ui-agent/contracts": "workspace:*",
     "hono": "^4.9.0",
     "linkedom": "^0.18.13",
+    "tsx": "^4.20.0",
     "zod": "^4.0.0"
   },
-  "devDependencies": { "tsx": "^4.20.0", "typescript": "^5.9.0" }
+  "devDependencies": { "typescript": "^5.9.0" }
 }
