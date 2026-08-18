@@ -1,4 +1,4 @@
-import { Agent, type AgentRunResult } from '@cline/sdk';
+import { Agent, type AgentRunResult } from '@dabaoabc/ui-agent-sdk';
 import { describe, expect, it } from 'vitest';
 import { PROTOCOL_VERSION, type AssistantTurnRequest } from '@ui-agent/contracts';
 import { ClineAssistantChatAdapter } from './cline-assistant-chat-adapter';

@@ -4,7 +4,7 @@ import {
   type AgentRunResult,
   type AgentTool,
   type AgentToolContext
-} from '@cline/sdk';
+} from '@dabaoabc/ui-agent-sdk';
 import {
   domOperationSchema,
   type ClarificationOption,

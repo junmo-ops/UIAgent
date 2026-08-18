@@ -10,7 +10,7 @@
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
-    "@cline/sdk": "0.0.65",
+    "@dabaoabc/ui-agent-sdk": "0.2.0",
     "@ui-agent/contracts": "workspace:*",
     "zod": "^4.0.0"
   },

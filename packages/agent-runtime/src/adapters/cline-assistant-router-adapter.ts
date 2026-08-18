@@ -1,4 +1,4 @@
-import { Agent, createTool, type AgentRunResult, type AgentTool } from '@cline/sdk';
+import { Agent, createTool, type AgentRunResult, type AgentTool } from '@dabaoabc/ui-agent-sdk';
 import {
   type AssistantTurnRequest,
   type ClarificationOption

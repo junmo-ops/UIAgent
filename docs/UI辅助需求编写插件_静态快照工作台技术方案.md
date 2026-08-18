@@ -848,7 +848,7 @@ clarify
    - 只开放受限文件工具；
    - 继续使用当前 DeepSeek 配置；
    - 使用未知测试用例验证通用能力。
-   - **状态：已完成工程接入并设为唯一运行时。** 使用 `@cline/sdk@0.0.65` 的独立 `Agent`，只注册 `CodingWorkspaceTools` 的受限桥接；支持统一步骤日志、Checkpoint、受控原子 Patch、重复失败换策略提示、`finish` 提交和 `clarify`/异常回滚。Side Panel 通过独立进度投影展示可审计操作摘要，不展示模型隐式推理。
+   - **状态：已完成工程接入并设为唯一运行时。** 使用 `@dabaoabc/ui-agent-sdk@0.2.0` 提供的独立 `Agent`，只注册 `CodingWorkspaceTools` 的受限桥接；支持统一步骤日志、Checkpoint、受控原子 Patch、重复失败换策略提示、`finish` 提交和 `clarify`/异常回滚。Side Panel 通过独立进度投影展示可审计操作摘要，不展示模型隐式推理。
 5. **M4：验证闭环**
    - 增加结构、选区、Diff 和静态预览验证；
    - Agent 可根据验证失败自动修复一次以上。
