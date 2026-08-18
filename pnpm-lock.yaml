@@ -132,8 +132,8 @@ importers:
   packages/agent-runtime:
     dependencies:
       '@dabaoabc/ui-agent-sdk':
-        specifier: 0.2.0
-        version: 0.2.0(@cfworker/json-schema@4.1.1)(@opentelemetry/core@2.10.0(@opentelemetry/api@1.9.1))
+        specifier: 0.2.2
+        version: 0.2.2(@cfworker/json-schema@4.1.1)(@opentelemetry/core@2.10.0(@opentelemetry/api@1.9.1))
       '@ui-agent/contracts':
         specifier: workspace:*
         version: link:../contracts
@@ -236,10 +236,6 @@ packages:
 
   '@ai-sdk/provider@3.0.14':
     resolution: {integrity: sha512-5X1k57JBJ4H7H1QjX7CnJYAB1I19r/trVZTMcSms7/kLNZ8RaU4Nt2agcwZzv82Hfx6Q7/TOLU7agAKeFfc8cA==}
-    engines: {node: '>=18'}
-
-  '@ai-sdk/provider@3.0.8':
-    resolution: {integrity: sha512-oGMAgGoQdBXbZqNG0Ze56CHjDZ1IDYOwGYxYjO5KLSlz5HiNQ9udIXsPZ61VWaHGZ5XW/jyjmr6t2xz2jGVwbQ==}
     engines: {node: '>=18'}
 
   '@ai-sdk/provider@4.0.7':
@@ -463,12 +459,12 @@ packages:
     resolution: {integrity: sha512-Ir+AOibqzrIsL6ajt3Rz3LskB7OiMVHqltZmspbW/TJuTVuyOMirVqAkjfY6JISiLHgyNqicAC8AyHHGzNd/dA==}
     engines: {node: '>=0.1.90'}
 
-  '@dabaoabc/ui-agent-agents@0.2.0':
-    resolution: {integrity: sha512-eH0YW4qL9+jGxZIDwgs03ZAw5a5RLG6MpTbWdaSeKJKQz0urUcn7COAqMlgmVjuN+GWSWSI+F6Mp0MVFQLW0ww==}
+  '@dabaoabc/ui-agent-agents@0.2.2':
+    resolution: {integrity: sha512-Yf4lGFN3VzoFQqSjMOWNkt1Gm9aGAxyjqsVgp4tRhv/lyi4TlJazBwDFuD1E4faaUZn+5IoppvGZrBx8w7qyaw==}
     engines: {node: '>=22'}
 
-  '@dabaoabc/ui-agent-core@0.2.0':
-    resolution: {integrity: sha512-9DlTtAUlpitxdP82GYMpPPZZZ/PLiRad2qlYZK92SMTvwtsM/qgr/0gl9m13x0r+XTaQLkLaQz92QQ0/v5YSrA==}
+  '@dabaoabc/ui-agent-core@0.2.2':
+    resolution: {integrity: sha512-C/0Mt/DVhQ3wC9x0uzyI4tj3BWy55Ebzoj+TZLqgwNZZlEd/pp6Am/lU0p2vnEL/kWGYqwtOsfwI/EbweOR9uQ==}
     engines: {node: '>=22'}
     peerDependencies:
       posthog-node: ^5.8.0
@@ -476,8 +472,8 @@ packages:
       posthog-node:
         optional: true
 
-  '@dabaoabc/ui-agent-llms@0.2.0':
-    resolution: {integrity: sha512-xCmYeEWa9j8o8djWFRy+r9c5O0crFbUnZLndCkcL0vBJPq5TZFQrWtd7vTnU2BBaRXP1xJOCwHQTzJ7P/JGZwA==}
+  '@dabaoabc/ui-agent-llms@0.2.2':
+    resolution: {integrity: sha512-56sNws/s/oEXLd4eXWWfaeJuP13870po5NEHSEcXQ3aU848gITe9HzTmuAakQFQ8KAI55GyDMnx9HhPZFqbY2A==}
     engines: {node: '>=22'}
     peerDependencies:
       '@aws-sdk/client-bedrock-runtime': ^3.0.0
@@ -491,12 +487,12 @@ packages:
       ai-sdk-provider-codex-cli:
         optional: true
 
-  '@dabaoabc/ui-agent-sdk@0.2.0':
-    resolution: {integrity: sha512-m537EB16RZLZ6u59Qttcf39WYCwCUFbSF/F+kND9clMKj5XucXU4uieJOTXkiKbvuazTRoSKjc1ltGeVlkpU+w==}
+  '@dabaoabc/ui-agent-sdk@0.2.2':
+    resolution: {integrity: sha512-Stv+DLPv+HbSt4ug80p2phCVzckJ758eYv/EFLjGfcvEyMcfLQqXMgdA1JXUqUh6OEfJFxT2xR6U+T8+A5MGKA==}
     engines: {node: '>=22'}
 
-  '@dabaoabc/ui-agent-shared@0.2.0':
-    resolution: {integrity: sha512-U4y3JRFziD3lEnMCvqbPzDb/A4OY5FelU2u2EadqOsBLVojAYWriBaL2XXt5WqGgGZ8QW5azvuYre9YGXtDRYg==}
+  '@dabaoabc/ui-agent-shared@0.2.2':
+    resolution: {integrity: sha512-J9IQE8Ll5wuo6CswurMjAgGb3xh2LMQk86RGoMaNv/zIauFLBfxH1WtZik4VPsi5/tRKyV7MEGLno1vxCDVWlA==}
     engines: {node: '>=22'}
 
   '@dabh/diagnostics@2.0.8':
@@ -4536,10 +4532,6 @@ snapshots:
     dependencies:
       json-schema: 0.4.0
 
-  '@ai-sdk/provider@3.0.8':
-    dependencies:
-      json-schema: 0.4.0
-
   '@ai-sdk/provider@4.0.7':
     dependencies:
       json-schema: 0.4.0
@@ -4883,10 +4875,10 @@ snapshots:
 
   '@colors/colors@1.6.0': {}
 
-  '@dabaoabc/ui-agent-agents@0.2.0(@opentelemetry/core@2.10.0(@opentelemetry/api@1.9.1))(@opentelemetry/exporter-trace-otlp-http@0.214.0(@opentelemetry/api@1.9.1))(@opentelemetry/sdk-trace-base@2.10.0(@opentelemetry/api@1.9.1))':
+  '@dabaoabc/ui-agent-agents@0.2.2(@opentelemetry/core@2.10.0(@opentelemetry/api@1.9.1))(@opentelemetry/exporter-trace-otlp-http@0.214.0(@opentelemetry/api@1.9.1))(@opentelemetry/sdk-trace-base@2.10.0(@opentelemetry/api@1.9.1))':
     dependencies:
-      '@dabaoabc/ui-agent-llms': 0.2.0(@opentelemetry/core@2.10.0(@opentelemetry/api@1.9.1))(@opentelemetry/exporter-trace-otlp-http@0.214.0(@opentelemetry/api@1.9.1))(@opentelemetry/sdk-trace-base@2.10.0(@opentelemetry/api@1.9.1))
-      '@dabaoabc/ui-agent-shared': 0.2.0
+      '@dabaoabc/ui-agent-llms': 0.2.2(@opentelemetry/core@2.10.0(@opentelemetry/api@1.9.1))(@opentelemetry/exporter-trace-otlp-http@0.214.0(@opentelemetry/api@1.9.1))(@opentelemetry/sdk-trace-base@2.10.0(@opentelemetry/api@1.9.1))
+      '@dabaoabc/ui-agent-shared': 0.2.2
       nanoid: 5.1.16
     transitivePeerDependencies:
       - '@aws-sdk/client-bedrock-runtime'
@@ -4898,11 +4890,11 @@ snapshots:
       - debug
       - supports-color
 
-  '@dabaoabc/ui-agent-core@0.2.0(@cfworker/json-schema@4.1.1)(@opentelemetry/core@2.10.0(@opentelemetry/api@1.9.1))':
+  '@dabaoabc/ui-agent-core@0.2.2(@cfworker/json-schema@4.1.1)(@opentelemetry/core@2.10.0(@opentelemetry/api@1.9.1))':
     dependencies:
-      '@dabaoabc/ui-agent-agents': 0.2.0(@opentelemetry/core@2.10.0(@opentelemetry/api@1.9.1))(@opentelemetry/exporter-trace-otlp-http@0.214.0(@opentelemetry/api@1.9.1))(@opentelemetry/sdk-trace-base@2.10.0(@opentelemetry/api@1.9.1))
-      '@dabaoabc/ui-agent-llms': 0.2.0(@opentelemetry/core@2.10.0(@opentelemetry/api@1.9.1))(@opentelemetry/exporter-trace-otlp-http@0.214.0(@opentelemetry/api@1.9.1))(@opentelemetry/sdk-trace-base@2.10.0(@opentelemetry/api@1.9.1))
-      '@dabaoabc/ui-agent-shared': 0.2.0
+      '@dabaoabc/ui-agent-agents': 0.2.2(@opentelemetry/core@2.10.0(@opentelemetry/api@1.9.1))(@opentelemetry/exporter-trace-otlp-http@0.214.0(@opentelemetry/api@1.9.1))(@opentelemetry/sdk-trace-base@2.10.0(@opentelemetry/api@1.9.1))
+      '@dabaoabc/ui-agent-llms': 0.2.2(@opentelemetry/core@2.10.0(@opentelemetry/api@1.9.1))(@opentelemetry/exporter-trace-otlp-http@0.214.0(@opentelemetry/api@1.9.1))(@opentelemetry/sdk-trace-base@2.10.0(@opentelemetry/api@1.9.1))
+      '@dabaoabc/ui-agent-shared': 0.2.2
       '@modelcontextprotocol/sdk': 1.30.0(@cfworker/json-schema@4.1.1)(zod@4.4.3)
       '@opentelemetry/api': 1.9.1
       '@opentelemetry/api-logs': 0.214.0
@@ -4933,7 +4925,7 @@ snapshots:
       - supports-color
       - utf-8-validate
 
-  '@dabaoabc/ui-agent-llms@0.2.0(@opentelemetry/core@2.10.0(@opentelemetry/api@1.9.1))(@opentelemetry/exporter-trace-otlp-http@0.214.0(@opentelemetry/api@1.9.1))(@opentelemetry/sdk-trace-base@2.10.0(@opentelemetry/api@1.9.1))':
+  '@dabaoabc/ui-agent-llms@0.2.2(@opentelemetry/core@2.10.0(@opentelemetry/api@1.9.1))(@opentelemetry/exporter-trace-otlp-http@0.214.0(@opentelemetry/api@1.9.1))(@opentelemetry/sdk-trace-base@2.10.0(@opentelemetry/api@1.9.1))':
     dependencies:
       '@ai-sdk/amazon-bedrock': 5.0.57(zod@4.4.3)
       '@ai-sdk/anthropic': 4.0.39(zod@4.4.3)
@@ -4947,7 +4939,7 @@ snapshots:
       '@ai-sdk/provider': 4.0.7
       '@ai-sdk/provider-utils': 5.0.27(zod@4.4.3)
       '@aws-sdk/credential-providers': 3.1098.0
-      '@dabaoabc/ui-agent-shared': 0.2.0
+      '@dabaoabc/ui-agent-shared': 0.2.2
       '@jerome-benoit/sap-ai-provider': 4.8.0(ai@7.0.66(zod@4.4.3))
       '@langfuse/otel': 4.6.1(@opentelemetry/api@1.9.1)(@opentelemetry/core@2.10.0(@opentelemetry/api@1.9.1))(@opentelemetry/exporter-trace-otlp-http@0.214.0(@opentelemetry/api@1.9.1))(@opentelemetry/sdk-trace-base@2.10.0(@opentelemetry/api@1.9.1))
       '@openrouter/ai-sdk-provider': 3.0.0(ai@7.0.66(zod@4.4.3))(zod@4.4.3)
@@ -4967,9 +4959,9 @@ snapshots:
       - debug
       - supports-color
 
-  '@dabaoabc/ui-agent-sdk@0.2.0(@cfworker/json-schema@4.1.1)(@opentelemetry/core@2.10.0(@opentelemetry/api@1.9.1))':
+  '@dabaoabc/ui-agent-sdk@0.2.2(@cfworker/json-schema@4.1.1)(@opentelemetry/core@2.10.0(@opentelemetry/api@1.9.1))':
     dependencies:
-      '@dabaoabc/ui-agent-core': 0.2.0(@cfworker/json-schema@4.1.1)(@opentelemetry/core@2.10.0(@opentelemetry/api@1.9.1))
+      '@dabaoabc/ui-agent-core': 0.2.2(@cfworker/json-schema@4.1.1)(@opentelemetry/core@2.10.0(@opentelemetry/api@1.9.1))
     transitivePeerDependencies:
       - '@aws-sdk/client-bedrock-runtime'
       - '@cfworker/json-schema'
@@ -4982,7 +4974,7 @@ snapshots:
       - supports-color
       - utf-8-validate
 
-  '@dabaoabc/ui-agent-shared@0.2.0':
+  '@dabaoabc/ui-agent-shared@0.2.2':
     dependencies:
       aws4fetch: 1.0.20
       jsonrepair: 3.15.0
@@ -6325,7 +6317,7 @@ snapshots:
 
   ai-sdk-provider-opencode-sdk@3.0.6(zod@4.4.3):
     dependencies:
-      '@ai-sdk/provider': 3.0.8
+      '@ai-sdk/provider': 3.0.14
       '@ai-sdk/provider-utils': 4.0.40(zod@4.4.3)
       '@opencode-ai/sdk': 1.18.9
       zod: 4.4.3

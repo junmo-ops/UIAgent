@@ -10,7 +10,7 @@
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
-    "@dabaoabc/ui-agent-sdk": "0.2.0",
+    "@dabaoabc/ui-agent-sdk": "0.2.2",
     "@ui-agent/contracts": "workspace:*",
     "zod": "^4.0.0"
   },
