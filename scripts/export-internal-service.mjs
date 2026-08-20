@@ -50,36 +50,6 @@ function writeJson(relativePath, value) {
   writeFileSync(resolve(outputDirectory, relativePath), `${JSON.stringify(value, null, 2)}\n`);
 }
 
-const sourceLockfile = readFileSync(resolve(projectRoot, 'pnpm-lock.yaml'), 'utf8');
-
-function sourceImporterBlock(importerName) {
-  const marker = `  ${importerName}:\n`;
-  const start = sourceLockfile.indexOf(marker);
-  if (start < 0) throw new Error(`源锁文件缺少 importer：${importerName}`);
-  const nextImporter = sourceLockfile.slice(start + marker.length).search(/\n  \S[^\n]*:\n/);
-  const end = nextImporter < 0 ? -1 : start + marker.length + nextImporter + 1;
-  return sourceLockfile.slice(start, end < 0 ? sourceLockfile.length : end);
-}
-
-function pinRuntimeDependencies(packageJson, importerName) {
-  const importer = sourceImporterBlock(importerName);
-  for (const section of ['dependencies', 'optionalDependencies']) {
-    for (const dependencyName of Object.keys(packageJson[section] ?? {})) {
-      if (packageJson[section][dependencyName] === 'workspace:*') continue;
-      const yamlKey = dependencyName.startsWith('@') ? `'${dependencyName}'` : dependencyName;
-      const pattern = new RegExp(
-        `^      ${yamlKey}:\\n\\s+specifier:.*\\n\\s+version: ([^\\n]+)$`,
-        'm',
-      );
-      const match = importer.match(pattern);
-      if (!match || match[1].startsWith('link:')) {
-        throw new Error(`无法从源锁文件获取运行时依赖版本：${importerName}/${dependencyName}`);
-      }
-      packageJson[section][dependencyName] = match[1].replace(/\(.+$/, '');
-    }
-  }
-}
-
 [
   'apps/agent-service',
   'packages/agent-runtime',
@@ -98,7 +68,6 @@ writeJson('package.json', {
 });
 
 const servicePackage = readJson('apps/agent-service/package.json');
-pinRuntimeDependencies(servicePackage, 'apps/agent-service');
 servicePackage.scripts = {
   dev: servicePackage.scripts.dev,
   start: servicePackage.scripts.start
@@ -108,7 +77,6 @@ writeJson('apps/agent-service/package.json', servicePackage);
 
 for (const relativePath of ['packages/agent-runtime/package.json', 'packages/contracts/package.json']) {
   const packageJson = readJson(relativePath);
-  pinRuntimeDependencies(packageJson, relativePath.replace(/\\/g, '/').replace(/\\/g, '/').replace('/package.json', ''));
   delete packageJson.scripts;
   delete packageJson.devDependencies;
   writeJson(relativePath, packageJson);
