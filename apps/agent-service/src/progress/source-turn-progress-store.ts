@@ -1,5 +1,5 @@
 import type { CodingAgentEvent, CodingAgentStep } from '@ui-agent/agent-runtime';
-import type { SourceTurnProgress } from '@ui-agent/contracts';
+import type { SourceTurnProgress, SourceTurnResponse } from '@ui-agent/contracts';
 
 function phaseForAction(action: string): SourceTurnProgress['phase'] {
   if (action === 'list_files' || action === 'search_text' || action === 'search') return 'locating';
@@ -179,13 +179,14 @@ export class SourceTurnProgressStore {
     }
   }
 
-  fail(workspaceId: string, turnId: string, message: string): void {
+  fail(workspaceId: string, turnId: string, message: string, result?: SourceTurnResponse): void {
     const current = this.get(workspaceId, turnId) ?? this.start(workspaceId, turnId);
     this.values.set(this.key(workspaceId, turnId), {
       ...current,
       status: 'failed',
       phase: 'finishing',
       message,
+      result,
       updatedAt: new Date().toISOString()
     });
   }
@@ -193,18 +194,19 @@ export class SourceTurnProgressStore {
   complete(
     workspaceId: string,
     turnId: string,
-    failed: boolean,
+    result: SourceTurnResponse,
     modelCalls: number,
     toolCalls: number
   ): void {
     const current = this.get(workspaceId, turnId) ?? this.start(workspaceId, turnId);
     this.values.set(this.key(workspaceId, turnId), {
       ...current,
-      status: failed ? 'failed' : 'completed',
+      status: result.kind === 'failed' ? 'failed' : 'completed',
       phase: 'finishing',
-      message: failed ? '本轮修改未完成' : '本轮处理完成',
+      message: result.kind === 'failed' ? '本轮修改未完成' : '本轮处理完成',
       modelCalls,
       toolCalls,
+      result,
       updatedAt: new Date().toISOString()
     });
   }

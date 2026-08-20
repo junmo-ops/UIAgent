@@ -11,6 +11,7 @@ import {
   assistantTurnRequestSchema,
   assistantTurnResponseSchema,
   sourceTurnRequestSchema,
+  sourceTurnAcceptedSchema,
   sourceTurnProgressSchema,
   sourceWorkspaceCreatedSchema,
   sourceWorkspaceInfoSchema,
@@ -106,6 +107,22 @@ export function createApp(
       return c.json({ code: 'ADMIN_REQUIRED', message: '仅管理员可以访问运行日志' }, 403);
     }
     await next();
+  };
+  const executeSourceTurn = async (workspaceId: string, request: ReturnType<typeof sourceTurnRequestSchema.parse>) => {
+    const startedAt = Date.now();
+    try {
+      const conversation = workspaceStore.conversation(workspaceId);
+      const tools = workspaceStore.tools(workspaceId);
+      const run = await codingAgent.run({ workspaceId, request, conversation }, tools, event => sourceProgress.observe(workspaceId, request.turnId, event));
+      const result = run.response;
+      sourceProgress.complete(workspaceId, request.turnId, result, run.checkpoint.modelCalls, run.checkpoint.toolCalls);
+      workspaceStore.recordTurn(workspaceId, request, result);
+      logStore.recordSourceTurn(workspaceId, request, conversation, result, run.steps, Date.now() - startedAt, { adapterId: codingAgent.adapterId, checkpoint: run.checkpoint });
+    } catch (error) {
+      const result = { kind: 'failed' as const, code: 'SOURCE_TURN_ERROR', message: error instanceof Error ? error.message : '源码修改失败' };
+      logStore.recordSourceTurn(workspaceId, request, [], result, [], Date.now() - startedAt);
+      sourceProgress.fail(workspaceId, request.turnId, result.message, result);
+    }
   };
 
   return new Hono<AppBindings>()
@@ -292,45 +309,11 @@ export function createApp(
     .post('/v1/workspaces/:workspaceId/turns', zValidator('json', sourceTurnRequestSchema), async c => {
       const request = c.req.valid('json');
       const workspaceId = c.req.param('workspaceId');
-      const startedAt = Date.now();
+      const existing = sourceProgress.get(workspaceId, request.turnId);
+      if (existing) return c.json(sourceTurnAcceptedSchema.parse({ kind: 'accepted', turnId: request.turnId }), 202);
       sourceProgress.start(workspaceId, request.turnId);
-      try {
-        const conversation = workspaceStore.conversation(workspaceId);
-        const tools = workspaceStore.tools(workspaceId);
-        const run = await codingAgent.run({
-          workspaceId,
-          request,
-          conversation
-        }, tools, event => sourceProgress.observe(workspaceId, request.turnId, event));
-        const result = run.response;
-        sourceProgress.complete(
-          workspaceId,
-          request.turnId,
-          result.kind === 'failed',
-          run.checkpoint.modelCalls,
-          run.checkpoint.toolCalls
-        );
-        workspaceStore.recordTurn(workspaceId, request, result);
-        logStore.recordSourceTurn(
-          workspaceId,
-          request,
-          conversation,
-          result,
-          run.steps,
-          Date.now() - startedAt,
-          { adapterId: codingAgent.adapterId, checkpoint: run.checkpoint }
-        );
-        return c.json(result, result.kind === 'failed' ? 500 : 200);
-      } catch (error) {
-        const result = {
-          kind: 'failed' as const,
-          code: 'SOURCE_TURN_ERROR',
-          message: error instanceof Error ? error.message : '源码修改失败'
-        };
-        logStore.recordSourceTurn(workspaceId, request, [], result, [], Date.now() - startedAt);
-        sourceProgress.fail(workspaceId, request.turnId, result.message);
-        return c.json(result, 500);
-      }
+      void executeSourceTurn(workspaceId, request);
+      return c.json(sourceTurnAcceptedSchema.parse({ kind: 'accepted', turnId: request.turnId }), 202);
     })
     .get('/v1/workspaces/:workspaceId/turns/:turnId/progress', c => {
       const progress = sourceProgress.get(c.req.param('workspaceId'), c.req.param('turnId'));

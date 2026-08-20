@@ -7,8 +7,8 @@ import {
   assistantTurnRequestSchema,
   assistantTurnResponseSchema,
   sourceTurnRequestSchema,
+  sourceTurnAcceptedSchema,
   sourceTurnProgressSchema,
-  sourceTurnResponseSchema,
   sourceWorkspaceCreatedSchema,
   sourceWorkspaceInfoSchema,
   type ClarificationOption,
@@ -368,7 +368,6 @@ export function SidePanelApp() {
     sourceId?: string
   ) => {
     setSnapshotBusy(true);
-    let progressTimer: number | undefined;
     try {
       const request = sourceTurnRequestSchema.parse({
         protocolVersion: PROTOCOL_VERSION,
@@ -390,23 +389,33 @@ export function SidePanelApp() {
         activities: []
       });
       const progressUrl = `${serviceUrl.replace(/\/$/, '')}/v1/workspaces/${workspace.workspaceId}/turns/${request.turnId}/progress`;
-      const refreshProgress = async () => {
+      const refreshProgress = async (): Promise<SourceTurnProgress | undefined> => {
         try {
           const progressResponse = await fetchAgentService(progressUrl, { cache: 'no-store' });
-          if (!progressResponse.ok) return;
-          setSourceProgress(sourceTurnProgressSchema.parse(await progressResponse.json()));
+          if (!progressResponse.ok) return undefined;
+          const progress = sourceTurnProgressSchema.parse(await progressResponse.json());
+          setSourceProgress(progress);
+          return progress;
         } catch {
-          // Progress is best-effort. The main Turn request remains authoritative.
+          return undefined;
         }
       };
-      progressTimer = window.setInterval(() => { void refreshProgress(); }, 650);
       const response = await fetchAgentService(`${serviceUrl.replace(/\/$/, '')}/v1/workspaces/${workspace.workspaceId}/turns`, {
         method: 'POST',
         headers: { 'content-type': 'application/json' },
         body: JSON.stringify(request)
       });
       if (!response.ok) throw await serviceResponseError(response, '源码 Agent 返回');
-      const outcome = sourceTurnResponseSchema.parse(await response.json());
+      sourceTurnAcceptedSchema.parse(await response.json());
+      let progress: SourceTurnProgress | undefined;
+      while (!progress || progress.status === 'running') {
+        progress = await refreshProgress();
+        if (!progress || progress.status === 'running') {
+          await new Promise<void>(resolve => window.setTimeout(resolve, 650));
+        }
+      }
+      const outcome = progress.result;
+      if (!outcome) throw new Error('源码任务已结束，但未返回最终结果');
       if (outcome.kind === 'clarification') {
         const clarification = {
           clarificationId: outcome.clarificationId ?? crypto.randomUUID(),
@@ -438,7 +447,6 @@ export function SidePanelApp() {
     } catch (error) {
       fail(error);
     } finally {
-      if (progressTimer !== undefined) window.clearInterval(progressTimer);
       setSnapshotBusy(false);
       setSourceProgress(undefined);
     }
@@ -580,23 +588,9 @@ export function SidePanelApp() {
                 <button type="button" onClick={() => { setMoreOpen(false); void openLogs(); }}><UiIcon name="snapshot" />日志</button>
               </div>}
             </div>
-            {sourceWorkspace?.sourceTabId && (
-              <Tooltip title="切换回原页面">
-                <Button
-                  className="header-back"
-                  type="text"
-                  size="small"
-                  icon={<UiIcon name="back" />}
-                  onClick={returnToSource}
-                >
-                  原页面
-                </Button>
-              </Tooltip>
-            )}
             <Tooltip title={`Agent Service：${serviceUrl}`}>
               <span className={`service-status ${serviceStatus}`}><i />{serviceStatus === 'connected' ? '已连接' : serviceStatus === 'checking' ? '连接中' : '未连接'}</span>
             </Tooltip>
-            <span className="demo-badge">DEMO</span>
           </div>
         </div>
 

@@ -127,6 +127,12 @@ export const sourceTurnResponseSchema = z.discriminatedUnion('kind', [
 ]);
 export type SourceTurnResponse = z.infer<typeof sourceTurnResponseSchema>;
 
+export const sourceTurnAcceptedSchema = z.object({
+  kind: z.literal('accepted'),
+  turnId: z.string().min(1)
+});
+export type SourceTurnAccepted = z.infer<typeof sourceTurnAcceptedSchema>;
+
 export const assistantConversationEntrySchema = z.object({
   role: z.enum(['user', 'assistant']),
   text: z.string().min(1).max(10_000)
@@ -206,7 +212,8 @@ export const sourceTurnProgressSchema = z.object({
     label: z.string(),
     detail: z.string().optional(),
     status: z.enum(['completed', 'failed'])
-  })).max(12)
+  })).max(12),
+  result: sourceTurnResponseSchema.optional()
 });
 export type SourceTurnProgress = z.infer<typeof sourceTurnProgressSchema>;
 

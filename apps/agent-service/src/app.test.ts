@@ -353,15 +353,19 @@ describe('agent service', () => {
         })
       });
 
-      expect(await turnResponse.json()).toMatchObject({ kind: 'completed', revision: 1 });
-      const progressResponse = await app.request(
-        `/v1/workspaces/${created.workspaceId}/turns/source-turn-port/progress`
-      );
-      expect(await progressResponse.json()).toMatchObject({
+      expect(turnResponse.status).toBe(202);
+      expect(await turnResponse.json()).toMatchObject({ kind: 'accepted', turnId: 'source-turn-port' });
+      await expect.poll(async () => {
+        const progressResponse = await app.request(
+          `/v1/workspaces/${created.workspaceId}/turns/source-turn-port/progress`
+        );
+        return progressResponse.json();
+      }).toMatchObject({
         status: 'completed',
         phase: 'finishing',
         modelCalls: 1,
-        toolCalls: 1
+        toolCalls: 1,
+        result: { kind: 'completed', revision: 1 }
       });
       const preview = await app.request(`/workspaces/${created.workspaceId}/preview`);
       expect(await preview.text()).toContain('确定');
