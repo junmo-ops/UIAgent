@@ -1,5 +1,7 @@
 FROM csbase.registry.cmbchina.cn/paas/cmb-nodejs-22.22:c86-kylin10-v1
 
+USER root
+
 ENV PNPM_HOME=/pnpm
 ENV PATH=$PNPM_HOME:$PATH
 ENV NODE_ENV=production
@@ -23,7 +25,8 @@ COPY apps/agent-service apps/agent-service
 COPY packages/agent-runtime packages/agent-runtime
 COPY packages/contracts packages/contracts
 
-RUN mkdir -p /opt/deployments/data/source-workspaces /opt/deployments/data/logs
+RUN chmod -R 777 /opt/deployments \
+  && mkdir -p /opt/deployments/data/source-workspaces /opt/deployments/data/logs
 
 EXPOSE 8787
 
