@@ -92,11 +92,11 @@ writeFileSync(
   deploymentDockerfile,
   readFileSync(deploymentDockerfile, 'utf8')
     .replace('FROM node:22-bookworm-slim', 'FROM csbase.registry.cmbchina.cn/paas/cmb-nodejs-22.22:c86-kylin10-v1')
-    .replace('WORKDIR /app', 'WORKDIR /opt/deployments')
+    .replace('WORKDIR /app', 'USER root\n\nWORKDIR /opt/deployments')
     .replaceAll('/data/source-workspaces', '/opt/deployments/data/source-workspaces')
     .replaceAll('/data/logs/agent-turns.jsonl', '/opt/deployments/data/logs/agent-turns.jsonl')
-    .replace('&& pnpm install --prod --frozen-lockfile', '&& pnpm install --prod --frozen-lockfile \\\n  && chmod -R 755 /opt/.config')
-    .replace('mkdir -p /data/source-workspaces /data/logs', 'mkdir -p /opt/deployments/data/source-workspaces /opt/deployments/data/logs'),
+    .replace('&& pnpm install --prod --frozen-lockfile', '&& pnpm install --prod --frozen-lockfile \\\n  && mkdir -p /opt/.config \\\n  && chmod -R 755 /opt/.config')
+    .replace('mkdir -p /opt/deployments/data/source-workspaces /data/logs', 'chmod -R 777 /opt/deployments \\\n  && mkdir -p /opt/deployments/data/source-workspaces /opt/deployments/data/logs'),
 );
 
 writeFileSync(resolve(outputDirectory, 'apps/agent-service/.env.example'), `HOST=127.0.0.1\nPORT=8787\nAUTH_MODE=development\nMODEL_MODE=remote\nMODEL_PROVIDER=deepseek\nMODEL_BASE_URL=https://api.deepseek.com\nMODEL_API_KEY=\nMODEL_NAME=deepseek-v4-flash\n`);

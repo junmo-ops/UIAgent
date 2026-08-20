@@ -19,6 +19,7 @@ COPY packages/contracts/package.json packages/contracts/package.json
 RUN npm install --global pnpm@10.33.0 \
       --registry=http://central.jaf.cmbchina.cn/artifactory/api/npm/group-npm/ \
   && pnpm install --prod --frozen-lockfile \
+  && mkdir -p /opt/.config \
   && chmod -R 755 /opt/.config
 
 COPY apps/agent-service apps/agent-service
