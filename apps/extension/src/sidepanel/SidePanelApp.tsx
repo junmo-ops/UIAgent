@@ -68,7 +68,7 @@ const sourceWorkspaceSessionItem = storage.defineItem<PersistedWorkspaceSession 
   'local:sourceWorkspaceSession',
   { fallback: null }
 );
-type IconName = 'sparkle' | 'target' | 'edit' | 'snapshot' | 'undo' | 'redo' | 'reset' | 'download' | 'upload' | 'arrow' | 'back';
+type IconName = 'sparkle' | 'target' | 'edit' | 'snapshot' | 'undo' | 'redo' | 'reset' | 'download' | 'upload' | 'arrow' | 'back' | 'more';
 
 function UiIcon({ name }: { name: IconName }) {
   const paths: Record<IconName, React.ReactNode> = {
@@ -82,7 +82,8 @@ function UiIcon({ name }: { name: IconName }) {
     download: <><path d="M12 3v12" /><path d="m7.5 11 4.5 4.5 4.5-4.5" /><path d="M5 21h14" /></>,
     upload: <><path d="M12 21V9" /><path d="m7.5 13.5 4.5-4.5 4.5 4.5" /><path d="M5 3h14" /></>,
     arrow: <><path d="M12 19V5" /><path d="m6.5 10.5 5.5-5.5 5.5 5.5" /></>,
-    back: <><path d="m10 7-5 5 5 5" /><path d="M5 12h14" /></>
+    back: <><path d="m10 7-5 5 5 5" /><path d="M5 12h14" /></>,
+    more: <><circle cx="5" cy="12" r="1" fill="currentColor" stroke="none" /><circle cx="12" cy="12" r="1" fill="currentColor" stroke="none" /><circle cx="19" cy="12" r="1" fill="currentColor" stroke="none" /></>
   };
   return <svg className="ui-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">{paths[name]}</svg>;
 }
@@ -134,6 +135,7 @@ export function SidePanelApp() {
   const [streamingAnswerId, setStreamingAnswerId] = useState<string>();
   const [snapshotBusy, setSnapshotBusy] = useState(false);
   const [exportConfirmOpen, setExportConfirmOpen] = useState(false);
+  const [moreOpen, setMoreOpen] = useState(false);
   const composerRef = useRef<TextAreaRef>(null);
   const snapshotFileRef = useRef<HTMLInputElement>(null);
   const busy = snapshotBusy || assistantBusy;
@@ -552,6 +554,9 @@ export function SidePanelApp() {
     setError(error instanceof Error ? error.message : '操作失败');
     setNotice(undefined);
   };
+  const openLogs = async () => {
+    await browser.tabs.create({ url: `${browser.runtime.getURL('')}logs.html` });
+  };
   const examples = ['把按钮文案改成“确定”', '在右侧增加一个筛选项', '点击按钮时展开下方内容'];
 
   return (
@@ -560,17 +565,21 @@ export function SidePanelApp() {
         <div className="conversation-header">
           <span>{sourceWorkspace ? '静态副本' : '新建 UI 示意'}</span>
           <div className="conversation-meta">
-            <Tooltip title="管理所有副本">
+            <div className="more-menu-wrap">
               <Button
                 className="header-back"
                 type="text"
                 size="small"
-                icon={<UiIcon name="snapshot" />}
-                onClick={() => void openWorkspaceManager()}
+                icon={<UiIcon name="more" />}
+                onClick={() => setMoreOpen(value => !value)}
               >
-                副本
+                更多
               </Button>
-            </Tooltip>
+              {moreOpen && <div className="more-menu">
+                <button type="button" onClick={() => { setMoreOpen(false); void openWorkspaceManager(); }}><UiIcon name="snapshot" />副本</button>
+                <button type="button" onClick={() => { setMoreOpen(false); void openLogs(); }}><UiIcon name="snapshot" />日志</button>
+              </div>}
+            </div>
             {sourceWorkspace?.sourceTabId && (
               <Tooltip title="切换回原页面">
                 <Button

@@ -121,7 +121,8 @@ class InstallationTokenAuthenticator implements Authenticator {
     return {
       userId: claims.subject,
       tenantId: claims.tenantId,
-      roles: ['user'],
+      // Demo 阶段安装身份同时允许访问日志；正式权限模型上线后统一替换。
+      roles: ['user', 'admin'],
       identityType: 'installation'
     };
   }
