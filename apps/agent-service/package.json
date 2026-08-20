@@ -4,8 +4,8 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "dev": "node --env-file-if-exists=.env --import tsx --watch src/index.ts",
-    "start": "node --env-file-if-exists=.env --import tsx src/index.ts",
+    "dev": "node --env-file=.env --import tsx --watch src/index.ts",
+    "start": "node --import tsx src/index.ts",
     "build": "tsc -p tsconfig.build.json",
     "typecheck": "tsc --noEmit"
   },
@@ -16,8 +16,10 @@
     "@ui-agent/contracts": "workspace:*",
     "hono": "^4.9.0",
     "linkedom": "^0.18.13",
-    "tsx": "^4.20.0",
+    "tsx": "^4.22.1",
     "zod": "^4.0.0"
   },
-  "devDependencies": { "typescript": "^5.9.0" }
+  "devDependencies": {
+    "typescript": "^5.9.0"
+  }
 }
