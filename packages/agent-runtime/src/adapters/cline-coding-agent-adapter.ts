@@ -897,7 +897,7 @@ export class ClineCodingAgentAdapter implements CodingAgentPort {
         tools,
         maxIterations: this.maxIterations
       });
-      const result = await agent.run(JSON.stringify({
+      let result = await agent.run(JSON.stringify({
         instruction: turn.request.instruction,
         selectedSourceId: turn.request.sourceId,
         replyToClarificationId: turn.request.replyToClarificationId,
@@ -905,6 +905,19 @@ export class ClineCodingAgentAdapter implements CodingAgentPort {
         conversation: turn.conversation.slice(-8),
         files
       }));
+      // Some compatible runtimes treat completionPolicy as advisory and may
+      // stop naturally after validate_workspace. Give the same Agent one
+      // bounded finalization turn so a validated edit is not rolled back only
+      // because the model omitted the lifecycle tool call.
+      if (!completion && result.status === 'completed' && !result.error) {
+        const finalizationResult = await agent.run(JSON.stringify({
+          instruction: '本轮源码修改与 validate_workspace 已完成。请不要继续读取或修改；现在必须立即调用 finish 提交本轮结果。如果无法安全提交，调用 clarify 说明原因。',
+          selectedSourceId: turn.request.sourceId,
+          conversation: turn.conversation.slice(-2),
+          files
+        }));
+        result = finalizationResult;
+      }
       checkpoint = {
         ...checkpoint,
         modelCalls: Math.max(checkpoint.modelCalls, result.iterations)

@@ -13,6 +13,7 @@ import { parseHTML } from 'linkedom';
 import { type CodingAgentConversationTurn, type CodingWorkspaceTools } from '@ui-agent/agent-runtime';
 import {
   staticSnapshotSchema,
+  MAX_STATIC_SNAPSHOT_HTML_CHARS,
   type SourceTurnRequest,
   type SourceTurnResponse
 } from '@ui-agent/contracts';
@@ -92,7 +93,9 @@ function validateHtml(html: string): string {
   }
   validateTableStructure(html);
   validateControlledInteractions(html);
-  if (html.length > 10_000_000) throw new Error('index.html 超过 10 MB 限制');
+  if (html.length > MAX_STATIC_SNAPSHOT_HTML_CHARS) {
+    throw new Error(`index.html 超过 ${Math.round(MAX_STATIC_SNAPSHOT_HTML_CHARS / 1_000_000)} MB 限制`);
+  }
   return 'HTML 与安全规则校验通过';
 }
 

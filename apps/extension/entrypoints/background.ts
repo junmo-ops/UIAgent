@@ -1,5 +1,10 @@
 import { onMessage, sendMessage } from '../src/messaging';
-import type { ContentCommand, ContentCommandResult, ExtensionErrorCode } from '@ui-agent/contracts';
+import {
+  sourceWorkspaceCreatedSchema,
+  type ContentCommand,
+  type ContentCommandResult,
+  type ExtensionErrorCode
+} from '@ui-agent/contracts';
 import { pageInjectionIssue } from '../src/session/url-policy';
 import { EditorTabRegistry } from '../src/session/editor-tab-registry';
 import {
@@ -7,7 +12,9 @@ import {
   openTabScopedSidePanel
 } from '../src/session/tab-scoped-side-panel';
 import { getAgentServiceUrl } from '../src/service/agent-service-config';
+import { agentServiceFetch } from '../src/service/agent-service-client';
 import { isWorkspacePreviewUrl } from '../src/service/agent-service-url';
+import { sourceWorkspaceSessionItem } from '../src/session/source-workspace-session';
 
 class BrowserCommandError extends Error {
   constructor(readonly code: ExtensionErrorCode, message: string) {
@@ -76,6 +83,64 @@ async function exportScreenshot(tab: Browser.tabs.Tab): Promise<ContentCommandRe
     return { ok: true };
   } finally {
     await sendToContent(tab, { type: 'finishScreenshot' }).catch(() => undefined);
+  }
+}
+
+async function createWorkspaceFromViewport(tab: Browser.tabs.Tab, restoreOriginalViewport: boolean): Promise<void> {
+  if (!tab.id) throw new BrowserCommandError('TAB_UNAVAILABLE', '当前标签页不可用');
+  // Create the destination before disabling the Side Panel. The source panel
+  // is expected to unload, so the background owns the rest of the workflow.
+  const loadingTab = await browser.tabs.create({
+    url: browser.runtime.getURL('/workspace-loading.html'),
+    active: false
+  });
+  if (!loadingTab.id) throw new BrowserCommandError('TAB_UNAVAILABLE', '静态副本标签页创建失败');
+  try {
+    // The Side Panel changes the page viewport. Do not try to compensate by
+    // adding pixels back: responsive CSS has already selected another layout.
+    // When requested, restore the natural viewport before content capture.
+    if (restoreOriginalViewport) {
+      await browser.sidePanel.setOptions({ tabId: tab.id, enabled: false });
+      await new Promise(resolve => setTimeout(resolve, 80));
+    }
+    const captured = await sendToContent(tab, {
+      type: restoreOriginalViewport ? 'capturePageSnapshotAfterViewportReflow' : 'capturePageSnapshot'
+    });
+    if (!captured.ok) throw new BrowserCommandError(captured.code, captured.error);
+    if (!captured.snapshot) throw new BrowserCommandError('PAGE_OPERATION_FAILED', '页面没有返回静态源码副本');
+
+    const serviceUrl = await getAgentServiceUrl();
+    const response = await agentServiceFetch(`${serviceUrl.replace(/\/$/, '')}/v1/workspaces`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify(captured.snapshot)
+    });
+    if (!response.ok) {
+      const detail = await response.text().catch(() => '');
+      throw new BrowserCommandError('PAGE_OPERATION_FAILED', `静态源码工作区服务返回 ${response.status}${detail ? `：${detail}` : ''}`);
+    }
+    const created = sourceWorkspaceCreatedSchema.parse(await response.json());
+    await sourceWorkspaceSessionItem.setValue({
+      workspace: {
+        ...created,
+        sourceUrl: captured.snapshot.sourceUrl,
+        revision: 0,
+        canUndo: false,
+        canRedo: false
+      },
+      chat: [],
+      editSessionId: crypto.randomUUID(),
+      sourceTabId: tab.id
+    });
+    await browser.tabs.update(loadingTab.id, { url: created.previewUrl, active: true });
+  } catch (error) {
+    const message = error instanceof Error ? error.message : '创建静态副本失败';
+    console.error('[ui-agent] Failed to create workspace snapshot', error);
+    await browser.tabs.update(loadingTab.id, {
+      url: `${browser.runtime.getURL('/workspace-loading.html')}?error=${encodeURIComponent(message)}`,
+      active: true
+    }).catch(() => undefined);
+    throw error;
   }
 }
 
@@ -170,6 +235,14 @@ export default defineBackground(() => {
       }
       if (command.type === 'reloadPreview') {
         await browser.tabs.reload(tabId);
+        return { ok: true };
+      }
+      if (command.type === 'createWorkspaceFromFullViewport') {
+        await createWorkspaceFromViewport(tab, true);
+        return { ok: true };
+      }
+      if (command.type === 'createWorkspaceFromVisibleViewport') {
+        await createWorkspaceFromViewport(tab, false);
         return { ok: true };
       }
       if (command.type === 'exportScreenshot') return await exportScreenshot(tab);

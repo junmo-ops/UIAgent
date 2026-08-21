@@ -1,7 +1,6 @@
 import { lazy, Suspense, useEffect, useRef, useState } from 'react';
-import { Alert, Button, Input, Modal, Spin, Tooltip } from 'antd';
+import { Alert, Button, Input, Modal, Spin, Switch, Tooltip } from 'antd';
 import type { TextAreaRef } from 'antd/es/input/TextArea';
-import { storage } from 'wxt/utils/storage';
 import {
   PROTOCOL_VERSION,
   assistantTurnRequestSchema,
@@ -11,7 +10,6 @@ import {
   sourceTurnProgressSchema,
   sourceWorkspaceCreatedSchema,
   sourceWorkspaceInfoSchema,
-  type ClarificationOption,
   type AssistantTurnResponse,
   type ContentCommand,
   type ContentCommandResult,
@@ -30,6 +28,11 @@ import {
 import { DEFAULT_AGENT_SERVICE_URL, getAgentServiceUrl } from '../service/agent-service-config';
 import { agentServiceFetch } from '../service/agent-service-client';
 import { readAssistantEventStream } from '../service/assistant-event-stream';
+import {
+  sourceWorkspaceSessionItem,
+  type WorkspaceChatEntry,
+  type WorkspaceClarificationPrompt
+} from '../session/source-workspace-session';
 
 const MarkdownMessage = lazy(() => import('./MarkdownMessage').then(module => ({
   default: module.MarkdownMessage
@@ -41,33 +44,13 @@ const editorPort = browser.runtime.connect({ name: `ui-agent-editor:${editorClie
 // 保留 Port 引用，避免扩展重载或长时间空闲时被垃圾回收而提前触发 onDisconnect。
 void editorPort;
 
-interface ClarificationPrompt {
-  clarificationId: string;
-  options?: ClarificationOption[];
-  allowFreeText: boolean;
-}
-interface ChatEntry {
-  id: string;
-  role: 'user' | 'assistant';
-  text: string;
-  clarification?: ClarificationPrompt;
-}
+type ClarificationPrompt = WorkspaceClarificationPrompt;
+type ChatEntry = WorkspaceChatEntry;
 type ServiceStatus = 'checking' | 'connected' | 'unavailable';
 interface ActiveWorkspace extends SourceWorkspaceInfo {
   tabId: number;
   sourceTabId?: number;
 }
-interface PersistedWorkspaceSession {
-  workspace: SourceWorkspaceInfo;
-  chat: ChatEntry[];
-  editSessionId: string;
-  sourceTabId?: number;
-  pendingClarification?: ClarificationPrompt;
-}
-const sourceWorkspaceSessionItem = storage.defineItem<PersistedWorkspaceSession | null>(
-  'local:sourceWorkspaceSession',
-  { fallback: null }
-);
 type IconName = 'sparkle' | 'target' | 'edit' | 'snapshot' | 'undo' | 'redo' | 'reset' | 'download' | 'upload' | 'arrow' | 'back' | 'more';
 
 function UiIcon({ name }: { name: IconName }) {
@@ -134,6 +117,7 @@ export function SidePanelApp() {
   const [assistantBusy, setAssistantBusy] = useState(false);
   const [streamingAnswerId, setStreamingAnswerId] = useState<string>();
   const [snapshotBusy, setSnapshotBusy] = useState(false);
+  const [useVisibleViewport, setUseVisibleViewport] = useState(false);
   const [exportConfirmOpen, setExportConfirmOpen] = useState(false);
   const [moreOpen, setMoreOpen] = useState(false);
   const composerRef = useRef<TextAreaRef>(null);
@@ -508,12 +492,12 @@ export function SidePanelApp() {
   const createSourceWorkspace = async () => {
     setSnapshotBusy(true);
     try {
-      const [sourceTab, captured] = await Promise.all([
-        browser.tabs.query({ active: true, currentWindow: true }).then(tabs => tabs[0]),
-        command({ type: 'capturePageSnapshot' })
-      ]);
-      if (!captured.snapshot) throw new Error('页面没有返回静态源码副本');
-      await openWorkspaceFromSnapshot(captured.snapshot, sourceTab?.id);
+      // The Background completes this operation after closing the source Side
+      // Panel. Closing is required: otherwise window.innerWidth reflects the
+      // compressed side-panel viewport and responsive layouts are captured wrong.
+      await command({
+        type: useVisibleViewport ? 'createWorkspaceFromVisibleViewport' : 'createWorkspaceFromFullViewport'
+      });
     } catch (error) {
       fail(error);
       setSnapshotBusy(false);
@@ -724,6 +708,21 @@ export function SidePanelApp() {
                 进入副本编辑
               </Button>
               <span>复制当前页面并在新标签页打开</span>
+            </div>
+            <div className="snapshot-width-setting">
+              <div>
+                <strong>副本宽度</strong>
+                <span>{useVisibleViewport ? '当前可见范围（保留侧边栏占用）' : '原始页面宽度（推荐）'}</span>
+              </div>
+              <Switch
+                size="small"
+                checked={useVisibleViewport}
+                disabled={busy}
+                onChange={setUseVisibleViewport}
+                checkedChildren="可见"
+                unCheckedChildren="原始"
+                aria-label="切换副本宽度"
+              />
             </div>
             <div className="snapshot-transfer-actions">
               <Button type="text" icon={<UiIcon name="download" />} disabled={busy} onClick={() => setExportConfirmOpen(true)}>

@@ -1,6 +1,10 @@
 import { z } from 'zod';
 
 export const PROTOCOL_VERSION = '1.0' as const;
+// Large enterprise pages can legitimately contain a sizeable static DOM and
+// computed-style snapshot. Keep a finite transport limit while avoiding the
+// previous 10 MB false rejection for ordinary real-world pages.
+export const MAX_STATIC_SNAPSHOT_HTML_CHARS = 30_000_000;
 
 export const clarificationOptionSchema = z.object({
   id: z.string().min(1).max(100),
@@ -14,7 +18,7 @@ export const staticSnapshotSchema = z.object({
   title: z.string().min(1).max(200),
   sourceUrl: z.string().max(2_000),
   capturedAt: z.string().datetime(),
-  html: z.string().min(1).max(10_000_000),
+  html: z.string().min(1).max(MAX_STATIC_SNAPSHOT_HTML_CHARS),
   nodeCount: z.number().int().positive().max(10_000),
   selectedSourceId: z.string().min(1).max(100),
   viewport: z.object({
@@ -291,6 +295,9 @@ export type ContentCommand =
   | { type: 'deactivateEditor' }
   | { type: 'startSelection' }
   | { type: 'capturePageSnapshot' }
+  | { type: 'capturePageSnapshotAfterViewportReflow' }
+  | { type: 'createWorkspaceFromFullViewport' }
+  | { type: 'createWorkspaceFromVisibleViewport' }
   | { type: 'bindEditorTab'; tabId: number; previewUrl: string }
   | { type: 'reloadPreview' }
   | { type: 'exportScreenshot' }
