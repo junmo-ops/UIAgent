@@ -56,6 +56,8 @@ describe('source workspace compiler', () => {
     expect(result.css).toContain('font-family:PingFang SC,Microsoft YaHei,Arial,sans-serif');
     expect(result.css).toContain('html,body{width:100%;min-width:1534px;min-height:911px}');
     expect(result.css).toContain('body{padding:0!important}');
+    expect(result.css).toContain('*{scrollbar-width:none;-ms-overflow-style:none}');
+    expect(result.css).toContain('*::-webkit-scrollbar{display:none;width:0;height:0}');
     expect(result.css).toContain('[data-ui-agent-snapshot-stage]{display:block;width:1534px!important');
     expect(result.css).toContain('margin:0 auto;transform:translateZ(0)');
   });

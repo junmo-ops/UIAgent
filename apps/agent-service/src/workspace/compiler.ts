@@ -46,6 +46,9 @@ function frozenViewportCss(viewport: SourceWorkspaceCompileOptions['viewport']):
     '/* Keep imported snapshots in the capture-time coordinate system. */',
     `html,body{width:100%;min-width:${width}px;min-height:${height}px}`,
     'body{padding:0!important}',
+    '/* Keep scrolling available while hiding page and nested container scrollbars. */',
+    '*{scrollbar-width:none;-ms-overflow-style:none}',
+    '*::-webkit-scrollbar{display:none;width:0;height:0}',
     `[data-ui-agent-snapshot-stage]{display:block;width:${width}px!important;min-width:${width}px!important;min-height:${height}px;margin:0 auto;transform:translateZ(0)}`
   ].join('\n');
 }
