@@ -5,8 +5,15 @@ import { ControlledInteractionRuntime } from '../src/content/controlled-interact
 import { SelectionOverlay } from '../src/content/selection-overlay';
 import { onMessage, sendMessage } from '../src/messaging';
 
+const localContentMatches = ['http://127.0.0.1/*', 'http://localhost/*'];
+declare const __UI_AGENT_SERVICE_ORIGIN__: string;
+const configuredServiceOrigin = __UI_AGENT_SERVICE_ORIGIN__;
+
 export default defineContentScript({
-  matches: ['http://127.0.0.1/*', 'http://localhost/*'],
+  // The preview is served by Agent Service itself. Keep the local matches for
+  // development, and add only the configured service origin for cloud previews
+  // instead of injecting this script into arbitrary websites.
+  matches: [...localContentMatches, `${configuredServiceOrigin}/*`],
   main() {
     const selection = new SelectionOverlay();
     const interactions = document.body.hasAttribute('data-ui-agent-static-snapshot')

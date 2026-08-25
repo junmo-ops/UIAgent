@@ -1,4 +1,6 @@
-import { PROTOCOL_VERSION, staticSnapshotSchema, type StaticSnapshot } from '@ui-agent/contracts';
+import { PROTOCOL_VERSION, staticSnapshotSchema, type SnapshotMetrics, type StaticSnapshot } from '@ui-agent/contracts';
+
+const SNAPSHOT_OPTIMIZATION_VERSION = 'style-dedup-v1';
 
 const STYLE_PROPERTIES = [
   'align-content', 'align-items', 'align-self', 'appearance', 'background-color',
@@ -105,13 +107,27 @@ function preservesSingleRenderedLine(source: Element, computed: CSSStyleDeclarat
     && rect.height <= estimatedLineHeight * 1.25;
 }
 
-function applyComputedStyle(source: Element, clone: Element): void {
+interface StyleRegistry {
+  rules: Map<string, string>;
+  inlineStyleCharsBefore: number;
+}
+
+function applyComputedStyle(source: Element, clone: Element, registry: StyleRegistry): void {
   const computed = getComputedStyle(source);
   const declarations = computedStyleDeclarations(
     computed,
     preservesSingleRenderedLine(source, computed) ? { 'white-space': 'nowrap' } : {}
   );
-  clone.setAttribute('style', declarations.join(';'));
+  const declaration = declarations.join(';');
+  if (!declaration) {
+    clone.removeAttribute('style');
+    return;
+  }
+  const className = registry.rules.get(declaration) ?? `ui-snapshot-style-${registry.rules.size}`;
+  registry.rules.set(declaration, className);
+  registry.inlineStyleCharsBefore += declaration.length + 8;
+  clone.classList.add(className);
+  clone.removeAttribute('style');
 }
 
 function capturePseudoStyle(source: Element, sourceId: string, pseudo: '::before' | '::after'): string | undefined {
@@ -125,9 +141,9 @@ function capturePseudoStyle(source: Element, sourceId: string, pseudo: '::before
   return `[data-ui-source-id="${sourceId}"]${pseudo}{${declarations.join(';')}}`;
 }
 
-function sanitizeElement(source: Element, clone: Element): void {
+function sanitizeElement(source: Element, clone: Element, registry: StyleRegistry): void {
   copyLiveState(source, clone);
-  applyComputedStyle(source, clone);
+  applyComputedStyle(source, clone, registry);
 
   for (const attribute of [...clone.attributes]) {
     const name = attribute.name.toLowerCase();
@@ -161,7 +177,7 @@ function capturedRect(source: Element): string {
     .join(',');
 }
 
-function sanitizeTree(sourceRoot: HTMLElement, cloneRoot: HTMLElement): string[] {
+function sanitizeTree(sourceRoot: HTMLElement, cloneRoot: HTMLElement, registry: StyleRegistry): string[] {
   const sourceElements = [sourceRoot, ...sourceRoot.querySelectorAll('*')];
   const cloneElements = [cloneRoot, ...cloneRoot.querySelectorAll('*')];
   const pseudoRules: string[] = [];
@@ -177,7 +193,7 @@ function sanitizeTree(sourceRoot: HTMLElement, cloneRoot: HTMLElement): string[]
     const sourceId = `source-${index}`;
     clone.setAttribute('data-ui-source-id', sourceId);
     clone.setAttribute('data-ui-agent-source-rect', capturedRect(source));
-    sanitizeElement(source, clone);
+    sanitizeElement(source, clone, registry);
     for (const pseudo of ['::before', '::after'] as const) {
       const rule = capturePseudoStyle(source, sourceId, pseudo);
       if (rule) pseudoRules.push(rule);
@@ -196,7 +212,8 @@ function sanitizeTree(sourceRoot: HTMLElement, cloneRoot: HTMLElement): string[]
 
 export function captureStaticSnapshot(sourceRoot: HTMLElement): StaticSnapshot {
   const cloneRoot = sourceRoot.cloneNode(true) as HTMLElement;
-  const pseudoRules = sanitizeTree(sourceRoot, cloneRoot);
+  const registry: StyleRegistry = { rules: new Map(), inlineStyleCharsBefore: 0 };
+  const pseudoRules = sanitizeTree(sourceRoot, cloneRoot, registry);
   let renderedRoot = cloneRoot;
   if (sourceRoot === document.body) {
     renderedRoot = document.createElement('div');
@@ -217,6 +234,9 @@ export function captureStaticSnapshot(sourceRoot: HTMLElement): StaticSnapshot {
   }
   renderedRoot.style.margin = '0';
 
+  const capturedStyles = [...registry.rules.entries()]
+    .map(([declaration, className]) => `.${className}{${declaration}}`)
+    .join('\n    ');
   const html = `<!doctype html>
 <html lang="zh-CN">
 <head>
@@ -228,6 +248,7 @@ export function captureStaticSnapshot(sourceRoot: HTMLElement): StaticSnapshot {
     *,*::before,*::after{box-sizing:border-box}
     body{padding:0;background:${pageBackground};overflow:auto}
     [data-ui-agent-snapshot-stage]{display:block;width:${viewportWidth}px;min-width:${viewportWidth}px;min-height:${viewportHeight}px;margin:0 auto;transform:translateZ(0)}
+    ${capturedStyles}
     ${pseudoRules.join('\n    ')}
   </style>
 </head>
@@ -236,6 +257,24 @@ export function captureStaticSnapshot(sourceRoot: HTMLElement): StaticSnapshot {
 </body>
 </html>`;
 
+  const rawDomChars = renderedRoot.outerHTML.length;
+  const uniqueStyleChars = [...registry.rules.keys()].reduce((total, declaration) => total + declaration.length, 0);
+  const pseudoStyleChars = pseudoRules.reduce((total, rule) => total + rule.length, 0);
+  const styleDedupSavedChars = Math.max(0, registry.inlineStyleCharsBefore - uniqueStyleChars);
+  const inlineDataResourceChars = [...html.matchAll(/data:(?:image|font)\/[^"'\s)]+/gi)]
+    .reduce((total, match) => total + match[0].length, 0);
+  const metrics: SnapshotMetrics = {
+    optimizationVersion: SNAPSHOT_OPTIMIZATION_VERSION,
+    rawDomChars,
+    inlineStyleCharsBefore: registry.inlineStyleCharsBefore,
+    uniqueStyleRuleCount: registry.rules.size,
+    uniqueStyleChars,
+    styleDedupSavedChars,
+    pseudoStyleChars,
+    inlineDataResourceChars,
+    serializedHtmlCharsBefore: html.length + styleDedupSavedChars,
+    serializedHtmlCharsAfter: html.length
+  };
   return staticSnapshotSchema.parse({
     protocolVersion: PROTOCOL_VERSION,
     title,
@@ -244,6 +283,7 @@ export function captureStaticSnapshot(sourceRoot: HTMLElement): StaticSnapshot {
     html,
     nodeCount,
     selectedSourceId: 'source-0',
+    metrics,
     viewport: {
       width: viewportWidth,
       height: viewportHeight

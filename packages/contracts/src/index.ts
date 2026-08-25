@@ -6,6 +6,20 @@ export const PROTOCOL_VERSION = '1.0' as const;
 // previous 10 MB false rejection for ordinary real-world pages.
 export const MAX_STATIC_SNAPSHOT_HTML_CHARS = 30_000_000;
 
+export const snapshotMetricsSchema = z.object({
+  optimizationVersion: z.string().min(1).max(40),
+  rawDomChars: z.number().int().nonnegative(),
+  inlineStyleCharsBefore: z.number().int().nonnegative(),
+  uniqueStyleRuleCount: z.number().int().nonnegative(),
+  uniqueStyleChars: z.number().int().nonnegative(),
+  styleDedupSavedChars: z.number().int().nonnegative(),
+  pseudoStyleChars: z.number().int().nonnegative(),
+  inlineDataResourceChars: z.number().int().nonnegative(),
+  serializedHtmlCharsBefore: z.number().int().nonnegative(),
+  serializedHtmlCharsAfter: z.number().int().nonnegative()
+});
+export type SnapshotMetrics = z.infer<typeof snapshotMetricsSchema>;
+
 export const clarificationOptionSchema = z.object({
   id: z.string().min(1).max(100),
   label: z.string().min(1).max(200),
@@ -21,6 +35,7 @@ export const staticSnapshotSchema = z.object({
   html: z.string().min(1).max(MAX_STATIC_SNAPSHOT_HTML_CHARS),
   nodeCount: z.number().int().positive().max(10_000),
   selectedSourceId: z.string().min(1).max(100),
+  metrics: snapshotMetricsSchema.optional(),
   viewport: z.object({
     width: z.number().int().positive(),
     height: z.number().int().positive()
@@ -46,6 +61,28 @@ export const portableSnapshotPackageSchema = z.object({
   })
 });
 export type PortableSnapshotPackage = z.infer<typeof portableSnapshotPackageSchema>;
+
+/** A portable backup of every active workspace owned by one installation. */
+export const WORKSPACE_ARCHIVE_FORMAT = 'ui-agent-workspace-archive' as const;
+export const WORKSPACE_ARCHIVE_VERSION = 1 as const;
+export const workspaceArchiveSchema = z.object({
+  format: z.literal(WORKSPACE_ARCHIVE_FORMAT),
+  version: z.literal(WORKSPACE_ARCHIVE_VERSION),
+  exportedAt: z.string().datetime(),
+  workspaces: z.array(portableSnapshotPackageSchema).min(1).max(500)
+});
+export type WorkspaceArchive = z.infer<typeof workspaceArchiveSchema>;
+export const workspaceArchiveManifestSchema = z.object({
+  format: z.literal(WORKSPACE_ARCHIVE_FORMAT),
+  version: z.literal(WORKSPACE_ARCHIVE_VERSION),
+  exportedAt: z.string().datetime(),
+  workspaces: z.array(z.object({
+    path: z.string().min(1).max(300),
+    title: z.string().min(1).max(200),
+    sourceUrl: z.string().max(2_000)
+  })).min(1).max(500)
+});
+export type WorkspaceArchiveManifest = z.infer<typeof workspaceArchiveManifestSchema>;
 
 const domAttributeNameSchema = z.string().regex(/^[A-Za-z_:][A-Za-z0-9_.:-]*$/).max(120);
 const domAttributesSchema = z.record(domAttributeNameSchema, z.string().max(5_000));

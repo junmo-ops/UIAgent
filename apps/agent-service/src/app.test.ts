@@ -269,11 +269,18 @@ describe('agent service', () => {
       expect(previewHtml).toContain('data-ui-source-id="source-0"');
       expect(previewHtml).toContain('<style data-ui-agent-workspace-styles>');
       expect(previewHtml).toContain('.ui-snapshot-style-0{color:red}');
+      const archive = await app.request('/v1/workspaces/export-all');
+      expect(archive.status).toBe(200);
+      expect(await archive.json()).toMatchObject({
+        format: 'ui-agent-workspace-archive',
+        workspaces: [expect.objectContaining({ snapshot: expect.objectContaining({ title: '订单筛选方案' }) })]
+      });
       const removed = await app.request(`/v1/workspaces/${created.workspaceId}`, { method: 'DELETE' });
       expect(await removed.json()).toMatchObject({ workspaceId: created.workspaceId });
       expect((await app.request(`/v1/workspaces/${created.workspaceId}`)).status).toBe(404);
       expect((await app.request(`/workspaces/${created.workspaceId}/preview`)).status).toBe(404);
       expect(await (await app.request('/v1/workspaces?status=trashed')).json()).toMatchObject({ total: 1 });
+      expect((await app.request('/v1/workspaces/export-all')).status).toBe(409);
       expect((await app.request(`/v1/workspaces/${created.workspaceId}/restore`, { method: 'POST' })).status).toBe(200);
     } finally {
       rmSync(root, { recursive: true, force: true });

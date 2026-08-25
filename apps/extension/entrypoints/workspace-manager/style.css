@@ -32,9 +32,15 @@ button { cursor: pointer; }
 .status-switch { display: flex; gap: 4px; padding: 3px; background: #edf0f2; border-radius: 10px; }
 .status-switch button { padding: 0 15px; color: #677178; background: transparent; border: 0; border-radius: 8px; font-size: 12px; }
 .status-switch button.active { color: #172026; background: #fff; box-shadow: 0 2px 8px rgba(31, 40, 46, .08); font-weight: 650; }
+.workspace-transfer-actions { display: flex; align-items: center; gap: 6px; padding-left: 4px; }
+.workspace-transfer-actions button { height: 32px; padding: 0 11px; color: #526067; background: #fff; border: 1px solid #d8dfe2; border-radius: 8px; font-size: 11px; }
+.workspace-transfer-actions button:hover:not(:disabled) { color: #20282d; border-color: #aebcc2; }
+.workspace-transfer-actions button:disabled { cursor: not-allowed; opacity: .5; }
 
 .manager-error { margin-top: 18px; padding: 11px 13px; display: flex; justify-content: space-between; color: #8c312f; background: #fff3f1; border: 1px solid #f0ccc7; border-radius: 10px; font-size: 12px; }
 .manager-error button { color: inherit; background: none; border: 0; font-weight: 700; }
+.manager-notice { margin-top: 18px; padding: 11px 13px; display: flex; justify-content: space-between; color: #275c48; background: #edf8f2; border: 1px solid #c9e6d5; border-radius: 10px; font-size: 12px; }
+.manager-notice button { color: inherit; background: none; border: 0; font-weight: 700; }
 .workspace-grid { margin-top: 20px; display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 14px; transition: opacity .18s ease; }
 .workspace-grid.loading { min-height: 240px; opacity: .45; }
 .workspace-card { min-width: 0; padding: 18px; display: flex; flex-direction: column; background: #fff; border: 1px solid #dde2e5; border-radius: 15px; box-shadow: 0 2px 4px rgba(33, 42, 48, .025); transition: transform .18s ease, box-shadow .18s ease, border-color .18s ease; }
@@ -52,6 +58,7 @@ button { cursor: pointer; }
 .workspace-actions button.primary, .rename-dialog button.primary { color: #fff; background: #253139; }
 .workspace-actions button.danger { margin-left: auto; color: #a04d48; background: transparent; }
 .workspace-actions button:focus-visible, .rename-dialog button:focus-visible, input:focus-visible { outline: 2px solid #427d68; outline-offset: 2px; }
+.workspace-actions button:disabled { cursor: not-allowed; opacity: .5; }
 
 .empty-archive { grid-column: 1 / -1; min-height: 280px; display: grid; place-content: center; justify-items: center; text-align: center; color: #778188; }
 .empty-archive i { width: 46px; height: 46px; display: grid; place-items: center; color: #8f999f; border: 1px dashed #aeb7bc; border-radius: 50%; font: normal 22px/1 ui-monospace, monospace; }

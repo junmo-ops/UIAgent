@@ -70,6 +70,34 @@ describe('SourceWorkspaceStore', () => {
     expect(store.get(workspace.workspaceId)).toMatchObject({ revision: 1, canUndo: true, canRedo: false });
   });
 
+  it('exports the current active revision and excludes trashed workspaces', () => {
+    const store = createStore();
+    const workspace = store.create(snapshot);
+    const exported = store.exportSnapshot(workspace.workspaceId);
+    expect(exported).toMatchObject({
+      title: snapshot.title,
+      sourceUrl: snapshot.sourceUrl,
+      viewport: snapshot.viewport
+    });
+    expect(exported?.html).toContain('data-ui-agent-workspace-styles');
+    const second = store.create({ ...snapshot, title: '第二个副本' });
+    expect(store.exportActiveSnapshots()).toHaveLength(2);
+    store.trash(workspace.workspaceId);
+    expect(store.exportSnapshot(workspace.workspaceId)).toBeUndefined();
+    expect(store.exportActiveSnapshots()).toEqual([expect.objectContaining({ title: second.title })]);
+  });
+
+  it('can disable identity filtering for an internal pilot without changing workspace manifests', () => {
+    const root = mkdtempSync(join(tmpdir(), 'ui-agent-workspace-pilot-'));
+    roots.push(root);
+    const store = new SourceWorkspaceStore(root, { identityIsolation: false });
+    const workspace = store.create(snapshot, { userId: 'alice', tenantId: 'company-a' });
+
+    expect(store.list({}, { userId: 'bob', tenantId: 'company-a' }).items)
+      .toEqual([expect.objectContaining({ workspaceId: workspace.workspaceId })]);
+    expect(store.owns(workspace.workspaceId, { userId: 'another', tenantId: 'company-b' })).toBe(true);
+  });
+
   it('supports revision undo and redo', async () => {
     const store = createStore();
     const workspace = store.create(snapshot);

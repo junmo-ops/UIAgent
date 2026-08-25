@@ -18,7 +18,10 @@ import {
   workspaceListResponseSchema,
   workspaceUpdateRequestSchema,
   installationCredentialSchema,
-  staticSnapshotSchema
+  staticSnapshotSchema,
+  workspaceArchiveSchema,
+  WORKSPACE_ARCHIVE_FORMAT,
+  WORKSPACE_ARCHIVE_VERSION
 } from '@ui-agent/contracts';
 import { Hono, type MiddlewareHandler } from 'hono';
 import { cors } from 'hono/cors';
@@ -52,8 +55,12 @@ export function createApp(
       name: env.MODEL_NAME
     }
   });
+  const identityIsolation = !['false', '0', 'off', 'no'].includes(
+    env.WORKSPACE_IDENTITY_ISOLATION?.trim().toLowerCase() ?? ''
+  );
   const workspaceStore = providedWorkspaceStore ?? new SourceWorkspaceStore(
-    env.SOURCE_WORKSPACE_DIR ?? '.snapshots/source-workspaces'
+    env.SOURCE_WORKSPACE_DIR ?? '.snapshots/source-workspaces',
+    { identityIsolation }
   );
   const codingAgent = providedCodingAgent ?? clineCodingAgentFromEnvironment(env);
   const assistantRouter: AssistantRouterPort = providedAssistantRouter
@@ -97,6 +104,9 @@ export function createApp(
   };
   const authorizeWorkspace: MiddlewareHandler<AppBindings> = async (c, next) => {
     const workspaceId = c.req.param('workspaceId');
+    // Collection-level routes share the /v1/workspaces prefix but do not name
+    // a workspace. They remain protected by authenticate above.
+    if (workspaceId === 'export-all') return next();
     if (!workspaceId || !workspaceStore.owns(workspaceId, c.get('principal'))) {
       return c.json({ code: 'WORKSPACE_NOT_FOUND', message: '工作区不存在' }, 404);
     }
@@ -162,7 +172,8 @@ export function createApp(
       assistantRouterAdapter: assistantRouter.adapterId,
       assistantChatAdapter: assistantChat.adapterId,
       authMode: authenticator.mode ?? 'external',
-      authReady: !authenticator.configurationError
+      authReady: !authenticator.configurationError,
+      workspaceIdentityIsolation: identityIsolation
     }))
     .post('/v1/auth/installations', c => {
       if (authenticator.mode === 'installation' && authenticator.configurationError) {
@@ -251,6 +262,32 @@ export function createApp(
           code: 'WORKSPACE_CREATE_FAILED',
           message: error instanceof Error ? error.message : '静态源码工作区创建失败'
         }, 400);
+      }
+    })
+    .get('/v1/workspaces/export-all', c => {
+      try {
+        const snapshots = workspaceStore.exportActiveSnapshots(c.get('principal'));
+        if (!snapshots.length) return c.json({ code: 'WORKSPACE_ARCHIVE_EMPTY', message: '没有可导出的副本' }, 409);
+        const exportedAt = new Date().toISOString();
+        const archive = workspaceArchiveSchema.parse({
+          format: WORKSPACE_ARCHIVE_FORMAT,
+          version: WORKSPACE_ARCHIVE_VERSION,
+          exportedAt,
+          workspaces: snapshots.map(snapshot => ({
+            format: 'ui-agent-static-snapshot',
+            version: 1,
+            exportedAt,
+            snapshot,
+            safety: {
+              activeContentRemoved: true,
+              browserStateExcluded: ['cookies', 'localStorage', 'sessionStorage']
+            }
+          }))
+        });
+        c.header('content-type', 'application/json; charset=utf-8');
+        return c.json(archive);
+      } catch (error) {
+        return c.json({ code: 'WORKSPACE_ARCHIVE_EXPORT_FAILED', message: error instanceof Error ? error.message : '一键导出失败' }, 400);
       }
     })
     .patch('/v1/workspaces/:workspaceId', zValidator('json', workspaceUpdateRequestSchema), c => {

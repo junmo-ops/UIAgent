@@ -100,6 +100,22 @@ describe('captureStaticSnapshot', () => {
     expect(snapshot.html).not.toContain('data-ui-agent-overlay');
   });
 
+  it('deduplicates repeated computed styles without changing source ids or text', () => {
+    const document = installDom(`<!doctype html><html><head><title>重复样式页</title></head><body>
+      <button style="display:inline-block;color:rgb(0, 0, 0)">确定</button>
+      <button style="display:inline-block;color:rgb(0, 0, 0)">取消</button>
+    </body></html>`);
+
+    const snapshot = captureStaticSnapshot(document.body as unknown as HTMLElement);
+
+    expect(snapshot.html.match(/\.ui-snapshot-style-\d+\{/g)).toHaveLength(1);
+    expect(snapshot.html.match(/class="ui-snapshot-style-0"/g)).toHaveLength(2);
+    expect(snapshot.html).toContain('确定');
+    expect(snapshot.html).toContain('取消');
+    expect(snapshot.metrics?.uniqueStyleRuleCount).toBe(1);
+    expect(snapshot.metrics?.styleDedupSavedChars).toBeGreaterThan(0);
+  });
+
   it('preserves fixed overlay offsets so an open modal remains visible', () => {
     const document = installDom(`<!doctype html><html><head><title>弹窗页面</title></head><body>
       <main>页面内容</main>
@@ -140,6 +156,9 @@ describe('captureStaticSnapshot', () => {
     expect(snapshot.html).not.toContain('width:max-content');
     expect(snapshot.html).toContain('margin:0 auto;transform:translateZ(0)');
     expect(snapshot.html).toContain('font-family:PingFang SC,Microsoft YaHei,Arial,sans-serif');
-    expect(snapshot.html).toMatch(/id="single-line"[^>]+white-space:nowrap/);
+    expect(snapshot.html).toMatch(/\.ui-snapshot-style-\d+\{display:block;font-size:14px;white-space:nowrap\}/);
+    expect(snapshot.metrics?.optimizationVersion).toBe('style-dedup-v1');
+    expect(snapshot.metrics?.uniqueStyleRuleCount).toBeGreaterThan(0);
+    expect(snapshot.metrics?.serializedHtmlCharsAfter).toBe(snapshot.html.length);
   });
 });

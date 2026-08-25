@@ -5,6 +5,11 @@ const serviceHostPermission = `${serviceUrl.origin}/*`;
 
 export default defineConfig({
   modules: ['@wxt-dev/module-react'],
+  vite: () => ({
+    define: {
+      __UI_AGENT_SERVICE_ORIGIN__: JSON.stringify(serviceUrl.origin)
+    }
+  }),
   manifest: {
     name: 'UI 需求示意助手',
     description: '选择页面区域，通过自然语言生成受控的静态 UI 需求示意。',

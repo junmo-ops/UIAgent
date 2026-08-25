@@ -12,8 +12,11 @@ import { randomUUID } from 'node:crypto';
 import { parseHTML } from 'linkedom';
 import { type CodingAgentConversationTurn, type CodingWorkspaceTools } from '@ui-agent/agent-runtime';
 import {
+  PROTOCOL_VERSION,
   staticSnapshotSchema,
   MAX_STATIC_SNAPSHOT_HTML_CHARS,
+  type SnapshotMetrics,
+  type StaticSnapshot,
   type SourceTurnRequest,
   type SourceTurnResponse
 } from '@ui-agent/contracts';
@@ -47,6 +50,8 @@ interface WorkspaceManifest {
   title: string;
   sourceUrl: string;
   selectedSourceId: string;
+  snapshotMetrics?: SnapshotMetrics;
+  viewport?: { width: number; height: number };
   createdAt: string;
   updatedAt: string;
   deletedAt?: string;
@@ -313,6 +318,11 @@ export interface WorkspaceListOptions {
   limit?: number;
 }
 
+export interface SourceWorkspaceStoreOptions {
+  /** Keep workspace ownership checks enabled unless a pilot explicitly opts out. */
+  identityIsolation?: boolean;
+}
+
 function sourceElementInnerRange(
   content: string,
   range: { start: number; end: number; tag: string }
@@ -530,10 +540,12 @@ function cssRulesForClass(content: string, className: string): string[] {
 
 export class SourceWorkspaceStore {
   private readonly root: string;
+  private readonly identityIsolation: boolean;
   private readonly active = new Set<string>();
 
-  constructor(root = '.snapshots/source-workspaces') {
+  constructor(root = '.snapshots/source-workspaces', options: SourceWorkspaceStoreOptions = {}) {
     this.root = resolve(root);
+    this.identityIsolation = options.identityIsolation ?? true;
     mkdirSync(this.root, { recursive: true, mode: 0o700 });
   }
 
@@ -564,6 +576,8 @@ export class SourceWorkspaceStore {
       title: snapshot.title,
       sourceUrl: snapshot.sourceUrl,
       selectedSourceId: snapshot.selectedSourceId,
+      ...(snapshot.metrics ? { snapshotMetrics: snapshot.metrics } : {}),
+      viewport: snapshot.viewport,
       createdAt: now,
       updatedAt: now,
       revision: 0,
@@ -653,6 +667,54 @@ export class SourceWorkspaceStore {
   html(workspaceId: string): string | undefined {
     const path = resolve(this.workspacePath(workspaceId), 'index.html');
     return existsSync(path) ? readFileSync(path, 'utf8') : undefined;
+  }
+
+  exportSnapshot(workspaceId: string): StaticSnapshot | undefined {
+    const directory = this.workspacePath(workspaceId);
+    const manifestPath = resolve(directory, 'workspace.json');
+    if (!existsSync(manifestPath)) return undefined;
+    const manifest = this.readManifest(directory);
+    if (manifest.deletedAt) return undefined;
+    const html = this.readOptionalFile(resolve(directory, 'index.html'));
+    if (!html) return undefined;
+    const css = this.readOptionalFile(resolve(directory, 'snapshot.css')) ?? '';
+    const style = `<style data-ui-agent-workspace-styles>\n${css}\n</style>`;
+    const withStyles = /<\/head>/i.test(html)
+      ? html.replace(/<\/head>/i, `${style}\n</head>`)
+      : /<body\b/i.test(html)
+        ? html.replace(/<body\b/i, `${style}\n<body`)
+        : html;
+    const nodeCount = (withStyles.match(/\bdata-ui-source-id\s*=\s*["']/gi) ?? []).length;
+    return {
+      protocolVersion: PROTOCOL_VERSION,
+      title: manifest.title,
+      sourceUrl: manifest.sourceUrl,
+      capturedAt: manifest.createdAt,
+      html: withStyles,
+      nodeCount: Math.max(1, nodeCount),
+      selectedSourceId: manifest.selectedSourceId,
+      ...(manifest.snapshotMetrics ? { metrics: manifest.snapshotMetrics } : {}),
+      viewport: manifest.viewport ?? { width: 1440, height: 900 }
+    };
+  }
+
+  exportActiveSnapshots(owner: WorkspaceOwner = LOCAL_WORKSPACE_OWNER): StaticSnapshot[] {
+    return readdirSync(this.root, { withFileTypes: true })
+      .filter(entry => entry.isDirectory() && /^[0-9a-f-]{36}$/i.test(entry.name))
+      .flatMap(entry => {
+        const directory = this.workspacePath(entry.name);
+        if (!existsSync(resolve(directory, 'workspace.json'))) return [];
+        try {
+          const manifest = this.readManifest(directory);
+          if (manifest.deletedAt || !this.manifestBelongsTo(manifest, owner)) return [];
+          const snapshot = this.exportSnapshot(entry.name);
+          return snapshot ? [{ snapshot, updatedAt: manifest.updatedAt }] : [];
+        } catch {
+          return [];
+        }
+      })
+      .sort((left, right) => right.updatedAt.localeCompare(left.updatedAt))
+      .map(item => item.snapshot);
   }
 
   previewHtml(workspaceId: string): string | undefined {
@@ -1338,6 +1400,7 @@ export class SourceWorkspaceStore {
   }
 
   private manifestBelongsTo(manifest: WorkspaceManifest, owner: WorkspaceOwner): boolean {
+    if (!this.identityIsolation) return true;
     const ownerId = manifest.ownerId ?? LOCAL_WORKSPACE_OWNER.userId;
     const tenantId = manifest.tenantId ?? LOCAL_WORKSPACE_OWNER.tenantId;
     return ownerId === owner.userId && tenantId === owner.tenantId;

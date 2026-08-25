@@ -80,6 +80,8 @@ MODEL_API_KEY=替换为新创建的DeepSeek密钥
 MODEL_NAME=deepseek-v4-flash
 SOURCE_WORKSPACE_DIR=/tmp/ui-agent/source-workspaces
 LOG_FILE=/tmp/ui-agent/logs/agent-turns.jsonl
+# 内部试点临时关闭副本身份隔离；正式环境删除或设置为 true
+WORKSPACE_IDENTITY_ISOLATION=false
 ```
 
 关键配置说明：
@@ -88,6 +90,7 @@ LOG_FILE=/tmp/ui-agent/logs/agent-turns.jsonl
 - `PORT=8787`：与服务端口保持一致；
 - `MODEL_API_KEY`：只保存在 CloudBase，不进入插件；
 - `/tmp/ui-agent`：CloudBase 容器中的临时工作目录。
+- `WORKSPACE_IDENTITY_ISOLATION=false`：试点阶段允许不同插件安装身份访问同一批副本，便于多人共用测试数据。该配置会关闭 owner/tenant 隔离，只适用于受控试点；正式环境必须删除或设置为 `true`。
 
 ### 4.4 网络、规格和运行模式
 

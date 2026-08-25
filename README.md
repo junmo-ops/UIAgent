@@ -137,9 +137,11 @@ AUTH_MODE=installation
 INSTALLATION_TOKEN_SECRET=至少32字符且不可提交到仓库的随机密钥
 INSTALLATION_TENANT_ID=internal-pilot
 CORS_ORIGIN=chrome-extension://正式插件ID
+# 仅内部试点临时关闭副本身份隔离；正式环境不要关闭
+WORKSPACE_IDENTITY_ISOLATION=false
 ```
 
-插件首次访问会自动领取服务端签名的安装身份并保存在当前 Chrome Profile；工作区列表、预览、修改、Revision 和回收站均按该身份隔离。更换电脑或 Chrome Profile 会形成新身份，试点阶段不提供跨设备同步。`INSTALLATION_TOKEN_SECRET` 必须持续保留，随意更换会使已安装插件的凭证失效。
+插件首次访问会自动领取服务端签名的安装身份并保存在当前 Chrome Profile；默认情况下工作区列表、预览、修改、Revision 和回收站均按该身份隔离。内部试点可临时设置 `WORKSPACE_IDENTITY_ISOLATION=false`，让不同安装身份共享工作区；该配置会关闭工作区的 owner/tenant 访问边界，只能用于受控试点，正式环境必须删除或设置为 `true`。更换电脑或 Chrome Profile 会形成新身份。`INSTALLATION_TOKEN_SECRET` 必须持续保留，随意更换会使已安装插件的凭证失效。
 
 线上环境应由网关提供 HTTPS，并限制为受信任的公司网络或增加统一鉴权。不要把 DeepSeek Key 写入插件或提交到仓库。
 反向代理或容器平台终止 HTTPS 时，还应设置 `PUBLIC_BASE_URL=https://实际服务域名`，确保服务返回的副本地址也是正确的 HTTPS 地址。
