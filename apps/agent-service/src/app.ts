@@ -15,6 +15,8 @@ import {
   sourceTurnProgressSchema,
   sourceWorkspaceCreatedSchema,
   sourceWorkspaceInfoSchema,
+  workspaceChatEntrySchema,
+  workspaceConversationResponseSchema,
   workspaceListResponseSchema,
   workspaceUpdateRequestSchema,
   installationCredentialSchema,
@@ -350,6 +352,29 @@ export function createApp(
         return c.json(sourceWorkspaceInfoSchema.parse({ ...workspace, previewUrl }));
       } catch (error) {
         return c.json({ code: 'WORKSPACE_NOT_FOUND', message: error instanceof Error ? error.message : '工作区不存在' }, 404);
+      }
+    })
+    .get('/v1/workspaces/:workspaceId/conversation', c => {
+      const workspaceId = c.req.param('workspaceId');
+      try {
+        return c.json(workspaceConversationResponseSchema.parse({
+          workspaceId,
+          entries: workspaceStore.chat(workspaceId)
+        }));
+      } catch (error) {
+        return c.json({ code: 'WORKSPACE_CONVERSATION_NOT_FOUND', message: error instanceof Error ? error.message : '工作区不存在' }, 404);
+      }
+    })
+    .post('/v1/workspaces/:workspaceId/conversation', zValidator('json', workspaceChatEntrySchema), c => {
+      const workspaceId = c.req.param('workspaceId');
+      try {
+        workspaceStore.appendChat(workspaceId, c.req.valid('json'));
+        return c.json(workspaceConversationResponseSchema.parse({
+          workspaceId,
+          entries: workspaceStore.chat(workspaceId)
+        }), 201);
+      } catch (error) {
+        return c.json({ code: 'WORKSPACE_CONVERSATION_APPEND_FAILED', message: error instanceof Error ? error.message : '保存副本对话失败' }, 409);
       }
     })
     .get('/workspaces/:workspaceId/preview', c => {

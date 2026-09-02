@@ -108,6 +108,20 @@ describe('agent service', () => {
       });
       expect(createdResponse.status).toBe(201);
       const created = await createdResponse.json() as { workspaceId: string };
+      const chatEntry = {
+        id: '33333333-3333-4333-8333-333333333333',
+        role: 'user',
+        text: '把筛选项放到列表上方',
+        createdAt: '2026-08-08T00:01:00.000Z',
+        revision: 0
+      };
+      expect((await alice.request(`/v1/workspaces/${created.workspaceId}/conversation`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify(chatEntry)
+      })).status).toBe(201);
+      expect(await (await alice.request(`/v1/workspaces/${created.workspaceId}/conversation`)).json())
+        .toMatchObject({ workspaceId: created.workspaceId, entries: [chatEntry] });
 
       expect(await (await alice.request('/v1/workspaces')).json()).toMatchObject({ total: 1 });
       expect(await (await bob.request('/v1/workspaces')).json()).toMatchObject({ total: 0 });
@@ -120,6 +134,12 @@ describe('agent service', () => {
         expect((await foreignApp.request(`/v1/workspaces/${created.workspaceId}`, { method: 'DELETE' })).status).toBe(404);
         expect((await foreignApp.request(`/v1/workspaces/${created.workspaceId}/undo`, { method: 'POST' })).status).toBe(404);
         expect((await foreignApp.request(`/v1/workspaces/${created.workspaceId}/turns/unknown/progress`)).status).toBe(404);
+        expect((await foreignApp.request(`/v1/workspaces/${created.workspaceId}/conversation`)).status).toBe(404);
+        expect((await foreignApp.request(`/v1/workspaces/${created.workspaceId}/conversation`, {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify(chatEntry)
+        })).status).toBe(404);
       }
     } finally {
       rmSync(root, { recursive: true, force: true });

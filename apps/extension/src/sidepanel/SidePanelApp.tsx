@@ -10,6 +10,8 @@ import {
   sourceTurnProgressSchema,
   sourceWorkspaceCreatedSchema,
   sourceWorkspaceInfoSchema,
+  workspaceChatEntrySchema,
+  workspaceConversationResponseSchema,
   type AssistantTurnResponse,
   type ContentCommand,
   type ContentCommandResult,
@@ -132,8 +134,9 @@ export function SidePanelApp() {
       const match = /\/workspaces\/([0-9a-f-]{36})\/preview/i.exec(tab?.url ?? '');
       if (!match || !tab?.id) return;
       try {
-        const [response, persisted] = await Promise.all([
+        const [response, conversationResponse, persisted] = await Promise.all([
           fetchAgentService(`${url.replace(/\/$/, '')}/v1/workspaces/${match[1]}`),
+          fetchAgentService(`${url.replace(/\/$/, '')}/v1/workspaces/${match[1]}/conversation`),
           sourceWorkspaceSessionItem.getValue()
         ]);
         if (!response.ok) return;
@@ -148,8 +151,20 @@ export function SidePanelApp() {
             ? persisted.sourceTabId
             : undefined
         });
-        if (persisted?.workspace.workspaceId === workspace.workspaceId) {
+        const serverConversation = conversationResponse.ok
+          ? workspaceConversationResponseSchema.parse(await conversationResponse.json()).entries
+          : [];
+        if (serverConversation.length > 0) {
+          setChat(serverConversation);
+          const unresolved = [...serverConversation].reverse().find(entry => (
+            entry.clarification && !entry.clarification.resolved
+          ));
+          setPendingClarification(unresolved?.clarification);
+        } else if (persisted?.workspace.workspaceId === workspace.workspaceId) {
+          // Preserve pre-migration local sessions only while the server has no history yet.
           setChat(persisted.chat);
+        }
+        if (persisted?.workspace.workspaceId === workspace.workspaceId) {
           setEditSessionId(persisted.editSessionId);
           setPendingClarification(persisted.pendingClarification);
         }
@@ -200,6 +215,41 @@ export function SidePanelApp() {
     setError(undefined);
   }), []);
 
+  const persistWorkspaceChat = async (
+    entry: ChatEntry,
+    workspace = sourceWorkspace,
+    revision = workspace?.revision
+  ) => {
+    if (!workspace || revision === undefined) return;
+    const payload = workspaceChatEntrySchema.parse({
+      ...entry,
+      createdAt: new Date().toISOString(),
+      revision
+    });
+    const response = await fetchAgentService(
+      `${serviceUrl.replace(/\/$/, '')}/v1/workspaces/${workspace.workspaceId}/conversation`,
+      {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify(payload)
+      }
+    );
+    if (!response.ok) throw await serviceResponseError(response, '保存副本对话返回');
+  };
+
+  const appendChat = async (
+    role: ChatEntry['role'],
+    text: string,
+    clarification?: ClarificationPrompt,
+    revision?: number,
+    entryId = crypto.randomUUID()
+  ) => {
+    const entry: ChatEntry = { id: entryId, role, text, ...(clarification && { clarification }) };
+    setChat(entries => [...entries, entry]);
+    await persistWorkspaceChat(entry, sourceWorkspace, revision);
+    return entry;
+  };
+
   const startSelection = async () => {
     try { await command({ type: 'startSelection' }); setSelecting(true); }
     catch (error) { fail(error); }
@@ -211,15 +261,15 @@ export function SidePanelApp() {
     clarificationOptionId?: string
   ) => {
     if (!text) return;
-    const userEntry: ChatEntry = { id: crypto.randomUUID(), role: 'user', text };
-    setChat(entries => [...entries, userEntry]);
+    const turnId = crypto.randomUUID();
+    await appendChat('user', text, undefined, undefined, turnId);
     setInstruction('');
     if (replyToClarificationId) setPendingClarification(undefined);
     setAssistantBusy(true);
     try {
       const request = assistantTurnRequestSchema.parse({
         protocolVersion: PROTOCOL_VERSION,
-        turnId: crypto.randomUUID(),
+        turnId,
         traceId: crypto.randomUUID(),
         instruction: text,
         context: {
@@ -278,9 +328,13 @@ export function SidePanelApp() {
       if (finalOutcome.kind === 'answered') {
         const finalAnswer = finalOutcome.answer;
         const id = streamedEntryId;
+        const answerEntry: ChatEntry = id
+          ? { id, role: 'assistant', text: finalAnswer }
+          : { id: crypto.randomUUID(), role: 'assistant', text: finalAnswer };
         setChat(entries => id
-          ? entries.map(entry => entry.id === id ? { ...entry, text: finalAnswer } : entry)
-          : [...entries, { id: crypto.randomUUID(), role: 'assistant', text: finalAnswer }]);
+          ? entries.map(entry => entry.id === id ? answerEntry : entry)
+          : [...entries, answerEntry]);
+        await persistWorkspaceChat(answerEntry);
         return;
       }
       if (finalOutcome.kind === 'clarification') {
@@ -290,12 +344,7 @@ export function SidePanelApp() {
           allowFreeText: finalOutcome.allowFreeText
         };
         setPendingClarification(clarification);
-        setChat(entries => [...entries, {
-          id: crypto.randomUUID(),
-          role: 'assistant',
-          text: finalOutcome.question,
-          clarification
-        }]);
+        await appendChat('assistant', finalOutcome.question, clarification);
         return;
       }
       if (!sourceWorkspace) throw new Error('需要先进入副本编辑，才能执行页面修改');
@@ -303,7 +352,8 @@ export function SidePanelApp() {
       await runSourceTurn(
         finalOutcome.instruction,
         sourceWorkspace,
-        finalOutcome.targetScope === 'selection' ? selection?.selected.sourceId : undefined
+        finalOutcome.targetScope === 'selection' ? selection?.selected.sourceId : undefined,
+        turnId
       );
     } catch (error) {
       fail(error);
@@ -330,6 +380,16 @@ export function SidePanelApp() {
       if (!response.ok) throw await serviceResponseError(response, '源码副本版本接口返回');
       const value = await response.json() as Pick<SourceWorkspaceInfo, 'revision' | 'canUndo' | 'canRedo'>;
       setSourceWorkspace(current => current ? { ...current, ...value } : current);
+      const conversationResponse = await fetchAgentService(
+        `${serviceUrl.replace(/\/$/, '')}/v1/workspaces/${sourceWorkspace.workspaceId}/conversation`,
+        { cache: 'no-store' }
+      );
+      if (conversationResponse.ok) {
+        const entries = workspaceConversationResponseSchema.parse(await conversationResponse.json()).entries;
+        setChat(entries);
+        const unresolved = [...entries].reverse().find(entry => entry.clarification && !entry.clarification.resolved);
+        setPendingClarification(unresolved?.clarification);
+      }
       await command({ type: 'reloadPreview' });
     } catch (error) { fail(error); }
     finally { setSnapshotBusy(false); }
@@ -350,14 +410,15 @@ export function SidePanelApp() {
   const runSourceTurn = async (
     text: string,
     workspace: ActiveWorkspace,
-    sourceId?: string
+    sourceId?: string,
+    turnId = crypto.randomUUID()
   ) => {
     setSnapshotBusy(true);
     try {
       const request = sourceTurnRequestSchema.parse({
         protocolVersion: PROTOCOL_VERSION,
         editSessionId,
-        turnId: crypto.randomUUID(),
+        turnId,
         traceId: crypto.randomUUID(),
         instruction: text,
         sourceId
@@ -402,11 +463,7 @@ export function SidePanelApp() {
       const outcome = progress.result;
       if (!outcome) throw new Error('源码任务已结束，但未返回最终结果');
       if (outcome.kind === 'cancelled') {
-        setChat(entries => [...entries, {
-          id: crypto.randomUUID(),
-          role: 'assistant',
-          text: outcome.message
-        }]);
+        await appendChat('assistant', outcome.message, undefined, workspace.revision);
         return;
       }
       if (outcome.kind === 'clarification') {
@@ -416,12 +473,7 @@ export function SidePanelApp() {
           allowFreeText: outcome.allowFreeText
         };
         setPendingClarification(clarification);
-        setChat(entries => [...entries, {
-          id: crypto.randomUUID(),
-          role: 'assistant',
-          text: outcome.question,
-          clarification
-        }]);
+        await appendChat('assistant', outcome.question, clarification, workspace.revision);
         return;
       }
       if (outcome.kind === 'failed') throw new Error(`[${outcome.code}] ${outcome.message}`);
@@ -431,11 +483,7 @@ export function SidePanelApp() {
         canUndo: outcome.revision > 0,
         canRedo: false
       } : current);
-      setChat(entries => [...entries, {
-        id: crypto.randomUUID(),
-        role: 'assistant',
-        text: outcome.summary
-      }]);
+      await appendChat('assistant', outcome.summary, undefined, outcome.revision);
       // 已满足需求时服务端不会产生新 Revision，预览页也无需重载。
       if (!outcome.unchanged) await command({ type: 'reloadPreview' });
     } catch (error) {

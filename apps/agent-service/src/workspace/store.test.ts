@@ -200,6 +200,37 @@ describe('SourceWorkspaceStore', () => {
     expect(store.conversation(workspace.workspaceId)).toEqual([]);
   });
 
+  it('keeps user-visible workspace chat with revisions and hides undone messages', async () => {
+    const store = createStore();
+    const workspace = store.create(snapshot);
+    const turnId = crypto.randomUUID();
+    store.appendChat(workspace.workspaceId, {
+      id: turnId,
+      role: 'user',
+      text: '把查询改为确认',
+      createdAt: '2026-08-08T00:00:00.000Z',
+      revision: 0
+    });
+    const tools = store.tools(workspace.workspaceId);
+    await tools.replaceInElement('source-0', '查 询', '确 认');
+    await tools.commit('修改为确认');
+    store.recordTurn(workspace.workspaceId, turnRequest('把查询改为确认', { turnId }), {
+      kind: 'completed', summary: '已修改为确认', revision: 1, modelCalls: 1, toolCalls: 1
+    });
+    store.appendChat(workspace.workspaceId, {
+      id: crypto.randomUUID(),
+      role: 'assistant',
+      text: '已修改为确认',
+      createdAt: '2026-08-08T00:01:00.000Z',
+      revision: 1
+    });
+    expect(store.chat(workspace.workspaceId).map(entry => entry.text))
+      .toEqual(['把查询改为确认', '已修改为确认']);
+
+    store.undo(workspace.workspaceId);
+    expect(store.chat(workspace.workspaceId)).toEqual([]);
+  });
+
   it('filters conversation by revision across undo, redo, and a new branch', async () => {
     const store = createStore();
     const workspace = store.create(snapshot);

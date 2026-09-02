@@ -18,7 +18,8 @@ import {
   type SnapshotMetrics,
   type StaticSnapshot,
   type SourceTurnRequest,
-  type SourceTurnResponse
+  type SourceTurnResponse,
+  type WorkspaceChatEntry
 } from '@ui-agent/contracts';
 import { compileSourceWorkspace, refreshWorkspaceIndexes } from './compiler';
 import { validateControlledInteractions } from './interactions';
@@ -59,6 +60,8 @@ interface WorkspaceManifest {
   maxRevision: number;
   summaries: Array<{ revision: number; summary: string; timestamp: string }>;
   conversation?: WorkspaceConversationTurn[];
+  /** User-visible discussion history. It is separate from the compact Agent context above. */
+  chat?: WorkspaceChatEntry[];
 }
 
 interface WorkspaceConversationTurn extends CodingAgentConversationTurn {
@@ -583,7 +586,8 @@ export class SourceWorkspaceStore {
       revision: 0,
       maxRevision: 0,
       summaries: [{ revision: 0, summary: '初始静态副本', timestamp: now }],
-      conversation: []
+      conversation: [],
+      chat: []
     });
     return this.get(workspaceId)!;
   }
@@ -742,10 +746,34 @@ export class SourceWorkspaceStore {
       .map(({ instruction, result }) => ({ instruction, result }));
   }
 
+  chat(workspaceId: string): WorkspaceChatEntry[] {
+    const directory = this.workspacePath(workspaceId);
+    if (!this.get(workspaceId)) throw new Error('静态源码工作区不存在');
+    const manifest = this.readManifest(directory);
+    return (manifest.chat ?? [])
+      .filter(entry => entry.revision <= manifest.revision)
+      .slice(-200);
+  }
+
+  appendChat(workspaceId: string, entry: WorkspaceChatEntry): void {
+    const directory = this.workspacePath(workspaceId);
+    if (!this.get(workspaceId)) throw new Error('静态源码工作区不存在');
+    const manifest = this.readManifest(directory);
+    if (entry.revision > manifest.revision) {
+      throw new Error('对话记录不能关联到尚未生成的副本版本');
+    }
+    if ((manifest.chat ?? []).some(item => item.id === entry.id)) return;
+    this.writeManifest(directory, {
+      ...manifest,
+      updatedAt: new Date().toISOString(),
+      chat: [...(manifest.chat ?? []), entry].slice(-200)
+    });
+  }
+
   recordTurn(workspaceId: string, request: SourceTurnRequest, response: SourceTurnResponse): void {
-    if (response.kind === 'failed' || response.kind === 'cancelled') return;
     const directory = this.workspacePath(workspaceId);
     const manifest = this.readManifest(directory);
+    if (response.kind === 'failed' || response.kind === 'cancelled') return;
     const result = response.kind === 'completed' ? response.summary : response.question;
     const revision = response.kind === 'completed' ? response.revision : manifest.revision;
     const retained = response.kind === 'completed'
@@ -763,6 +791,19 @@ export class SourceWorkspaceStore {
     this.writeManifest(directory, {
       ...manifest,
       updatedAt: new Date().toISOString(),
+      chat: response.kind === 'completed'
+        ? (manifest.chat ?? []).filter(entry => entry.revision < response.revision).map(entry => {
+          if (entry.id === request.turnId) return { ...entry, revision: response.revision };
+          if (request.replyToClarificationId && entry.clarification?.clarificationId === request.replyToClarificationId) {
+            return {
+                ...entry,
+                revision: response.revision,
+                clarification: { ...entry.clarification, resolved: true }
+              };
+          }
+          return entry;
+        })
+        : manifest.chat,
       conversation: [
         ...linked,
         {

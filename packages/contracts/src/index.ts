@@ -264,6 +264,32 @@ export const sourceTurnProgressSchema = z.object({
 });
 export type SourceTurnProgress = z.infer<typeof sourceTurnProgressSchema>;
 
+/** A user-visible message that belongs to a static source workspace. */
+export const workspaceClarificationPromptSchema = z.object({
+  clarificationId: z.string().uuid(),
+  options: z.array(clarificationOptionSchema).min(2).max(4).optional(),
+  allowFreeText: z.boolean(),
+  resolved: z.boolean().optional()
+});
+export type WorkspaceClarificationPrompt = z.infer<typeof workspaceClarificationPromptSchema>;
+
+export const workspaceChatEntrySchema = z.object({
+  id: z.string().uuid(),
+  role: z.enum(['user', 'assistant']),
+  text: z.string().min(1).max(30_000),
+  createdAt: z.string().datetime(),
+  /** Workspace revision this message describes. Messages on undone branches are hidden. */
+  revision: z.number().int().nonnegative(),
+  clarification: workspaceClarificationPromptSchema.optional()
+});
+export type WorkspaceChatEntry = z.infer<typeof workspaceChatEntrySchema>;
+
+export const workspaceConversationResponseSchema = z.object({
+  workspaceId: z.string().uuid(),
+  entries: z.array(workspaceChatEntrySchema).max(200)
+});
+export type WorkspaceConversationResponse = z.infer<typeof workspaceConversationResponseSchema>;
+
 export const sourceWorkspaceCreatedSchema = z.object({
   workspaceId: z.string().uuid(),
   previewUrl: z.string().url(),
