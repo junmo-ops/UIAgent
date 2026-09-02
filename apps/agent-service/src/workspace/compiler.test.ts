@@ -73,4 +73,13 @@ describe('source workspace compiler', () => {
     expect(sourceMap.entries.find((entry: { sourceId: string }) => entry.sourceId === 'source-1').line)
       .toBeGreaterThan(sourceMap.entries.find((entry: { sourceId: string }) => entry.sourceId === 'source-0').line);
   });
+
+  it('removes anonymous empty paragraphs introduced by HTML serialization', () => {
+    const result = compileSourceWorkspace(
+      '<!doctype html><html><body><p></p><div data-ui-source-id="source-0">需求描述</div><p></p></body></html>'
+    );
+
+    expect(result.html).not.toContain('<p></p>');
+    expect(result.html).toContain('需求描述');
+  });
 });

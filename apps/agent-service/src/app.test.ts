@@ -294,7 +294,7 @@ describe('agent service', () => {
       adapterId: 'test-coding-agent',
       async run(turn, tools) {
         await tools.replaceInElement('source-0', '查询', '确定');
-        const revision = await tools.commit('修改按钮文案');
+        const { revision } = await tools.commit('修改按钮文案');
         const response = {
           kind: 'completed' as const,
           summary: '已修改按钮文案',

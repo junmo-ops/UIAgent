@@ -150,6 +150,8 @@ export const sourceTurnResponseSchema = z.discriminatedUnion('kind', [
     kind: z.literal('completed'),
     summary: z.string(),
     revision: z.number().int().nonnegative(),
+    /** 当前副本已经满足目标时为 true；不会创建新的 Revision。 */
+    unchanged: z.boolean().optional(),
     modelCalls: z.number().int().nonnegative(),
     toolCalls: z.number().int().nonnegative()
   }),
@@ -159,6 +161,10 @@ export const sourceTurnResponseSchema = z.discriminatedUnion('kind', [
     question: z.string(),
     options: z.array(clarificationOptionSchema).min(2).max(4).optional(),
     allowFreeText: z.boolean().default(true)
+  }),
+  z.object({
+    kind: z.literal('cancelled'),
+    message: z.string()
   }),
   z.object({
     kind: z.literal('failed'),
@@ -240,7 +246,7 @@ export type AssistantStreamEvent = z.infer<typeof assistantStreamEventSchema>;
 export const sourceTurnProgressSchema = z.object({
   workspaceId: z.string().uuid(),
   turnId: z.string().min(1),
-  status: z.enum(['running', 'completed', 'failed']),
+  status: z.enum(['running', 'cancelling', 'cancelled', 'completed', 'failed']),
   phase: z.enum(['analyzing', 'locating', 'reading', 'editing', 'validating', 'finishing']),
   message: z.string(),
   modelCalls: z.number().int().nonnegative(),

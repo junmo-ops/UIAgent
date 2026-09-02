@@ -93,6 +93,8 @@ export function createApp(
     return url.toString();
   };
   const sourceProgress = new SourceTurnProgressStore();
+  const sourceTurnControllers = new Map<string, AbortController>();
+  const sourceTurnKey = (workspaceId: string, turnId: string) => `${workspaceId}:${turnId}`;
   type AppBindings = { Variables: { principal: AuthPrincipal } };
   const authenticate: MiddlewareHandler<AppBindings> = async (c, next) => {
     const principal = await authenticator.authenticate(c.req.raw);
@@ -118,18 +120,38 @@ export function createApp(
     }
     await next();
   };
-  const executeSourceTurn = async (workspaceId: string, request: ReturnType<typeof sourceTurnRequestSchema.parse>) => {
+  const executeSourceTurn = async (
+    workspaceId: string,
+    request: ReturnType<typeof sourceTurnRequestSchema.parse>,
+    signal: AbortSignal
+  ) => {
     const startedAt = Date.now();
+    let rollbackWorkspace: (() => Promise<void>) | undefined;
     try {
       const conversation = workspaceStore.conversation(workspaceId);
       const tools = workspaceStore.tools(workspaceId);
-      const run = await codingAgent.run({ workspaceId, request, conversation }, tools, event => sourceProgress.observe(workspaceId, request.turnId, event));
+      rollbackWorkspace = tools.rollback;
+      const run = await codingAgent.run(
+        { workspaceId, request, conversation },
+        tools,
+        event => sourceProgress.observe(workspaceId, request.turnId, event),
+        signal
+      );
       const result = run.response;
       sourceProgress.complete(workspaceId, request.turnId, result, run.checkpoint.modelCalls, run.checkpoint.toolCalls);
       workspaceStore.recordTurn(workspaceId, request, result);
       logStore.recordSourceTurn(workspaceId, request, conversation, result, run.steps, Date.now() - startedAt, { adapterId: codingAgent.adapterId, checkpoint: run.checkpoint });
     } catch (error) {
-      const result = { kind: 'failed' as const, code: 'SOURCE_TURN_ERROR', message: error instanceof Error ? error.message : '源码修改失败' };
+      if (signal.aborted) {
+        try {
+          await rollbackWorkspace?.();
+        } catch {
+          // Keep cancellation as the primary outcome.
+        }
+      }
+      const result = signal.aborted
+        ? { kind: 'cancelled' as const, message: '已停止本轮修改，未提交任何变更。' }
+        : { kind: 'failed' as const, code: 'SOURCE_TURN_ERROR', message: error instanceof Error ? error.message : '源码修改失败' };
       logStore.recordSourceTurn(workspaceId, request, [], result, [], Date.now() - startedAt);
       sourceProgress.fail(workspaceId, request.turnId, result.message, result);
     }
@@ -349,7 +371,11 @@ export function createApp(
       const existing = sourceProgress.get(workspaceId, request.turnId);
       if (existing) return c.json(sourceTurnAcceptedSchema.parse({ kind: 'accepted', turnId: request.turnId }), 202);
       sourceProgress.start(workspaceId, request.turnId);
-      void executeSourceTurn(workspaceId, request);
+      const controller = new AbortController();
+      const key = sourceTurnKey(workspaceId, request.turnId);
+      sourceTurnControllers.set(key, controller);
+      void executeSourceTurn(workspaceId, request, controller.signal)
+        .finally(() => sourceTurnControllers.delete(key));
       return c.json(sourceTurnAcceptedSchema.parse({ kind: 'accepted', turnId: request.turnId }), 202);
     })
     .get('/v1/workspaces/:workspaceId/turns/:turnId/progress', c => {
@@ -357,6 +383,20 @@ export function createApp(
       return progress
         ? c.json(sourceTurnProgressSchema.parse(progress))
         : c.json({ code: 'TURN_PROGRESS_NOT_FOUND', message: '该 Turn 尚未开始或进度已清理' }, 404);
+    })
+    .post('/v1/workspaces/:workspaceId/turns/:turnId/cancel', c => {
+      const workspaceId = c.req.param('workspaceId');
+      const turnId = c.req.param('turnId');
+      const progress = sourceProgress.get(workspaceId, turnId);
+      if (!progress) return c.json({ code: 'TURN_PROGRESS_NOT_FOUND', message: '该 Turn 尚未开始或进度已清理' }, 404);
+      if (progress.status !== 'running') {
+        return c.json({ code: 'TURN_NOT_RUNNING', message: '本轮任务已结束，无法停止' }, 409);
+      }
+      const controller = sourceTurnControllers.get(sourceTurnKey(workspaceId, turnId));
+      if (!controller) return c.json({ code: 'TURN_CANCEL_UNAVAILABLE', message: '本轮任务当前无法停止' }, 409);
+      sourceProgress.requestCancellation(workspaceId, turnId);
+      controller.abort(new Error('用户取消本轮修改'));
+      return c.json({ kind: 'cancelling', turnId }, 202);
     })
     .post('/v1/workspaces/:workspaceId/undo', c => {
       try {

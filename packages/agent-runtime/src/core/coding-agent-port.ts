@@ -43,7 +43,10 @@ export interface CodingWorkspaceTools {
     replacements: Array<{ search: string; replace: string }>
   ): Promise<string>;
   validate(): Promise<string>;
-  commit(summary: string): Promise<number>;
+  commit(summary: string, options?: { allowNoChanges?: boolean }): Promise<{
+    revision: number;
+    changed: boolean;
+  }>;
   rollback(): Promise<void>;
 }
 
@@ -75,7 +78,7 @@ export interface CodingAgentCheckpoint {
   adapterId: string;
   workspaceId: string;
   turnId: string;
-  status: 'running' | 'completed' | 'clarification' | 'failed';
+  status: 'running' | 'cancelled' | 'completed' | 'clarification' | 'failed';
   modelCalls: number;
   toolCalls: number;
   stepCount: number;
@@ -125,6 +128,7 @@ export interface CodingAgentPort {
   run(
     turn: CodingAgentTurn,
     tools: CodingWorkspaceTools,
-    observe?: CodingAgentObserver
+    observe?: CodingAgentObserver,
+    signal?: AbortSignal
   ): Promise<CodingAgentRunResult>;
 }

@@ -90,4 +90,27 @@ describe('SourceTurnProgressStore', () => {
     expect(JSON.stringify(progress)).not.toContain('secret source');
     expect(progress.activities[0]).toMatchObject({ status: 'failed', detail: 'snapshot.css' });
   });
+
+  it('keeps cancellation visible until the agent has rolled back its working copy', () => {
+    const store = new SourceTurnProgressStore();
+    store.start(workspaceId, request.turnId);
+
+    expect(store.requestCancellation(workspaceId, request.turnId)).toMatchObject({
+      status: 'cancelling',
+      phase: 'finishing',
+      message: '正在停止本轮修改…'
+    });
+
+    store.complete(workspaceId, request.turnId, {
+      kind: 'cancelled',
+      message: '已停止本轮修改，未提交任何变更。'
+    }, 2, 1);
+
+    expect(store.get(workspaceId, request.turnId)).toMatchObject({
+      status: 'cancelled',
+      phase: 'finishing',
+      message: '已停止本轮修改，未提交变更',
+      result: { kind: 'cancelled' }
+    });
+  });
 });

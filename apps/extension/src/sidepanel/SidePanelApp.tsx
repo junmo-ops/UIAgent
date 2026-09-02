@@ -51,7 +51,7 @@ interface ActiveWorkspace extends SourceWorkspaceInfo {
   tabId: number;
   sourceTabId?: number;
 }
-type IconName = 'sparkle' | 'target' | 'edit' | 'snapshot' | 'undo' | 'redo' | 'reset' | 'download' | 'upload' | 'arrow' | 'back' | 'more';
+type IconName = 'sparkle' | 'target' | 'edit' | 'snapshot' | 'undo' | 'redo' | 'reset' | 'download' | 'upload' | 'arrow' | 'stop' | 'back' | 'more';
 
 function UiIcon({ name }: { name: IconName }) {
   const paths: Record<IconName, React.ReactNode> = {
@@ -65,6 +65,7 @@ function UiIcon({ name }: { name: IconName }) {
     download: <><path d="M12 3v12" /><path d="m7.5 11 4.5 4.5 4.5-4.5" /><path d="M5 21h14" /></>,
     upload: <><path d="M12 21V9" /><path d="m7.5 13.5 4.5-4.5 4.5 4.5" /><path d="M5 3h14" /></>,
     arrow: <><path d="M12 19V5" /><path d="m6.5 10.5 5.5-5.5 5.5 5.5" /></>,
+    stop: <rect x="7.5" y="7.5" width="9" height="9" rx="1.25" fill="currentColor" stroke="none" />,
     back: <><path d="m10 7-5 5 5 5" /><path d="M5 12h14" /></>,
     more: <><circle cx="5" cy="12" r="1" fill="currentColor" stroke="none" /><circle cx="12" cy="12" r="1" fill="currentColor" stroke="none" /><circle cx="19" cy="12" r="1" fill="currentColor" stroke="none" /></>
   };
@@ -392,14 +393,22 @@ export function SidePanelApp() {
       if (!response.ok) throw await serviceResponseError(response, '源码 Agent 返回');
       sourceTurnAcceptedSchema.parse(await response.json());
       let progress: SourceTurnProgress | undefined;
-      while (!progress || progress.status === 'running') {
+      while (!progress || progress.status === 'running' || progress.status === 'cancelling') {
         progress = await refreshProgress();
-        if (!progress || progress.status === 'running') {
+        if (!progress || progress.status === 'running' || progress.status === 'cancelling') {
           await new Promise<void>(resolve => window.setTimeout(resolve, 650));
         }
       }
       const outcome = progress.result;
       if (!outcome) throw new Error('源码任务已结束，但未返回最终结果');
+      if (outcome.kind === 'cancelled') {
+        setChat(entries => [...entries, {
+          id: crypto.randomUUID(),
+          role: 'assistant',
+          text: outcome.message
+        }]);
+        return;
+      }
       if (outcome.kind === 'clarification') {
         const clarification = {
           clarificationId: outcome.clarificationId ?? crypto.randomUUID(),
@@ -427,12 +436,32 @@ export function SidePanelApp() {
         role: 'assistant',
         text: outcome.summary
       }]);
-      await command({ type: 'reloadPreview' });
+      // 已满足需求时服务端不会产生新 Revision，预览页也无需重载。
+      if (!outcome.unchanged) await command({ type: 'reloadPreview' });
     } catch (error) {
       fail(error);
     } finally {
       setSnapshotBusy(false);
       setSourceProgress(undefined);
+    }
+  };
+
+  const cancelSourceTurn = async () => {
+    if (!sourceWorkspace || !sourceProgress || sourceProgress.status !== 'running') return;
+    try {
+      const response = await fetchAgentService(
+        `${serviceUrl.replace(/\/$/, '')}/v1/workspaces/${sourceWorkspace.workspaceId}/turns/${sourceProgress.turnId}/cancel`,
+        { method: 'POST' }
+      );
+      if (!response.ok) throw await serviceResponseError(response, '停止源码 Agent 返回');
+      setSourceProgress(current => current ? {
+        ...current,
+        status: 'cancelling',
+        phase: 'finishing',
+        message: '正在停止本轮修改…'
+      } : current);
+    } catch (error) {
+      fail(error);
     }
   };
 
@@ -770,22 +799,37 @@ export function SidePanelApp() {
                 <Tooltip title="导出当前可视区域"><Button className="export-action" type="text" shape="circle" aria-label="导出截图" disabled={busy} icon={<UiIcon name="download" />} onClick={exportScreenshot} /></Tooltip>
               </div>
             ) : <div />}
-            <Tooltip title="发送">
-              <Button
-                className="send-button"
-                type="primary"
-                shape="circle"
-                aria-label="发送"
-                disabled={
-                  busy
-                  || !instruction.trim()
-                  || Boolean(pendingClarification && !pendingClarification.allowFreeText)
-                }
-                loading={busy}
-                icon={!busy && <UiIcon name="arrow" />}
-                onClick={submit}
-              />
-            </Tooltip>
+            {sourceProgress && (sourceProgress.status === 'running' || sourceProgress.status === 'cancelling') ? (
+              <Tooltip title={sourceProgress.status === 'cancelling' ? '正在停止' : '停止生成'}>
+                <Button
+                  className="send-button stop-button"
+                  type="primary"
+                  shape="circle"
+                  aria-label={sourceProgress.status === 'cancelling' ? '正在停止' : '停止生成'}
+                  disabled={sourceProgress.status === 'cancelling'}
+                  loading={sourceProgress.status === 'cancelling'}
+                  icon={sourceProgress.status === 'running' ? <UiIcon name="stop" /> : undefined}
+                  onClick={() => void cancelSourceTurn()}
+                />
+              </Tooltip>
+            ) : (
+              <Tooltip title="发送">
+                <Button
+                  className="send-button"
+                  type="primary"
+                  shape="circle"
+                  aria-label="发送"
+                  disabled={
+                    busy
+                    || !instruction.trim()
+                    || Boolean(pendingClarification && !pendingClarification.allowFreeText)
+                  }
+                  loading={busy}
+                  icon={!busy && <UiIcon name="arrow" />}
+                  onClick={submit}
+                />
+              </Tooltip>
+            )}
           </div>
         </footer>}
       </section>

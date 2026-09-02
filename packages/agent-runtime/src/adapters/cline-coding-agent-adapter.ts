@@ -67,6 +67,7 @@ const clineSourceRules = [
   '不得添加 script、事件属性、远程资源、接口请求、表单 action 或 javascript: URL。',
   CONTROLLED_INTERACTION_INSTRUCTIONS,
   '每次修改后检查工具结果；目标达成后先调用 validate_workspace。若提示元素被 overflow 裁剪，必须调整父容器尺寸、overflow 或定位，不能直接声明完成。',
+  '若已验证当前副本本来就满足用户目标、且本轮无需改动，先调用 declare_intent 和 validate_workspace；随后调用 finish，并明确 outcome=already_satisfied，同时写明源码证据。不得把未验证的猜测当作已满足。',
   '不要只用自然语言声称完成。没有调用 finish 或 clarify，本轮就不算完成。',
   '不要做与用户请求无关的重构。'
 ].join('\n');
@@ -81,6 +82,7 @@ const BUDGETED_READ_ACTIONS = new Set([
 
 export interface ClineAgentInstance {
   run(input: string): Promise<AgentRunResult>;
+  abort?(reason?: unknown): void;
 }
 
 export interface ClineAgentFactoryInput {
@@ -104,7 +106,13 @@ export interface ClineCodingAgentOptions {
 }
 
 type Completion =
-  | { kind: 'completed'; summary: string; validation: string; revision: number }
+  | {
+      kind: 'completed';
+      summary: string;
+      validation: string;
+      revision: number;
+      unchanged: boolean;
+    }
   | {
       kind: 'clarification';
       question: string;
@@ -116,6 +124,13 @@ interface ClarifyToolInput {
   question: string;
   options?: ClarificationOption[];
   allowFreeText?: boolean;
+}
+
+class CodingAgentCancelledError extends Error {
+  constructor() {
+    super('用户已停止本轮修改');
+    this.name = 'CodingAgentCancelledError';
+  }
 }
 
 function safeEmit(observe: CodingAgentObserver | undefined, event: Parameters<CodingAgentObserver>[0]): void {
@@ -177,7 +192,8 @@ export class ClineCodingAgentAdapter implements CodingAgentPort {
   async run(
     turn: CodingAgentTurn,
     workspace: CodingWorkspaceTools,
-    observe?: CodingAgentObserver
+    observe?: CodingAgentObserver,
+    signal?: AbortSignal
   ): Promise<CodingAgentRunResult> {
     const startedAt = new Date().toISOString();
     const steps: CodingAgentStep[] = [];
@@ -189,6 +205,12 @@ export class ClineCodingAgentAdapter implements CodingAgentPort {
     let intentDeclared = false;
     const changedPositioningClassNames = new Set<string>();
     const repeatedFailures = new Map<string, number>();
+    let activeAgent: ClineAgentInstance | undefined;
+    const throwIfCancelled = () => {
+      if (signal?.aborted) throw new CodingAgentCancelledError();
+    };
+    const abortActiveAgent = () => activeAgent?.abort?.(signal?.reason);
+    signal?.addEventListener('abort', abortActiveAgent, { once: true });
     let checkpoint: CodingAgentCheckpoint = {
       version: 1,
       adapterId: this.adapterId,
@@ -256,6 +278,7 @@ export class ClineCodingAgentAdapter implements CodingAgentPort {
       context: AgentToolContext,
       operation: () => Promise<string>
     ): Promise<string> => {
+      throwIfCancelled();
       const remainingAfterThisCall = Math.max(0, this.maxIterations - context.iteration);
       const finalizationStartsAt = Math.max(1, this.maxIterations - FINALIZATION_WINDOW + 1);
       if (BUDGETED_READ_ACTIONS.has(action) && context.iteration >= finalizationStartsAt) {
@@ -265,6 +288,7 @@ export class ClineCodingAgentAdapter implements CodingAgentPort {
       }
       try {
         const result = await operation();
+        throwIfCancelled();
         const guidedResult = remainingAfterThisCall <= 5
           ? `[运行预算] 当前第 ${context.iteration}/${this.maxIterations} 轮，本次后最多剩余 ${remainingAfterThisCall} 轮。请停止扩展范围，完成必要修改并预留 validate_workspace 与 finish。\n\n${result}`
           : result;
@@ -820,15 +844,26 @@ export class ClineCodingAgentAdapter implements CodingAgentPort {
           () => workspace.validate()
         )
       }),
-      createTool<{ summary: string }, string>({
+      createTool<{
+        summary: string;
+        outcome?: 'changed' | 'already_satisfied';
+        evidence?: string;
+      }, string>({
         name: 'finish',
-        description: '目标已经达成时，校验并提交工作副本，结束本轮。',
+        description: '目标已经达成时，校验并提交工作副本，结束本轮。若已验证当前副本本来就满足需求且无需改动，设置 outcome=already_satisfied，并提供源码证据；此时不会创建新 Revision。',
         inputSchema: objectSchema({
-          summary: stringProperty('面向用户的简洁修改说明。')
+          summary: stringProperty('面向用户的简洁修改说明。'),
+          outcome: {
+            type: 'string',
+            enum: ['changed', 'already_satisfied'],
+            description: '本轮是否产生了源码修改；默认 changed。'
+          },
+          evidence: stringProperty('仅 outcome=already_satisfied 时填写：说明已读取和验证的当前源码证据。')
         }, ['summary']),
         lifecycle: { completesRun: true },
         execute: async (input, context) => {
           try {
+            throwIfCancelled();
             requireIntentDeclared();
             if (introducedFixedPosition && !hasExplicitGlobalPlacement(turn.request.instruction)) {
               throw new Error('用户没有明确要求全局定位，本轮却新增了 position:fixed；请围绕当前选区或其语义容器重新定位');
@@ -837,9 +872,23 @@ export class ClineCodingAgentAdapter implements CodingAgentPort {
               throw new Error(`本轮新增了 ${newSourceIds.size} 个源码元素，finish 前必须调用 validate_spatial_scope 校验其参照容器`);
             }
             const validation = await workspace.validate();
-            const revision = await workspace.commit(input.summary);
-            completion = { kind: 'completed', summary: input.summary, validation, revision };
-            const result = `${input.summary}（${validation}；revision=${revision}）`;
+            const commit = await workspace.commit(input.summary, {
+              allowNoChanges: input.outcome === 'already_satisfied' && Boolean(input.evidence?.trim())
+            });
+            if (!commit.changed && input.outcome !== 'already_satisfied') {
+              throw new Error('当前副本没有新增源码修改；仅在确认目标已满足时，才能以 outcome=already_satisfied 结束本轮');
+            }
+            const summary = commit.changed
+              ? input.summary
+              : `当前副本已满足该需求，无需重复修改。${input.summary}`;
+            completion = {
+              kind: 'completed',
+              summary,
+              validation,
+              revision: commit.revision,
+              unchanged: !commit.changed
+            };
+            const result = `${summary}（${validation}；revision=${commit.revision}${commit.changed ? '' : '；未创建新版本'}）`;
             record('finish', input, context, result, undefined, false);
             return result;
           } catch (error) {
@@ -887,8 +936,10 @@ export class ClineCodingAgentAdapter implements CodingAgentPort {
 
     let response: SourceTurnResponse;
     try {
+      throwIfCancelled();
       const files = await workspace.listFiles();
-      const agent = this.factory({
+      throwIfCancelled();
+      activeAgent = this.factory({
         providerId: 'openai-compatible',
         modelId: this.options.modelName,
         apiKey: this.options.apiKey,
@@ -897,7 +948,8 @@ export class ClineCodingAgentAdapter implements CodingAgentPort {
         tools,
         maxIterations: this.maxIterations
       });
-      let result = await agent.run(JSON.stringify({
+      if (signal?.aborted) abortActiveAgent();
+      let result = await activeAgent.run(JSON.stringify({
         instruction: turn.request.instruction,
         selectedSourceId: turn.request.sourceId,
         replyToClarificationId: turn.request.replyToClarificationId,
@@ -905,18 +957,20 @@ export class ClineCodingAgentAdapter implements CodingAgentPort {
         conversation: turn.conversation.slice(-8),
         files
       }));
+      throwIfCancelled();
       // Some compatible runtimes treat completionPolicy as advisory and may
       // stop naturally after validate_workspace. Give the same Agent one
       // bounded finalization turn so a validated edit is not rolled back only
       // because the model omitted the lifecycle tool call.
       if (!completion && result.status === 'completed' && !result.error) {
-        const finalizationResult = await agent.run(JSON.stringify({
+        const finalizationResult = await activeAgent.run(JSON.stringify({
           instruction: '本轮源码修改与 validate_workspace 已完成。请不要继续读取或修改；现在必须立即调用 finish 提交本轮结果。如果无法安全提交，调用 clarify 说明原因。',
           selectedSourceId: turn.request.sourceId,
           conversation: turn.conversation.slice(-2),
           files
         }));
         result = finalizationResult;
+        throwIfCancelled();
       }
       checkpoint = {
         ...checkpoint,
@@ -927,6 +981,7 @@ export class ClineCodingAgentAdapter implements CodingAgentPort {
           kind: 'completed',
           summary: `${completion.summary}（${completion.validation}）`,
           revision: completion.revision,
+          unchanged: completion.unchanged,
           modelCalls: checkpoint.modelCalls,
           toolCalls: checkpoint.toolCalls
         };
@@ -950,8 +1005,13 @@ export class ClineCodingAgentAdapter implements CodingAgentPort {
       } catch {
         // Preserve the primary agent error.
       }
-      response = failedResponse(error);
+      response = error instanceof CodingAgentCancelledError || signal?.aborted
+        ? { kind: 'cancelled', message: '已停止本轮修改，未提交任何变更。' }
+        : failedResponse(error);
     }
+
+    signal?.removeEventListener('abort', abortActiveAgent);
+    activeAgent = undefined;
 
     const timestamp = new Date().toISOString();
     checkpoint = {
@@ -960,7 +1020,9 @@ export class ClineCodingAgentAdapter implements CodingAgentPort {
         ? 'completed'
         : response.kind === 'clarification'
           ? 'clarification'
-          : 'failed',
+          : response.kind === 'cancelled'
+            ? 'cancelled'
+            : 'failed',
       updatedAt: timestamp
     };
     safeEmit(observe, {

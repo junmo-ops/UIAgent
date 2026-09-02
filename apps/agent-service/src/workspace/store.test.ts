@@ -65,9 +65,22 @@ describe('SourceWorkspaceStore', () => {
     expect(await tools.readStyleRule('ui-snapshot-style-0')).toContain('color:red');
     await tools.replaceInElement('source-0', '查 询', '确定');
     expect(await tools.validate()).toContain('校验通过');
-    expect(await tools.commit('修改按钮文案')).toBe(1);
+    expect(await tools.commit('修改按钮文案')).toEqual({ revision: 1, changed: true });
     expect(store.html(workspace.workspaceId)).toContain('确定');
     expect(store.get(workspace.workspaceId)).toMatchObject({ revision: 1, canUndo: true, canRedo: false });
+  });
+
+  it('returns the existing revision when a verified request needs no source change', async () => {
+    const store = createStore();
+    const workspace = store.create(snapshot);
+    const tools = store.tools(workspace.workspaceId);
+
+    await expect(tools.commit('重复执行相同需求')).rejects.toThrow('Agent 没有对静态源码产生修改');
+    expect(await tools.commit('当前副本已满足需求', { allowNoChanges: true })).toEqual({
+      revision: 0,
+      changed: false
+    });
+    expect(store.get(workspace.workspaceId)).toMatchObject({ revision: 0, canUndo: false, canRedo: false });
   });
 
   it('exports the current active revision and excludes trashed workspaces', () => {
@@ -537,7 +550,7 @@ describe('SourceWorkspaceStore', () => {
     });
     const tools = store.tools(workspace.workspaceId);
 
-    await tools.replaceText('snapshot.css', 'display:none', 'display:flex');
+    await tools.replaceText('snapshot.css', 'display:none;position:absolute', 'display:flex;position:absolute');
     await expect(tools.validate()).rejects.toThrow(/静态可见性校验失败.+source-11.+source-10/);
     await expect(tools.commit('展开历史会话')).rejects.toThrow('静态可见性校验失败');
     await tools.rollback();

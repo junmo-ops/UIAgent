@@ -51,6 +51,8 @@ describe('ClineAssistantRouterAdapter', () => {
     const router = adapter(async config => {
       expect(config.tools.map(item => item.name)).toEqual(['chat', 'edit_page', 'clarify']);
       expect(config.systemPrompt).toContain('不得使用关键词匹配');
+      expect(config.systemPrompt).toContain('用户故事、验收条件或结构化业务规则');
+      expect(config.systemPrompt).toContain('浏览器持久化');
       await tool<Record<string, never>>(config, 'chat').execute({}, context);
     });
 

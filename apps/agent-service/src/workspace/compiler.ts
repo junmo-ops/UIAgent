@@ -77,6 +77,22 @@ function sourceReadableHtml(html: string): string {
   return html.replace(/\s+(?=data-ui-source-id\s*=)/gi, '\n  ');
 }
 
+function removeSerializationArtifacts(document: Document): void {
+  // 捕获端或其他 HTML 序列化器在修复不规范的 <p>/<div> 嵌套时，可能补出
+  // 没有 sourceId、属性、内容和子节点的空段落。它们不属于原始可编辑节点，
+  // 但在预览浏览器中会命中 UA 默认 margin，导致副本出现额外纵向间距。
+  for (const element of [...document.querySelectorAll('p')]) {
+    if (
+      !element.hasAttribute('data-ui-source-id')
+      && element.attributes.length === 0
+      && element.children.length === 0
+      && !element.textContent?.trim()
+    ) {
+      element.remove();
+    }
+  }
+}
+
 function sourceLineMap(html: string): Map<string, number> {
   const result = new Map<string, number>();
   html.split('\n').forEach((line, index) => {
@@ -92,6 +108,7 @@ export function compileSourceWorkspace(
   options: SourceWorkspaceCompileOptions = {}
 ): CompiledSourceWorkspace {
   const { document } = parseHTML(inputHtml);
+  removeSerializationArtifacts(document);
   const baselineCss = [...document.querySelectorAll('style')]
     .map(element => element.textContent?.trim())
     .filter(Boolean);

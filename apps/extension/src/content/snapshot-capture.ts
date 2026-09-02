@@ -2,29 +2,14 @@ import { PROTOCOL_VERSION, staticSnapshotSchema, type SnapshotMetrics, type Stat
 
 const SNAPSHOT_OPTIMIZATION_VERSION = 'style-dedup-v1';
 
-const STYLE_PROPERTIES = [
-  'align-content', 'align-items', 'align-self', 'appearance', 'background-color',
-  'border-bottom-color', 'border-bottom-left-radius', 'border-bottom-right-radius',
-  'border-bottom-style', 'border-bottom-width', 'border-collapse', 'border-left-color',
-  'border-left-style', 'border-left-width', 'border-right-color', 'border-right-style',
-  'border-right-width', 'border-spacing', 'border-top-color', 'border-top-left-radius',
-  'border-top-right-radius', 'border-top-style', 'border-top-width', 'box-shadow',
-  'box-sizing', 'color', 'column-gap', 'cursor', 'display', 'fill', 'flex-basis',
-  'flex-direction', 'flex-grow', 'flex-shrink', 'flex-wrap', 'font-family',
-  'font-size', 'font-style', 'font-weight', 'gap', 'grid-auto-columns',
-  'grid-auto-flow', 'grid-auto-rows', 'grid-column', 'grid-row',
-  'grid-template-columns', 'grid-template-rows', 'height', 'inset', 'top', 'right',
-  'bottom', 'left', 'justify-content',
-  'justify-items', 'justify-self', 'letter-spacing', 'line-height', 'list-style',
-  'margin-bottom', 'margin-left', 'margin-right', 'margin-top', 'max-height',
-  'max-width', 'min-height', 'min-width', 'object-fit', 'opacity', 'order',
-  'outline-color', 'outline-offset', 'outline-style', 'outline-width', 'overflow',
-  'overflow-wrap', 'overflow-x', 'overflow-y', 'padding-bottom', 'padding-left',
-  'padding-right', 'padding-top', 'place-content', 'pointer-events', 'position',
-  'resize', 'row-gap', 'stroke', 'table-layout', 'text-align', 'text-decoration',
-  'text-overflow', 'text-transform', 'transform', 'transform-origin',
-  'vertical-align', 'visibility', 'white-space', 'width', 'word-break', 'z-index'
-] as const;
+const OMITTED_STYLE_PROPERTIES = new Set([
+  // 普通元素的 content 不影响渲染；伪元素在 capturePseudoStyle 中单独处理。
+  'content',
+  // 这两个历史属性可能引入非标准行为，不属于静态页面的视觉还原范围。
+  'behavior',
+  '-moz-binding'
+]);
+const MAX_STYLE_VALUE_LENGTH = 4_096;
 
 const BLOCKED_TAGS = new Set([
   'SCRIPT', 'NOSCRIPT', 'IFRAME', 'FRAME', 'OBJECT', 'EMBED', 'BASE',
@@ -59,6 +44,23 @@ function normalizeComputedStyleValue(property: string, value: string): string {
   return quotedStack ? quotedStack[2]!.trim() : value;
 }
 
+function computedPropertyNames(computed: CSSStyleDeclaration, overrides: Readonly<Record<string, string>>): string[] {
+  const properties = new Set<string>();
+  for (let index = 0; index < computed.length; index += 1) {
+    const property = computed.item(index).trim();
+    if (property) properties.add(property);
+  }
+  for (const property of Object.keys(overrides)) properties.add(property);
+  return [...properties];
+}
+
+function isCapturableStyle(property: string, value: string): boolean {
+  if (!property || property.startsWith('--') || OMITTED_STYLE_PROPERTIES.has(property)) return false;
+  if (!value || value.length > MAX_STYLE_VALUE_LENGTH) return false;
+  // 不把外部背景、光标、滤镜等资源写进静态副本；纯色、渐变等无资源值会保留。
+  return !/url\s*\(/i.test(value);
+}
+
 function copyLiveState(source: Element, clone: Element): void {
   if (source instanceof HTMLInputElement && clone instanceof HTMLInputElement) {
     clone.value = source.value;
@@ -83,11 +85,9 @@ function computedStyleDeclarations(
   overrides: Readonly<Record<string, string>> = {}
 ): string[] {
   const declarations: string[] = [];
-  for (const property of STYLE_PROPERTIES) {
+  for (const property of computedPropertyNames(computed, overrides)) {
     const value = (overrides[property] ?? computed.getPropertyValue(property)).trim();
-    // CSS URL 可能包含远程背景、字体或光标。静态需求示意不依赖这些资源，
-    // 统一丢弃，避免混合 data:/remote fallback 绕过单值判断。
-    if (!value || /url\s*\(/i.test(value)) continue;
+    if (!isCapturableStyle(property, value)) continue;
     declarations.push(`${property}:${normalizeComputedStyleValue(property, value)}`);
   }
   return declarations;
@@ -210,6 +210,22 @@ function sanitizeTree(sourceRoot: HTMLElement, cloneRoot: HTMLElement, registry:
   return pseudoRules;
 }
 
+function removeSerializationArtifacts(root: HTMLElement): void {
+  // 部分页面会在 <p> 内嵌入块级元素。浏览器实际 DOM 能正常展示，但将 HTML
+  // 跨文档序列化、再解析时会补出无属性的空 <p>。它们不属于采集到的源节点，
+  // 却会带上浏览器默认 margin，造成副本中凭空出现纵向留白。
+  for (const element of [...root.querySelectorAll('p')]) {
+    if (
+      !element.hasAttribute('data-ui-source-id')
+      && element.attributes.length === 0
+      && element.children.length === 0
+      && !element.textContent?.trim()
+    ) {
+      element.remove();
+    }
+  }
+}
+
 export function captureStaticSnapshot(sourceRoot: HTMLElement): StaticSnapshot {
   const cloneRoot = sourceRoot.cloneNode(true) as HTMLElement;
   const registry: StyleRegistry = { rules: new Map(), inlineStyleCharsBefore: 0 };
@@ -221,6 +237,7 @@ export function captureStaticSnapshot(sourceRoot: HTMLElement): StaticSnapshot {
       renderedRoot.setAttribute(attribute.name, attribute.value);
     }
     renderedRoot.innerHTML = cloneRoot.innerHTML;
+    removeSerializationArtifacts(renderedRoot);
   }
   const nodeCount = 1 + renderedRoot.querySelectorAll('*').length;
   const viewportWidth = Math.max(1, Math.round(innerWidth));

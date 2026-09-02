@@ -743,7 +743,7 @@ export class SourceWorkspaceStore {
   }
 
   recordTurn(workspaceId: string, request: SourceTurnRequest, response: SourceTurnResponse): void {
-    if (response.kind === 'failed') return;
+    if (response.kind === 'failed' || response.kind === 'cancelled') return;
     const directory = this.workspacePath(workspaceId);
     const manifest = this.readManifest(directory);
     const result = response.kind === 'completed' ? response.summary : response.question;
@@ -1255,14 +1255,18 @@ export class SourceWorkspaceStore {
         }
       },
       validate: async () => validateWorking(),
-      commit: async summary => {
+      commit: async (summary, options = {}) => {
         if (working['index.html'] === original['index.html'] && working['snapshot.css'] === original['snapshot.css']) {
-          throw new Error('Agent 没有对静态源码产生修改');
+          if (!options.allowNoChanges) throw new Error('Agent 没有对静态源码产生修改');
+          validateWorking();
+          const revision = this.readManifest(directory).revision;
+          close();
+          return { revision, changed: false };
         }
         validateWorking();
         const revision = this.commitWorkingCopy(workspaceId, working, summary);
         close();
-        return revision;
+        return { revision, changed: true };
       },
       rollback: async () => close()
     };

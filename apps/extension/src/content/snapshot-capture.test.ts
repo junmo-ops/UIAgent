@@ -14,18 +14,18 @@ function installDom(html: string) {
   vi.stubGlobal('location', { href: 'https://example.test/orders' });
   vi.stubGlobal('innerWidth', 1280);
   vi.stubGlobal('innerHeight', 800);
-  vi.stubGlobal('getComputedStyle', (element: HTMLElement, pseudo?: string) => ({
-    backgroundColor: element === window.document.body ? 'rgb(245, 245, 245)' : '',
-    getPropertyValue: (property: string) => {
-      if (pseudo === '::before' && element.classList.contains('modal-centered')) {
-        const values: Record<string, string> = {
-          content: '""', display: 'inline-block', height: '800px', 'vertical-align': 'middle'
-        };
-        return values[property] ?? '';
-      }
-      return element.style.getPropertyValue(property);
-    }
-  }));
+  vi.stubGlobal('getComputedStyle', (element: HTMLElement, pseudo?: string) => {
+    const values = pseudo === '::before' && element.classList.contains('modal-centered')
+      ? { content: '""', display: 'inline-block', height: '800px', 'vertical-align': 'middle' }
+      : Object.fromEntries([...element.style].map(property => [property, element.style.getPropertyValue(property)]));
+    const properties = Object.keys(values);
+    return {
+      backgroundColor: element === window.document.body ? 'rgb(245, 245, 245)' : '',
+      length: properties.length,
+      item: (index: number) => properties[index] ?? '',
+      getPropertyValue: (property: string) => values[property] ?? ''
+    };
+  });
   window.HTMLElement.prototype.getBoundingClientRect = () => ({
     x: 0, y: 0, width: 600, height: 300, top: 0, right: 600, bottom: 300, left: 0,
     toJSON: () => ({})
@@ -114,6 +114,30 @@ describe('captureStaticSnapshot', () => {
     expect(snapshot.html).toContain('取消');
     expect(snapshot.metrics?.uniqueStyleRuleCount).toBe(1);
     expect(snapshot.metrics?.styleDedupSavedChars).toBeGreaterThan(0);
+  });
+
+  it('keeps automatic computed styles and removes empty paragraphs introduced by serialization', () => {
+    const document = installDom(`<!doctype html><html><head><title>样式还原页</title></head><body>
+      <p id="description"></p>
+    </body></html>`);
+    const description = document.querySelector('#description') as HTMLElement;
+    const nestedBlock = document.createElement('div');
+    nestedBlock.textContent = '说明内容';
+    description.appendChild(nestedBlock);
+    const quickStart = document.createElement('div');
+    quickStart.textContent = '快捷开始';
+    quickStart.style.setProperty('background-image', 'linear-gradient(rgb(229, 238, 255), rgba(229, 238, 255, 0))');
+    quickStart.style.setProperty('clip-path', 'inset(0)');
+    quickStart.style.setProperty('--theme-color', 'red');
+    document.body.appendChild(quickStart);
+
+    const snapshot = captureStaticSnapshot(document.body as unknown as HTMLElement);
+
+    expect(snapshot.html).toContain('background-image:linear-gradient');
+    expect(snapshot.html).toContain('clip-path:inset(0)');
+    expect(snapshot.html).not.toContain('--theme-color:red');
+    expect(snapshot.html).not.toContain('<p></p>');
+    expect(snapshot.html).toContain('说明内容');
   });
 
   it('preserves fixed overlay offsets so an open modal remains visible', () => {

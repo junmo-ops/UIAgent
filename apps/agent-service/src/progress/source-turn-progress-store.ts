@@ -167,11 +167,12 @@ export class SourceTurnProgressStore {
     }
     if (event.type === 'coding-agent.turn.completed') {
       const failed = event.response.kind === 'failed';
+      const cancelled = event.response.kind === 'cancelled';
       this.values.set(this.key(workspaceId, turnId), {
         ...current,
-        status: failed ? 'failed' : 'completed',
+        status: cancelled ? 'cancelled' : failed ? 'failed' : 'completed',
         phase: 'finishing',
-        message: failed ? '本轮修改未完成' : '本轮处理完成',
+        message: cancelled ? '已停止本轮修改，未提交变更' : failed ? '本轮修改未完成' : '本轮处理完成',
         modelCalls: event.checkpoint.modelCalls,
         toolCalls: event.checkpoint.toolCalls,
         updatedAt: event.timestamp
@@ -191,6 +192,20 @@ export class SourceTurnProgressStore {
     });
   }
 
+  requestCancellation(workspaceId: string, turnId: string): SourceTurnProgress | undefined {
+    const current = this.get(workspaceId, turnId);
+    if (!current || current.status !== 'running') return current;
+    const next = {
+      ...current,
+      status: 'cancelling' as const,
+      phase: 'finishing' as const,
+      message: '正在停止本轮修改…',
+      updatedAt: new Date().toISOString()
+    };
+    this.values.set(this.key(workspaceId, turnId), next);
+    return next;
+  }
+
   complete(
     workspaceId: string,
     turnId: string,
@@ -201,9 +216,11 @@ export class SourceTurnProgressStore {
     const current = this.get(workspaceId, turnId) ?? this.start(workspaceId, turnId);
     this.values.set(this.key(workspaceId, turnId), {
       ...current,
-      status: result.kind === 'failed' ? 'failed' : 'completed',
+      status: result.kind === 'cancelled' ? 'cancelled' : result.kind === 'failed' ? 'failed' : 'completed',
       phase: 'finishing',
-      message: result.kind === 'failed' ? '本轮修改未完成' : '本轮处理完成',
+      message: result.kind === 'cancelled'
+        ? '已停止本轮修改，未提交变更'
+        : result.kind === 'failed' ? '本轮修改未完成' : '本轮处理完成',
       modelCalls,
       toolCalls,
       result,

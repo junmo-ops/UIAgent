@@ -56,7 +56,7 @@ async function declareIntent(config: ClineAgentFactoryInput, iteration: number):
   }, context(iteration));
 }
 
-function workspaceTools() {
+function workspaceTools(commitResult = { revision: 2, changed: true }) {
   let html = '<button data-ui-source-id="source-0">查询</button>';
   let css = '';
   let committed = false;
@@ -113,7 +113,7 @@ function workspaceTools() {
     validate: async () => '工作区校验通过',
     commit: async () => {
       committed = true;
-      return 2;
+      return commitResult;
     },
     rollback: async () => {
       rolledBack = true;
@@ -126,6 +126,37 @@ function workspaceTools() {
 }
 
 describe('ClineCodingAgentAdapter', () => {
+  it('aborts an active run and rolls back uncommitted workspace changes', async () => {
+    const workspace = workspaceTools();
+    let abort: (() => void) | undefined;
+    const adapter = new ClineCodingAgentAdapter({
+      baseUrl: 'https://example.test',
+      apiKey: 'test-key',
+      modelName: 'test-model',
+      factory: () => ({
+        run: () => new Promise<AgentRunResult>((_resolve, reject) => {
+          abort = () => reject(new Error('request aborted'));
+        }),
+        abort: () => abort?.()
+      })
+    });
+    const controller = new AbortController();
+    const running = adapter.run({
+      workspaceId: '11111111-1111-4111-8111-111111111111',
+      request,
+      conversation: []
+    }, workspace.tools, undefined, controller.signal);
+
+    await new Promise(resolve => setTimeout(resolve, 0));
+    controller.abort();
+
+    await expect(running).resolves.toMatchObject({
+      response: { kind: 'cancelled' },
+      checkpoint: { status: 'cancelled' }
+    });
+    expect(workspace.state()).toMatchObject({ committed: false, rolledBack: true });
+  });
+
   it('blocks source tools until the model declares a resolved intent', async () => {
     const workspace = workspaceTools();
     let gateError = '';
@@ -257,6 +288,50 @@ describe('ClineCodingAgentAdapter', () => {
       rolledBack: false
     });
     expect(events.at(-1)?.type).toBe('coding-agent.turn.completed');
+  });
+
+  it('completes normally when verified source already satisfies the request', async () => {
+    const workspace = workspaceTools({ revision: 7, changed: false });
+    const adapter = new ClineCodingAgentAdapter({
+      baseUrl: 'https://example.test',
+      apiKey: 'test-key',
+      modelName: 'test-model',
+      factory: config => ({
+        run: async () => {
+          await findTool<Record<string, never>>(config, 'list_files').execute({}, context(1));
+          await findTool<{ sourceId: string }>(config, 'inspect_element').execute(
+            { sourceId: 'source-0' },
+            context(2)
+          );
+          await declareIntent(config, 3);
+          await findTool<{
+            summary: string;
+            outcome: 'already_satisfied';
+            evidence: string;
+          }>(config, 'finish').execute({
+            summary: '按钮及选项菜单已经存在',
+            outcome: 'already_satisfied',
+            evidence: '已读取当前按钮、菜单选项和声明式交互结构，并完成工作区校验。'
+          }, context(4));
+          return result(4);
+        }
+      })
+    });
+
+    const run = await adapter.run({
+      workspaceId: '11111111-1111-4111-8111-111111111111',
+      request,
+      conversation: []
+    }, workspace.tools);
+
+    expect(run.response).toMatchObject({
+      kind: 'completed',
+      revision: 7,
+      unchanged: true,
+      summary: expect.stringContaining('无需重复修改')
+    });
+    expect(run.checkpoint.status).toBe('completed');
+    expect(workspace.state()).toMatchObject({ committed: true, rolledBack: false });
   });
 
   it('rolls back when the runtime ends without finish or clarify', async () => {

@@ -8,12 +8,18 @@ import { onMessage, sendMessage } from '../src/messaging';
 const localContentMatches = ['http://127.0.0.1/*', 'http://localhost/*'];
 declare const __UI_AGENT_SERVICE_ORIGIN__: string;
 const configuredServiceOrigin = __UI_AGENT_SERVICE_ORIGIN__;
+// Chrome content-script match patterns cannot contain ports. Runtime preview URL
+// validation still compares the full origin, including the configured port.
+const configuredServiceMatch = (() => {
+  const url = new URL(configuredServiceOrigin);
+  return `${url.protocol}//${url.hostname}/*`;
+})();
 
 export default defineContentScript({
   // The preview is served by Agent Service itself. Keep the local matches for
   // development, and add only the configured service origin for cloud previews
   // instead of injecting this script into arbitrary websites.
-  matches: [...localContentMatches, `${configuredServiceOrigin}/*`],
+  matches: [...new Set([...localContentMatches, configuredServiceMatch])],
   main() {
     const selection = new SelectionOverlay();
     const interactions = document.body.hasAttribute('data-ui-agent-static-snapshot')

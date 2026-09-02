@@ -1,7 +1,9 @@
 import { defineConfig } from 'wxt';
 
 const serviceUrl = new URL(process.env.WXT_PUBLIC_AGENT_SERVICE_URL ?? 'http://127.0.0.1:8787');
-const serviceHostPermission = `${serviceUrl.origin}/*`;
+// Chrome match patterns do not permit ports. The service origin below still
+// retains its port for fetch requests; this value is only for host permission.
+const serviceHostPermission = `${serviceUrl.protocol}//${serviceUrl.hostname}/*`;
 
 export default defineConfig({
   modules: ['@wxt-dev/module-react'],
