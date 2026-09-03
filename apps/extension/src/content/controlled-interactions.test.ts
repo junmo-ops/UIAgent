@@ -38,6 +38,38 @@ describe('ControlledInteractionRuntime', () => {
     expect(document.querySelector('#b')!.getAttribute('aria-selected')).toBe('true');
   });
 
+  it('toggles checkbox state, active class, and optional targets', () => {
+    const { document, runtime } = setup(`
+      <span id="check" class="box" role="checkbox" aria-checked="false" tabindex="0"
+        data-ui-agent-action="toggle-checkbox" data-ui-agent-active-class="active"
+        data-ui-agent-targets="source-2"></span>
+      <section data-ui-source-id="source-2" hidden></section>
+    `);
+    const check = document.querySelector<HTMLElement>('#check')!;
+    expect(runtime.activate(check)).toBe(true);
+    expect(check.getAttribute('aria-checked')).toBe('true');
+    expect(check.classList.contains('active')).toBe(true);
+    expect(document.querySelector<HTMLElement>('[data-ui-source-id="source-2"]')!.hidden).toBe(false);
+    expect(runtime.activate(check)).toBe(true);
+    expect(check.getAttribute('aria-checked')).toBe('false');
+  });
+
+  it('selects one radio in a group', () => {
+    const { document, runtime } = setup(`
+      <button id="a" aria-checked="true" data-ui-agent-action="set-radio" data-ui-agent-state-group="status" data-ui-agent-state-value="a" data-ui-agent-active-class="active" class="active"></button>
+      <button id="b" aria-checked="false" data-ui-agent-action="set-radio" data-ui-agent-state-group="status" data-ui-agent-state-value="b" data-ui-agent-active-class="active"></button>
+      <section id="panel-a" data-ui-agent-state-group="status" data-ui-agent-state-when="a"></section>
+      <section id="panel-b" data-ui-agent-state-group="status" data-ui-agent-state-when="b" hidden></section>
+    `);
+    expect(runtime.activate(document.querySelector<HTMLElement>('#b')!)).toBe(true);
+    expect(document.querySelector('#a')!.getAttribute('aria-checked')).toBe('false');
+    expect(document.querySelector('#b')!.getAttribute('aria-checked')).toBe('true');
+    expect(document.querySelector('#a')!.classList.contains('active')).toBe(false);
+    expect(document.querySelector('#b')!.classList.contains('active')).toBe(true);
+    expect(document.querySelector<HTMLElement>('#panel-a')!.hidden).toBe(true);
+    expect(document.querySelector<HTMLElement>('#panel-b')!.hidden).toBe(false);
+  });
+
   it('ignores unsupported actions and unsafe target tokens', () => {
     const { document, runtime } = setup('<button id="bad" data-ui-agent-action="script" data-ui-agent-targets="source-1,body"></button>');
     expect(runtime.activate(document.querySelector<HTMLElement>('#bad')!)).toBe(false);

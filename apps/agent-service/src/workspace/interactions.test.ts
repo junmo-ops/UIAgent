@@ -19,4 +19,20 @@ describe('validateControlledInteractions', () => {
     expect(() => validateControlledInteractions('<html><body><button data-ui-agent-action="set-state" data-ui-agent-state-group="tabs" data-ui-agent-state-value="a"></button></body></html>'))
       .toThrow('没有对应的展示面板');
   });
+
+  it('accepts declarative checkbox and radio actions', () => {
+    expect(() => validateControlledInteractions(`
+      <span data-ui-agent-action="toggle-checkbox" aria-checked="false"></span>
+      <button data-ui-agent-action="set-radio" data-ui-agent-state-group="status" data-ui-agent-state-value="approved"></button>
+    `)).not.toThrow();
+  });
+
+  it('rejects invalid checkbox state metadata', () => {
+    expect(() => validateControlledInteractions(
+      '<span data-ui-agent-action="toggle-checkbox" data-ui-agent-state-group="status"></span>'
+    )).toThrow();
+    expect(() => validateControlledInteractions(
+      '<span data-ui-agent-action="toggle-checkbox" data-ui-agent-targets="missing"></span>'
+    )).toThrow();
+  });
 });

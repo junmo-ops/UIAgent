@@ -29,6 +29,53 @@ const WORKSPACE_FILES = ['index.html', 'snapshot.css', 'outline.json', 'source-m
 type WorkspaceFile = typeof WORKSPACE_FILES[number];
 type WorkspaceFiles = Record<WorkspaceFile, string>;
 
+interface StructureNode {
+  sourceId: string;
+  tag: string;
+  role?: string;
+  text: string;
+  depth: number;
+  parentSourceId?: string;
+  childrenSourceIds: string[];
+  classes: string[];
+}
+
+function structureQueryTerms(query: string): string[] {
+  return [...new Set(
+    query
+      .toLocaleLowerCase()
+      .split(/[\s,，。；;、|/\\()[\]{}"'“”‘’]+/)
+      .map(part => part.trim())
+      .filter(part => part.length >= 2)
+  )].slice(0, 12);
+}
+
+function normalizeStructureSearchText(value: string): string {
+  return value.toLocaleLowerCase().replace(/[\s\u00a0]+/g, '');
+}
+
+function structureNeighborhood(nodes: StructureNode[], sourceId: string): Record<string, unknown> {
+  const node = nodes.find(item => item.sourceId === sourceId);
+  if (!node) return { sourceId };
+  const parent = node.parentSourceId ? nodes.find(item => item.sourceId === node.parentSourceId) : undefined;
+  const siblings = parent?.childrenSourceIds
+    .filter(candidate => candidate !== sourceId)
+    .map(candidate => nodes.find(item => item.sourceId === candidate))
+    .filter((item): item is StructureNode => Boolean(item))
+    .slice(0, 8)
+    .map(item => ({ sourceId: item.sourceId, tag: item.tag, text: item.text, role: item.role })) ?? [];
+  return {
+    sourceId: node.sourceId,
+    tag: node.tag,
+    role: node.role,
+    text: node.text,
+    classes: node.classes.slice(0, 12),
+    parent: parent ? { sourceId: parent.sourceId, tag: parent.tag, text: parent.text, role: parent.role } : undefined,
+    children: node.childrenSourceIds.slice(0, 12),
+    siblings
+  };
+}
+
 const UNSAFE_HTML_RULES = [
   { label: '活动或嵌入式标签', pattern: /<\s*(script|iframe|frame|object|embed|base)\b/i },
   { label: '外部样式链接', pattern: /<\s*link\b/i },
@@ -408,6 +455,38 @@ function fragmentWithFreshSourceIds(
     .map(element => element.getAttribute('data-ui-source-id'))
     .filter((value): value is string => Boolean(value));
   return { html: container.innerHTML, rootSourceIds };
+}
+
+function applyFrozenReferenceStyles(
+  fragmentHtml: string,
+  rootSourceIds: readonly string[],
+  sourceHtml: string,
+  styleReferenceSourceId: string
+): string {
+  const referenceRange = sourceElementRange(sourceHtml, styleReferenceSourceId);
+  const referenceOpeningTag = sourceHtml.slice(
+    referenceRange.start,
+    findTagEnd(sourceHtml, referenceRange.start) + 1
+  );
+  const referenceClasses = /\bclass\s*=\s*["']([^"']+)["']/i.exec(referenceOpeningTag)?.[1]
+    ?.split(/\s+/)
+    .filter(className => className.startsWith('ui-snapshot-style-')) ?? [];
+  if (!referenceClasses.length) {
+    throw new Error(`样式参照元素 ${styleReferenceSourceId} 没有冻结计算样式类；请改用已检查的同类元素，或自行提供受作用域控制的 CSS`);
+  }
+  let next = fragmentHtml;
+  for (const sourceId of rootSourceIds) {
+    const range = sourceElementRange(next, sourceId);
+    const openingEnd = findTagEnd(next, range.start);
+    const openingTag = next.slice(range.start, openingEnd + 1);
+    const existingClasses = /\bclass\s*=\s*["']([^"']+)["']/i.exec(openingTag)?.[1]
+      ?.split(/\s+/)
+      .filter(Boolean) ?? [];
+    const className = [...new Set([...existingClasses, ...referenceClasses])].join(' ');
+    const styledOpeningTag = updateOpeningTagAttributes(openingTag, { class: className }, []);
+    next = `${next.slice(0, range.start)}${styledOpeningTag}${next.slice(openingEnd + 1)}`;
+  }
+  return next;
 }
 
 function wrapperOpeningTag(tagName: string, sourceId: string, attributes: Readonly<Record<string, string>>): string {
@@ -863,6 +942,40 @@ export class SourceWorkspaceStore {
     let toolset!: CodingWorkspaceTools;
     toolset = {
       listFiles: async () => WORKSPACE_FILES.map(path => ({ path, chars: working[path].length })),
+      queryWorkspaceStructure: async (query, options = {}) => {
+        const terms = structureQueryTerms(query);
+        if (!terms.length) throw new Error('结构查询至少需要一个长度不少于 2 的语义词');
+        const outline = JSON.parse(working['outline.json']) as { nodes: StructureNode[] };
+        const selectedPath = options.selectedSourceId
+          ? new Set(sourceElementAncestry(working['index.html'], options.selectedSourceId).map(item => item.sourceId))
+          : new Set<string>();
+        const scored = outline.nodes
+          .map(node => {
+            const searchable = `${node.text} ${node.role ?? ''} ${node.tag} ${node.classes.join(' ')}`.toLocaleLowerCase();
+            const normalizedSearchable = normalizeStructureSearchText(searchable);
+            const matchedTerms = terms.filter(term => (
+              searchable.includes(term) || normalizedSearchable.includes(normalizeStructureSearchText(term))
+            ));
+            const selectedBoost = selectedPath.has(node.sourceId) ? 2 : 0;
+            return { node, matchedTerms, score: matchedTerms.length * 10 + selectedBoost };
+          })
+          .filter(item => item.matchedTerms.length > 0)
+          .sort((left, right) => right.score - left.score || left.node.depth - right.node.depth)
+          .slice(0, Math.min(Math.max(options.limit ?? 8, 1), 12));
+        if (!scored.length) {
+          return `结构索引中未找到与“${query}”匹配的元素。请缩短或更换语义词；只有必要时再使用 search_text 搜索源码。`;
+        }
+        return JSON.stringify({
+          query,
+          terms,
+          selectedSourceId: options.selectedSourceId,
+          candidates: scored.map(item => ({
+            matchedTerms: item.matchedTerms,
+            score: item.score,
+            ...structureNeighborhood(outline.nodes, item.node.sourceId)
+          }))
+        }, null, 2);
+      },
       searchText: async (query, path = 'index.html') => {
         this.assertReadablePath(path);
         const content = working[path as WorkspaceFile];
@@ -1072,9 +1185,17 @@ export class SourceWorkspaceStore {
         refreshIndexes();
         return `元素 ${sourceId} 的属性已更新（设置 ${Object.keys(set).length} 项，删除 ${remove.length} 项）；HTML 与安全规则校验通过`;
       },
-      insertElement: async (targetSourceId, position, fragmentHtml) => {
+      insertElement: async (targetSourceId, position, fragmentHtml, options) => {
         const html = working['index.html'];
         const fragment = fragmentWithFreshSourceIds(html, fragmentHtml);
+        const insertionHtml = options?.styleReferenceSourceId
+          ? applyFrozenReferenceStyles(
+            fragment.html,
+            fragment.rootSourceIds,
+            html,
+            options.styleReferenceSourceId
+          )
+          : fragment.html;
         const targetRange = sourceElementRange(html, targetSourceId);
         let insertionIndex: number;
         if (position === 'parentStart') {
@@ -1084,11 +1205,11 @@ export class SourceWorkspaceStore {
         } else {
           insertionIndex = position === 'before' ? targetRange.start : targetRange.end;
         }
-        const next = `${html.slice(0, insertionIndex)}${fragment.html}${html.slice(insertionIndex)}`;
+        const next = `${html.slice(0, insertionIndex)}${insertionHtml}${html.slice(insertionIndex)}`;
         validateHtml(next);
         working['index.html'] = next;
         refreshIndexes();
-        return `已在元素 ${targetSourceId} 的 ${position} 位置插入 ${fragment.rootSourceIds.length} 个顶层元素：${fragment.rootSourceIds.join(', ')}；HTML、结构与安全规则校验通过`;
+        return `已在元素 ${targetSourceId} 的 ${position} 位置插入 ${fragment.rootSourceIds.length} 个顶层元素：${fragment.rootSourceIds.join(', ')}${options?.styleReferenceSourceId ? `；已复制 ${options.styleReferenceSourceId} 的冻结计算样式作为布局参照` : ''}；HTML、结构与安全规则校验通过`;
       },
       wrapElement: async (sourceId, tagName, attributes) => {
         const html = working['index.html'];

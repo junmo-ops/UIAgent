@@ -42,6 +42,17 @@ async function waitForWorkspacePreviewTab(tabId: number, serviceUrl: string, tim
   return tab;
 }
 
+function sameWorkspacePreview(tabUrl: string | undefined, previewUrl: string): boolean {
+  if (!tabUrl) return false;
+  try {
+    const tab = new URL(tabUrl);
+    const preview = new URL(previewUrl);
+    return tab.origin === preview.origin && tab.pathname === preview.pathname;
+  } catch {
+    return false;
+  }
+}
+
 async function sendToContent(tab: Browser.tabs.Tab, command: ContentCommand): Promise<ContentCommandResult> {
   if (!tab.id) throw new BrowserCommandError('TAB_UNAVAILABLE', '当前标签页不可用');
   try {
@@ -202,20 +213,25 @@ export default defineBackground(() => {
       if (command.type === 'bindEditorTab') {
         const serviceUrl = await getAgentServiceUrl();
         const trustedPreviewUrl = isWorkspacePreviewUrl(command.previewUrl, serviceUrl);
-        const tab = trustedPreviewUrl
-          ? await browser.tabs.get(command.tabId)
-          : await waitForWorkspacePreviewTab(command.tabId, serviceUrl);
-        if (!trustedPreviewUrl && ![tab.url, tab.pendingUrl].some(url => isWorkspacePreviewUrl(url, serviceUrl))) {
+        const tab = await waitForWorkspacePreviewTab(command.tabId, serviceUrl);
+        if (!trustedPreviewUrl || ![tab.url, tab.pendingUrl].some(url => sameWorkspacePreview(url, command.previewUrl))) {
           throw new BrowserCommandError(
             'INVALID_PAGE_URL',
-            `只能将编辑会话绑定到当前 Agent Service 的静态源码副本。当前地址：${tab.url ?? '未知'}；待加载地址：${tab.pendingUrl ?? '无'}`
+            `只能将编辑会话绑定到当前 Agent Service 创建的指定静态副本。当前地址：${tab.url ?? '未知'}；待加载地址：${tab.pendingUrl ?? '无'}`
           );
         }
         const panelTabId = await editorTabs.waitFor(editorClientId);
         if (panelTabId !== undefined && panelTabId !== command.tabId) {
+          if (trustedPreviewUrl && sameWorkspacePreview(tab.url, command.previewUrl)) {
+            const released = editorTabs.rebind(editorClientId, command.tabId);
+            if (released?.lastEditorForTab) {
+              void sendMessage('contentCommand', { type: 'deactivateEditor' }, released.tabId).catch(() => undefined);
+            }
+            return { ok: true };
+          }
           throw new BrowserCommandError(
             'TAB_CHANGED',
-            '当前 Side Panel 实例属于另一个标签页，不能迁移到静态副本。请在静态副本标签页点击插件图标。'
+            '当前 Side Panel 实例属于另一个标签页。只有切换到同一静态副本时才能自动恢复；其他页面请点击插件图标重新打开。'
           );
         }
         if (panelTabId === undefined) editorTabs.bind(editorClientId, command.tabId);
@@ -229,13 +245,21 @@ export default defineBackground(() => {
         tabId = current.id!;
         editorTabs.bind(editorClientId, tabId);
       }
+      if (command.type === 'reloadPreview') {
+        // Reloading a known static preview does not inspect or modify the active
+        // browser page. Keep it independent from the active-tab safety boundary
+        // so a completed source turn is visible when the user returns to it.
+        const tab = await browser.tabs.get(tabId);
+        const serviceUrl = await getAgentServiceUrl();
+        if (!isWorkspacePreviewUrl(tab.url, serviceUrl)) {
+          throw new BrowserCommandError('INVALID_PAGE_URL', '只能后台刷新当前 Agent Service 创建的静态源码副本。');
+        }
+        await browser.tabs.reload(tabId);
+        return { ok: true };
+      }
       const [tab, current] = await Promise.all([browser.tabs.get(tabId), activeTab()]);
       if (current.id !== tabId) {
         throw new BrowserCommandError('TAB_CHANGED', '插件仍绑定在打开它时的页面。请切回原页面，或在当前页面重新点击插件图标。');
-      }
-      if (command.type === 'reloadPreview') {
-        await browser.tabs.reload(tabId);
-        return { ok: true };
       }
       if (command.type === 'createWorkspaceFromFullViewport') {
         await createWorkspaceFromViewport(tab, true);

@@ -6,6 +6,12 @@ import type {
 
 export interface CodingWorkspaceTools {
   listFiles(): Promise<Array<{ path: string; chars: number }>>;
+  /**
+   * Query the compact, system-maintained workspace structure before falling
+   * back to raw file search. Results include local hierarchy so the Agent can
+   * reason about relationships without repeatedly scanning large snapshots.
+   */
+  queryWorkspaceStructure(query: string, options?: { selectedSourceId?: string; limit?: number }): Promise<string>;
   searchText(query: string, path?: string): Promise<string>;
   readFile(path: string, startLine?: number, endLine?: number, startChar?: number, endChar?: number): Promise<string>;
   inspectElement(sourceId: string): Promise<string>;
@@ -24,7 +30,8 @@ export interface CodingWorkspaceTools {
   insertElement(
     targetSourceId: string,
     position: 'parentStart' | 'parentEnd' | 'before' | 'after',
-    html: string
+    html: string,
+    options?: { styleReferenceSourceId?: string }
   ): Promise<string>;
   wrapElement(sourceId: string, tagName: string, attributes: Record<string, string>): Promise<string>;
   unwrapElement(sourceId: string): Promise<string>;

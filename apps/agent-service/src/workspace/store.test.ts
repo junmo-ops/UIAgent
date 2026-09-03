@@ -48,6 +48,8 @@ describe('SourceWorkspaceStore', () => {
     const workspace = store.create(snapshot);
     expect(store.html(workspace.workspaceId)).toContain('查 询');
     const tools = store.tools(workspace.workspaceId);
+    expect(await tools.queryWorkspaceStructure('查询')).toContain('source-0');
+    expect(await tools.queryWorkspaceStructure('不存在的语义')).toContain('未找到');
     expect(await tools.searchText('查 询')).toMatch(/命中字符.+button/s);
     expect(await tools.readFile('index.html', 1, 3)).toMatch(/doctype/i);
     expect(await tools.readFile('index.html', 0, 0)).toContain('1:');
@@ -462,6 +464,27 @@ describe('SourceWorkspaceStore', () => {
     expect(html).not.toContain('data-ui-source-id="source-11"');
     expect(html.indexOf('乙')).toBeLessThan(html.indexOf('甲'));
     expect(html).toMatch(/section[^>]+source-14[^>]+class="group"/);
+  });
+
+  it('can copy a checked sibling frozen style onto newly inserted roots', async () => {
+    const store = createStore();
+    const workspace = store.create({
+      ...snapshot,
+      html: '<!doctype html><html><body><main data-ui-source-id="source-10"><button data-ui-source-id="source-11" style="display:inline-flex;align-items:center;height:32px;gap:8px">筛选</button></main></body></html>'
+    });
+    const tools = store.tools(workspace.workspaceId);
+    const referenceTag = store.html(workspace.workspaceId)!.match(/<button\b[^>]*data-ui-source-id="source-11"[^>]*>/)?.[0];
+    const reference = referenceTag?.match(/\bclass="([^"]+)"/)?.[1];
+    expect(reference).toContain('ui-snapshot-style-');
+    await expect(tools.insertElement(
+      'source-10',
+      'parentEnd',
+      '<label><input type="checkbox">仅看重点</label>',
+      { styleReferenceSourceId: 'source-11' }
+    )).resolves.toContain('冻结计算样式');
+    await tools.commit('新增同款筛选项');
+    const insertedTag = store.html(workspace.workspaceId)!.match(/<label\b[^>]*data-ui-source-id="source-12"[^>]*>/)?.[0];
+    expect(insertedTag).toContain(reference!.match(/ui-snapshot-style-\d+/)![0]);
   });
 
   it('applies DOM operations atomically and rolls all changes back on failure', async () => {

@@ -19,6 +19,14 @@ describe('EditorTabRegistry', () => {
     expect(registry.removeTab(11)).toEqual(['editor-a']);
   });
 
+  it('moves an existing lease only through the explicit rebind operation', () => {
+    const registry = new EditorTabRegistry();
+    registry.bind('editor-a', 11);
+    expect(registry.rebind('editor-a', 22)).toEqual({ tabId: 11, lastEditorForTab: true });
+    expect(registry.resolve('editor-a')).toBe(22);
+    expect(registry.removeTab(11)).toEqual([]);
+  });
+
   it('only marks the last editor disconnect as a reason to deactivate a tab', () => {
     const registry = new EditorTabRegistry();
     registry.bind('editor-a', 11);

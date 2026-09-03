@@ -17,6 +17,13 @@ export class EditorTabRegistry {
     return true;
   }
 
+  /** Move a live Side Panel lease only after the caller has verified the destination. */
+  rebind(editorClientId: string, tabId: number): ReleasedEditorTab | undefined {
+    const released = this.unbind(editorClientId);
+    this.bind(editorClientId, tabId);
+    return released;
+  }
+
   resolve(editorClientId: string): number | undefined {
     return this.editorTabs.get(editorClientId);
   }

@@ -42,13 +42,16 @@ const clineSourceRules = [
   '你是静态网页源码编辑 Agent。你只能使用本次会话显式提供的源码工具。',
   '页面只用于 UI 需求示意，不需要真实接口、脚本或业务提交。',
   '工作区包含 index.html、snapshot.css、outline.json 和 source-map.json。',
-  '先调用 list_files，并优先搜索或读取 outline.json 来定位语义结构；不要直接读取整个大文件。',
+  '先调用 list_files；若没有明确 sourceId，必须先调用 query_workspace_structure 定位语义结构。只有结构化查询不足时才搜索或读取 outline.json，不要直接读取整个大文件。',
   'index.html 保存页面结构，snapshot.css 保存冻结样式。结构与文案修改 index.html，视觉修改 snapshot.css。',
   'outline.json 与 source-map.json 由系统维护，只能读取，不能修改。',
   'replace_text 的 search 必须来自刚刚读取的源码，且应足够唯一；不要猜测源码。',
   '需要在文件开头、末尾或明确锚点旁插入内容时使用 apply_patch，不要为了追加内容反复寻找唯一的文件尾字符串。',
   'inspect_element 会返回目标、祖先和兄弟节点的布局上下文（捕获时矩形与关键计算样式）、domText 和 styleClasses。必须用布局上下文理解视觉关系；domText 只证明文字存在于源码，不能证明渲染后可见。需要了解完整视觉样式时用 read_style_rule，不要连续切片读取 snapshot.css。',
   '需要检查多个元素或样式时，优先使用 inspect_elements 和 read_style_rules 批量读取，避免逐个调用消耗迭代次数。',
+  '先用一次结构化查询取得候选元素，再一次批量 inspect 取得目标、父级和同级上下文；不得为同一语义目标连续搜索不同关键词来猜测层级。相同参数的读取或空间校验不会产生新证据，禁止重复调用。',
+  '新增可见控件前，必须批量检查目标容器和相邻同类控件的布局；优先 clone 相邻同类结构。使用 insert_element 时可传 styleReferenceSourceId，将同类控件的冻结计算样式复制给新增顶层元素。若新增 class 没有经 inspect/read_style_rules 证实可用，必须在 snapshot.css 增加仅作用于新 sourceId 的完整布局样式，不得假设 flex、间距或垂直居中的工具类存在。',
+  '新增控件前必须记录父容器宽高、布局方向、换行策略和兄弟元素矩形；新增后必须再次批量 inspect 同一容器，确认原有兄弟元素未换行、溢出、遮挡或被裁切。若空间不足，必须调整为可容纳的布局方案后再 finish，不能仅以 HTML/CSS 存在作为通过。',
   '移动已有元素必须使用 move_element，禁止用大段 replace_text 删除后重建或重排。',
   '删除完整元素必须使用 remove_element(sourceId)，禁止读取或复制完整 outerHTML 后再用 replace_text 删除。',
   '完整文本使用 set_element_text；属性增删使用 set_element_attributes；插入、包裹、解包和排序分别使用 insert_element、wrap_element、unwrap_element、reorder_children。',
@@ -75,8 +78,17 @@ const clineSourceRules = [
 const DEFAULT_MAX_ITERATIONS = 45;
 const FINALIZATION_WINDOW = 3;
 const MAX_IDENTICAL_TOOL_FAILURES = 3;
+const MAX_READ_CALLS_PER_ACTION: Readonly<Record<string, number>> = {
+  query_workspace_structure: 2,
+  search_text: 4,
+  inspect_element: 3,
+  inspect_elements: 3,
+  read_style_rule: 2,
+  read_style_rules: 2,
+  read_file: 3
+};
 const BUDGETED_READ_ACTIONS = new Set([
-  'list_files', 'search_text', 'read_file', 'inspect_element', 'inspect_elements',
+  'list_files', 'query_workspace_structure', 'search_text', 'read_file', 'inspect_element', 'inspect_elements',
   'read_style_rule', 'read_style_rules'
 ]);
 
@@ -205,6 +217,7 @@ export class ClineCodingAgentAdapter implements CodingAgentPort {
     let intentDeclared = false;
     const changedPositioningClassNames = new Set<string>();
     const repeatedFailures = new Map<string, number>();
+    const readActionCounts = new Map<string, number>();
     let activeAgent: ClineAgentInstance | undefined;
     const throwIfCancelled = () => {
       if (signal?.aborted) throw new CodingAgentCancelledError();
@@ -272,6 +285,8 @@ export class ClineCodingAgentAdapter implements CodingAgentPort {
       safeEmit(observe, { type: 'coding-agent.checkpoint.updated', timestamp, checkpoint });
     };
 
+    const completedReadResults = new Map<string, string>();
+
     const execute = async <TInput>(
       action: string,
       input: TInput,
@@ -286,8 +301,27 @@ export class ClineCodingAgentAdapter implements CodingAgentPort {
         record(action, input, context, message);
         return message;
       }
+      const readKey = BUDGETED_READ_ACTIONS.has(action)
+        ? `${action}:${JSON.stringify(input)}`
+        : undefined;
+      const actionLimit = MAX_READ_CALLS_PER_ACTION[action];
+      if (actionLimit) {
+        const actionCount = (readActionCounts.get(action) ?? 0) + 1;
+        readActionCounts.set(action, actionCount);
+        if (actionCount > actionLimit) {
+          const message = `[读取预算] ${action} 已调用 ${actionCount} 次，超过本轮上限 ${actionLimit} 次。请停止继续检索，使用已有上下文完成修改和校验；若信息不足则调用 clarify。`;
+          record(action, input, context, message);
+          return message;
+        }
+      }
+      if (readKey && completedReadResults.has(readKey)) {
+        const message = `[重复读取已拦截] ${action} 的相同参数在本轮已执行，不能提供新证据。请使用已有结果继续批量检查、修改、校验或澄清。`;
+        record(action, input, context, message);
+        return message;
+      }
       try {
         const result = await operation();
+        if (readKey) completedReadResults.set(readKey, result);
         throwIfCancelled();
         const guidedResult = remainingAfterThisCall <= 5
           ? `[运行预算] 当前第 ${context.iteration}/${this.maxIterations} 轮，本次后最多剩余 ${remainingAfterThisCall} 轮。请停止扩展范围，完成必要修改并预留 validate_workspace 与 finish。\n\n${result}`
@@ -388,6 +422,24 @@ export class ClineCodingAgentAdapter implements CodingAgentPort {
           input,
           context,
           async () => JSON.stringify(await workspace.listFiles())
+        )
+      }),
+      createTool<{ query: string; selectedSourceId?: string; limit?: number }, string>({
+        name: 'query_workspace_structure',
+        description: '在系统维护的页面结构索引中按语义查询候选元素及其父子、同级关系。优先用于定位需求涉及的区域、行、状态和控件，避免反复全文搜索大源码文件。',
+        inputSchema: objectSchema({
+          query: stringProperty('从用户需求中提炼的关键语义词，可包含多个词。'),
+          selectedSourceId: stringProperty('可选：当前选中元素，用于优先返回其附近的结构。'),
+          limit: { type: 'integer', minimum: 1, maximum: 12 }
+        }, ['query']),
+        execute: (input, context) => execute(
+          'query_workspace_structure',
+          input,
+          context,
+          () => workspace.queryWorkspaceStructure(input.query, {
+            selectedSourceId: input.selectedSourceId ?? turn.request.sourceId,
+            limit: input.limit
+          })
         )
       }),
       createTool<{ query: string; path?: string }, string>({
@@ -616,17 +668,21 @@ export class ClineCodingAgentAdapter implements CodingAgentPort {
         targetSourceId: string;
         position: 'parentStart' | 'parentEnd' | 'before' | 'after';
         html: string;
+        styleReferenceSourceId?: string;
       }, string>({
         name: 'insert_element',
-        description: '在目标元素内部开头/末尾或目标前后插入静态 HTML；系统为所有新元素生成 sourceId。',
+        description: '在目标元素内部开头/末尾或目标前后插入静态 HTML；系统为所有新元素生成 sourceId。可选提供已检查的同类元素作为冻结计算样式参照。',
         inputSchema: objectSchema({
           targetSourceId: stringProperty('定位目标 sourceId。'),
           position: { type: 'string', enum: ['parentStart', 'parentEnd', 'before', 'after'] },
-          html: stringProperty('要插入的安全静态 HTML 片段。')
+          html: stringProperty('要插入的安全静态 HTML 片段。'),
+          styleReferenceSourceId: stringProperty('可选：已检查的相邻同类元素。系统会将其冻结计算样式复制给新增顶层元素，用于保持尺寸、间距和对齐。')
         }, ['targetSourceId', 'position', 'html']),
         execute: (input, context) => execute('insert_element', input, context, async () => {
           requireIntentDeclared();
-          const result = await workspace.insertElement(input.targetSourceId, input.position, input.html);
+          const result = await workspace.insertElement(input.targetSourceId, input.position, input.html, {
+            styleReferenceSourceId: input.styleReferenceSourceId
+          });
           trackCreatedSourceIdsFromResult(result);
           return result;
         })

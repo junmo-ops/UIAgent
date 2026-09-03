@@ -173,6 +173,24 @@ export function SidePanelApp() {
     });
   }, []);
   useEffect(() => {
+    if (!sourceWorkspace) return;
+    const onActivated = async ({ tabId }: { tabId: number }) => {
+      try {
+        const tab = await browser.tabs.get(tabId);
+        const match = /\/workspaces\/([0-9a-f-]{36})\/preview/i.exec(tab.url ?? '');
+        if (!match || match[1] !== sourceWorkspace.workspaceId) return;
+        await command({ type: 'bindEditorTab', tabId, previewUrl: sourceWorkspace.previewUrl });
+        setSourceWorkspace(current => current ? { ...current, tabId } : current);
+        setSelection(undefined);
+        setSelecting(false);
+      } catch {
+        // Keep the existing binding when the active page is unavailable or not a trusted preview.
+      }
+    };
+    browser.tabs.onActivated.addListener(onActivated);
+    return () => browser.tabs.onActivated.removeListener(onActivated);
+  }, [sourceWorkspace?.workspaceId, sourceWorkspace?.previewUrl]);
+  useEffect(() => {
     const controller = new AbortController();
     const timer = window.setTimeout(() => controller.abort(), 5000);
     setServiceStatus('checking');

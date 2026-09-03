@@ -64,6 +64,7 @@ function workspaceTools(commitResult = { revision: 2, changed: true }) {
   const structuralOperations: string[] = [];
   const tools: CodingWorkspaceTools = {
     listFiles: async () => [{ path: 'index.html', chars: html.length }],
+    queryWorkspaceStructure: async query => `结构查询：${query} -> source-0<button>`,
     searchText: async query => html.includes(query) ? html : '没有找到',
     readFile: async () => html,
     inspectElement: async () => html,
@@ -234,6 +235,7 @@ describe('ClineCodingAgentAdapter', () => {
     expect(configuredTools).toEqual([
       'declare_intent',
       'list_files',
+      'query_workspace_structure',
       'search_text',
       'read_file',
       'inspect_element',

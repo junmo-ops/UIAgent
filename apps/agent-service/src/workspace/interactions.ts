@@ -6,7 +6,7 @@ const GROUP_ATTRIBUTE = 'data-ui-agent-state-group';
 const VALUE_ATTRIBUTE = 'data-ui-agent-state-value';
 const WHEN_ATTRIBUTE = 'data-ui-agent-state-when';
 const ACTIVE_CLASS_ATTRIBUTE = 'data-ui-agent-active-class';
-const ACTIONS = new Set(['toggle', 'show', 'hide', 'set-state']);
+const ACTIONS = new Set(['toggle', 'show', 'hide', 'set-state', 'toggle-checkbox', 'set-radio']);
 
 function tokens(value: string | null, label: string, max = 20): string[] {
   const values = (value ?? '').trim().split(/\s+/).filter(Boolean);
@@ -28,6 +28,27 @@ export function validateControlledInteractions(html: string): void {
     if (!ACTIONS.has(action)) throw new Error(`不支持的受控交互动作：${action || '空值'}`);
     const activeClass = control.getAttribute(ACTIVE_CLASS_ATTRIBUTE);
     if (activeClass) tokens(activeClass, ACTIVE_CLASS_ATTRIBUTE, 1);
+    if (action === 'toggle-checkbox') {
+      if (control.hasAttribute(GROUP_ATTRIBUTE) || control.hasAttribute(VALUE_ATTRIBUTE)) {
+        throw new Error('checkbox 不应声明状态组和值');
+      }
+      if (control.hasAttribute(TARGETS_ATTRIBUTE)) {
+        for (const sourceId of tokens(control.getAttribute(TARGETS_ATTRIBUTE), TARGETS_ATTRIBUTE)) {
+          if (!sourceIds.has(sourceId)) throw new Error(`受控交互目标 ${sourceId} 不存在`);
+        }
+      }
+      continue;
+    }
+    if (action === 'set-radio') {
+      tokens(control.getAttribute(GROUP_ATTRIBUTE), GROUP_ATTRIBUTE, 1);
+      tokens(control.getAttribute(VALUE_ATTRIBUTE), VALUE_ATTRIBUTE, 1);
+      if (control.hasAttribute(TARGETS_ATTRIBUTE)) {
+        for (const sourceId of tokens(control.getAttribute(TARGETS_ATTRIBUTE), TARGETS_ATTRIBUTE)) {
+          if (!sourceIds.has(sourceId)) throw new Error(`受控交互目标 ${sourceId} 不存在`);
+        }
+      }
+      continue;
+    }
     if (action === 'set-state') {
       const group = tokens(control.getAttribute(GROUP_ATTRIBUTE), GROUP_ATTRIBUTE, 1)[0]!;
       const value = tokens(control.getAttribute(VALUE_ATTRIBUTE), VALUE_ATTRIBUTE, 1)[0]!;
