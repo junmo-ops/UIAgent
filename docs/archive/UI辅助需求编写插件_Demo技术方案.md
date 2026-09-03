@@ -242,7 +242,6 @@ Shared Kernel 只放真正跨层且无业务语义的内容：
 建议采用 pnpm workspace，将系统拆分为：
 
 - `apps/extension`：WXT 插件入口、Side Panel、Content Script 和 Background。
-- `apps/demo-page`：固定测试页面。
 - `apps/agent-service`：Agent Runtime、会话、检查点和模型调用服务入口。
 - `packages/shared-kernel`：最小公共类型和可观测接口。
 - `packages/agent-runtime`：LangGraph 封装、Context、Memory、Loop 和 Interrupt。

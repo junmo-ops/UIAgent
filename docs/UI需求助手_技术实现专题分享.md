@@ -645,9 +645,6 @@ Side Panel 展示经过投影的操作摘要，例如：
 当前仓库结构如下：
 
 ```text
-apps/demo-page
-  固定测试页面
-
 apps/extension
   Chrome MV3 插件
   页面捕获、选区、会话绑定、Side Panel、快照包

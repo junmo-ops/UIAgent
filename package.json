@@ -4,8 +4,7 @@
   "private": true,
   "packageManager": "pnpm@10.33.0",
   "scripts": {
-    "dev": "pnpm --parallel --filter @ui-agent/demo-page --filter @ui-agent/agent-service --filter @ui-agent/extension dev",
-    "dev:page": "pnpm --filter @ui-agent/demo-page dev",
+    "dev": "pnpm --parallel --filter @ui-agent/agent-service --filter @ui-agent/extension dev",
     "dev:service": "pnpm --filter @ui-agent/agent-service dev",
     "dev:extension": "pnpm --filter @ui-agent/extension dev",
     "build:extension": "pnpm --filter @ui-agent/extension build",

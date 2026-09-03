@@ -17,7 +17,6 @@
 ## 工程结构
 
 ```text
-apps/demo-page             固定 React + Ant Design 测试页
 apps/extension             WXT Chrome MV3 插件
   entrypoints              Background、Content Script 与 Side Panel 入口
   src/content              页面捕获、选区和受控交互

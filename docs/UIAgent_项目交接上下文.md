@@ -64,9 +64,6 @@ UIAgent 是一个面向产品经理的 Chrome 插件 Demo，用于快速生成 U
 ## 4. 工程结构
 
 ```text
-apps/demo-page
-  固定 React + Ant Design 测试页
-
 apps/extension
   WXT Chrome MV3 插件
   entrypoints/
