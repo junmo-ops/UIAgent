@@ -1,8 +1,23 @@
 import type {
+  CandidateObservation,
   DomOperation,
   SourceTurnRequest,
-  SourceTurnResponse
+  SourceTurnResponse,
+  ValidationCheckResult,
+  WorkspaceCandidate,
+  WorkspaceIntent
 } from '@ui-agent/contracts';
+
+export interface GeometryVerificationInput {
+  candidate: WorkspaceCandidate;
+  intent: WorkspaceIntent;
+  observation: CandidateObservation;
+}
+
+export interface GeometryVerificationResult {
+  constraintResults: ValidationCheckResult[];
+  warnings: string[];
+}
 
 export interface CodingWorkspaceTools {
   listFiles(): Promise<Array<{ path: string; chars: number }>>;
@@ -47,12 +62,13 @@ export interface CodingWorkspaceTools {
     templateSourceId: string,
     position: 'replace' | 'parentStart' | 'parentEnd' | 'before' | 'after',
     targetSourceId: string | undefined,
-    replacements: Array<{ search: string; replace: string }>
+    replacements?: Array<{ search: string; replace: string }>
   ): Promise<string>;
   validate(): Promise<string>;
   commit(summary: string, options?: { allowNoChanges?: boolean }): Promise<{
     revision: number;
     changed: boolean;
+    candidate?: WorkspaceCandidate;
   }>;
   rollback(): Promise<void>;
 }
@@ -138,4 +154,9 @@ export interface CodingAgentPort {
     observe?: CodingAgentObserver,
     signal?: AbortSignal
   ): Promise<CodingAgentRunResult>;
+  /**
+   * Optional while older adapters are being retired.  Implementations receive
+   * structured browser geometry only; screenshots are deliberately excluded.
+   */
+  verifyGeometry?(input: GeometryVerificationInput, signal?: AbortSignal): Promise<GeometryVerificationResult>;
 }

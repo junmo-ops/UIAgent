@@ -18,8 +18,10 @@ export function isWorkspacePreviewUrl(url: string | undefined, serviceUrl: strin
   try {
     const candidate = new URL(url);
     const service = new URL(normalizeAgentServiceUrl(serviceUrl));
-    return candidate.origin === service.origin
-      && /^\/workspaces\/[0-9a-f-]{36}\/preview\/?$/i.test(candidate.pathname);
+    return candidate.origin === service.origin && (
+      /^\/workspaces\/[0-9a-f-]{36}\/preview\/?$/i.test(candidate.pathname)
+      || /^\/workspaces\/[0-9a-f-]{36}\/candidates\/[0-9a-f-]{36}\/versions\/\d+\/preview\/?$/i.test(candidate.pathname)
+    );
   } catch {
     return false;
   }

@@ -572,12 +572,32 @@ describe('SourceWorkspaceStore', () => {
     });
     const tools = store.tools(workspace.workspaceId);
 
-    await tools.cloneElement('source-12', 'parentEnd', undefined, []);
+    await tools.cloneElement('source-12', 'parentEnd', undefined);
     await tools.commit('复制充值模块');
 
     const preview = store.previewHtml(workspace.workspaceId)!;
     expect(preview).toContain('[data-ui-source-id="source-15"]::after');
     expect(preview).not.toContain('height:auto!important');
+  });
+
+  it('reads a newly written B-mode override rule for spatial validation', async () => {
+    const store = createStore();
+    const workspace = store.create({
+      ...snapshot,
+      authorStyles: {
+        cssText: '.existing-card{display:block}',
+        readableSheets: 1,
+        unreadableSheets: 0,
+        missing: []
+      }
+    });
+    const tools = store.tools(workspace.workspaceId);
+
+    await tools.applyPatch('author-overrides.css', [
+      { kind: 'insert', position: 'end', text: '.new-region{position:fixed;bottom:0}' }
+    ]);
+    await expect(tools.readStyleRule('new-region')).resolves.toContain('position:fixed');
+    await tools.rollback();
   });
 
   it('rejects malformed table nesting before committing', async () => {

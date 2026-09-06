@@ -1,4 +1,6 @@
 import { PROTOCOL_VERSION, staticSnapshotSchema, type SnapshotMetrics, type StaticSnapshot } from '@ui-agent/contracts';
+import { captureAccessibleAuthorStyles } from './author-style-capture';
+import type { AuthorStyleResource } from '@ui-agent/contracts';
 
 const SNAPSHOT_OPTIMIZATION_VERSION = 'style-dedup-v1';
 
@@ -32,7 +34,9 @@ function escapeHtml(value: string): string {
 
 function isSafeInlineUrl(value: string): boolean {
   const normalized = value.trim().toLowerCase();
-  return normalized.startsWith('data:image/') || normalized.startsWith('data:font/');
+  // Fragment references are how inline SVG `<use>` nodes address their local
+  // symbol definitions. They never initiate a network request or script.
+  return normalized.startsWith('#') || normalized.startsWith('data:image/') || normalized.startsWith('data:font/');
 }
 
 function normalizeComputedStyleValue(property: string, value: string): string {
@@ -59,6 +63,20 @@ function isCapturableStyle(property: string, value: string): boolean {
   if (!value || value.length > MAX_STYLE_VALUE_LENGTH) return false;
   // 不把外部背景、光标、滤镜等资源写进静态副本；纯色、渐变等无资源值会保留。
   return !/url\s*\(/i.test(value);
+}
+
+function preserveSafeInlineStyle(element: HTMLElement): void {
+  for (const property of [...element.style]) {
+    const value = element.style.getPropertyValue(property);
+    if (/\b(?:javascript\s*:|expression\s*\(|-moz-binding\b|behavior\s*:)/i.test(value)) {
+      element.style.removeProperty(property);
+      continue;
+    }
+    // External resources remain out of the frozen A package. B obtains its
+    // declared resources from the preserved author stylesheet instead.
+    if (/url\s*\(/i.test(value)) element.style.removeProperty(property);
+  }
+  if (!element.getAttribute('style')?.trim()) element.removeAttribute('style');
 }
 
 function copyLiveState(source: Element, clone: Element): void {
@@ -127,7 +145,23 @@ function applyComputedStyle(source: Element, clone: Element, registry: StyleRegi
   registry.rules.set(declaration, className);
   registry.inlineStyleCharsBefore += declaration.length + 8;
   clone.classList.add(className);
-  clone.removeAttribute('style');
+  if (clone instanceof HTMLElement) preserveSafeInlineStyle(clone);
+}
+
+function captureImageResource(source: Element, clone: Element, resources: AuthorStyleResource[]): void {
+  if (!(source instanceof HTMLImageElement)) return;
+  const src = source.currentSrc || source.src;
+  if (!src) return;
+  try {
+    const url = new URL(src);
+    if (!/^https?:$/i.test(url.protocol)) return;
+    resources.push({ url: url.toString(), sourceUrl: location.href, kind: 'image' });
+    // The actual URL deliberately stays out of static HTML. The service turns
+    // this opaque value into a same-origin asset URL for preview rendering.
+    clone.setAttribute('data-ui-agent-resource-url', encodeURIComponent(url.toString()));
+  } catch {
+    // A malformed visual resource should not prevent capturing the page.
+  }
 }
 
 function capturePseudoStyle(source: Element, sourceId: string, pseudo: '::before' | '::after'): string | undefined {
@@ -141,9 +175,10 @@ function capturePseudoStyle(source: Element, sourceId: string, pseudo: '::before
   return `[data-ui-source-id="${sourceId}"]${pseudo}{${declarations.join(';')}}`;
 }
 
-function sanitizeElement(source: Element, clone: Element, registry: StyleRegistry): void {
+function sanitizeElement(source: Element, clone: Element, registry: StyleRegistry, resources: AuthorStyleResource[]): void {
   copyLiveState(source, clone);
   applyComputedStyle(source, clone, registry);
+  captureImageResource(source, clone, resources);
 
   for (const attribute of [...clone.attributes]) {
     const name = attribute.name.toLowerCase();
@@ -177,7 +212,7 @@ function capturedRect(source: Element): string {
     .join(',');
 }
 
-function sanitizeTree(sourceRoot: HTMLElement, cloneRoot: HTMLElement, registry: StyleRegistry): string[] {
+function sanitizeTree(sourceRoot: HTMLElement, cloneRoot: HTMLElement, registry: StyleRegistry, resources: AuthorStyleResource[]): string[] {
   const sourceElements = [sourceRoot, ...sourceRoot.querySelectorAll('*')];
   const cloneElements = [cloneRoot, ...cloneRoot.querySelectorAll('*')];
   const pseudoRules: string[] = [];
@@ -193,7 +228,7 @@ function sanitizeTree(sourceRoot: HTMLElement, cloneRoot: HTMLElement, registry:
     const sourceId = `source-${index}`;
     clone.setAttribute('data-ui-source-id', sourceId);
     clone.setAttribute('data-ui-agent-source-rect', capturedRect(source));
-    sanitizeElement(source, clone, registry);
+    sanitizeElement(source, clone, registry, resources);
     for (const pseudo of ['::before', '::after'] as const) {
       const rule = capturePseudoStyle(source, sourceId, pseudo);
       if (rule) pseudoRules.push(rule);
@@ -226,10 +261,58 @@ function removeSerializationArtifacts(root: HTMLElement): void {
   }
 }
 
+/**
+ * Framework-created DOM may contain a list item inside another list item.
+ * Browsers retain that live tree, but HTML parsing closes the outer `li`
+ * before the inner one when a snapshot is reopened. Collapse content-free
+ * wrappers so the snapshot survives HTML serialization without gaining an
+ * extra flex/list item.
+ */
+function normalizeNestedListItems(root: HTMLElement): void {
+  for (const outer of [...root.querySelectorAll('li')].reverse()) {
+    const children = [...outer.children];
+    const innerItems = children.filter(child => child.tagName === 'LI');
+    const hasOnlyWhitespaceBesidesInner = [...outer.childNodes].every(node =>
+      node === innerItems[0]
+      || node.nodeType === Node.COMMENT_NODE
+      || (node.nodeType === Node.TEXT_NODE && !node.textContent?.trim())
+    );
+    if (innerItems.length !== 1 || children.length !== 1 || !hasOnlyWhitespaceBesidesInner) continue;
+    const inner = innerItems[0]!;
+    for (const attribute of [...outer.attributes]) {
+      if (attribute.name === 'class') {
+        inner.classList.add(...attribute.value.split(/\s+/).filter(Boolean));
+        continue;
+      }
+      if (attribute.name === 'data-ui-source-id' || attribute.name === 'data-ui-agent-source-rect') continue;
+      if (!inner.hasAttribute(attribute.name)) inner.setAttribute(attribute.name, attribute.value);
+    }
+    outer.replaceWith(inner);
+  }
+}
+
+function bodyContextAttributes(sourceBody: HTMLElement): string {
+  const contextAttributes = ['class', 'dir', 'lang', 'data-theme']
+    .flatMap(name => {
+      const value = sourceBody.getAttribute(name);
+      return value === null ? [] : [`${name}="${escapeHtml(value)}"`];
+    });
+  return contextAttributes.length ? ` ${contextAttributes.join(' ')}` : '';
+}
+
 export function captureStaticSnapshot(sourceRoot: HTMLElement): StaticSnapshot {
+  const authorStyles = captureAccessibleAuthorStyles(document);
+  const authorStyleSources = Array.from(document.querySelectorAll<HTMLLinkElement>('link[rel~="stylesheet"][href]'))
+    .map(link => link.href)
+    .filter((value, index, values) => values.indexOf(value) === index);
   const cloneRoot = sourceRoot.cloneNode(true) as HTMLElement;
   const registry: StyleRegistry = { rules: new Map(), inlineStyleCharsBefore: 0 };
-  const pseudoRules = sanitizeTree(sourceRoot, cloneRoot, registry);
+  const visualResources: AuthorStyleResource[] = [];
+  const pseudoRules = sanitizeTree(sourceRoot, cloneRoot, registry, visualResources);
+  normalizeNestedListItems(cloneRoot);
+  authorStyles.resources = [...new Map(
+    [...(authorStyles.resources ?? []), ...visualResources].map(resource => [resource.url, resource])
+  ).values()];
   let renderedRoot = cloneRoot;
   if (sourceRoot === document.body) {
     renderedRoot = document.createElement('div');
@@ -269,7 +352,7 @@ export function captureStaticSnapshot(sourceRoot: HTMLElement): StaticSnapshot {
     ${pseudoRules.join('\n    ')}
   </style>
 </head>
-<body data-ui-agent-static-snapshot="true">
+<body data-ui-agent-static-snapshot="true"${sourceRoot === document.body ? bodyContextAttributes(sourceRoot) : ''}>
   <main data-ui-agent-snapshot-stage>${renderedRoot.outerHTML}</main>
 </body>
 </html>`;
@@ -290,7 +373,10 @@ export function captureStaticSnapshot(sourceRoot: HTMLElement): StaticSnapshot {
     pseudoStyleChars,
     inlineDataResourceChars,
     serializedHtmlCharsBefore: html.length + styleDedupSavedChars,
-    serializedHtmlCharsAfter: html.length
+    serializedHtmlCharsAfter: html.length,
+    authorReadableSheets: authorStyles.readableSheets,
+    authorUnreadableSheets: authorStyles.unreadableSheets,
+    authorMissingSources: authorStyles.missing
   };
   return staticSnapshotSchema.parse({
     protocolVersion: PROTOCOL_VERSION,
@@ -301,6 +387,8 @@ export function captureStaticSnapshot(sourceRoot: HTMLElement): StaticSnapshot {
     nodeCount,
     selectedSourceId: 'source-0',
     metrics,
+    authorStyles: authorStyles.cssText || authorStyles.resources.length || authorStyles.unreadableSources?.length ? authorStyles : undefined,
+    authorStyleSources,
     viewport: {
       width: viewportWidth,
       height: viewportHeight

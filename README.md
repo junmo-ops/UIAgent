@@ -93,6 +93,10 @@ pnpm dev:service
 
 默认使用 `deepseek-v4-flash`，适合 Demo 的低延迟规划；如需更强的复杂指令理解，可改为 `deepseek-v4-pro`。不要把长期 Key 写入插件代码、浏览器存储或提交到 Git。
 
+候选草稿的真实渲染验证目前是实验能力，默认关闭，编辑会直接保存通过静态校验的 Revision。后续要单独评估该流程时，在 `apps/agent-service/.env` 设置 `CANDIDATE_RENDER_VALIDATION_ENABLED=true` 后重启服务即可。
+
+副本生成默认只使用 B 方案（作者 CSS + `author-overrides.css`）。A 方案是冻结计算样式的诊断/回退变体，当前默认关闭；需要排查 B 方案资源问题时，可在 `apps/agent-service/.env` 临时设置 `REPLICA_A_ENABLED=true` 并重启服务。A 关闭时，如果页面没有可用的作者样式资源，创建会明确失败，不会静默生成 A 副本。
+
 可打开 `http://127.0.0.1:8787/health` 确认当前模型和 Coding Agent。静态源码模式统一使用 Cline SDK，需要 Node.js 22 或更高版本；可用 `CLINE_MAX_ITERATIONS` 调整单轮最大迭代数，默认 45。最后 3 轮会停止扩展读取，强制转入校验、完成或澄清，避免修改完成后因未调用 `finish` 被回滚。
 
 Cline 只会获得当前静态副本的搜索、局部读取、样式规则直读、结构化 DOM 操作、精确替换、受控 Patch、校验、提交和澄清工具；除正常调用模型接口外，不向 Agent 开放 Shell、任意网络请求、浏览器或任意文件访问工具。DOM 工具按 `sourceId` 操作并保留完整结构与样式；Patch 只允许修改 `index.html` 和 `snapshot.css`，支持原子替换及在文件开头、末尾或唯一锚点旁插入，校验失败不会形成 Revision。修改配置后需要停止并重启 Agent Service，Chrome 插件本身无需重新构建。

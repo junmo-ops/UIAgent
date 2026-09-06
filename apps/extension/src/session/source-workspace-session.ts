@@ -19,12 +19,26 @@ export interface WorkspaceChatEntry {
   clarification?: WorkspaceClarificationPrompt;
 }
 
+/**
+ * Durable enough to reconnect a Side Panel to a turn that is still running
+ * in the service. The formal revision remains the source of truth; this only
+ * prevents a reopened panel from losing its terminal status.
+ */
+export interface ActiveSourceTurnSession {
+  turnId: string;
+  instruction: string;
+  baseRevision: number;
+  assistantEntryId: string;
+  startedAt: string;
+}
+
 export interface PersistedWorkspaceSession {
   workspace: SourceWorkspaceInfo;
   chat: WorkspaceChatEntry[];
   editSessionId: string;
   sourceTabId?: number;
   pendingClarification?: WorkspaceClarificationPrompt;
+  activeSourceTurn?: ActiveSourceTurnSession;
 }
 
 export const sourceWorkspaceSessionItem = storage.defineItem<PersistedWorkspaceSession | null>(

@@ -5,7 +5,7 @@
   "type": "module",
   "scripts": {
     "dev": "wxt --browser chrome",
-    "build": "WXT_PUBLIC_AGENT_SERVICE_URL=https://ui-agent-dev.paas.cmbchina.cn wxt build --browser chrome",
+    "build": "node ./scripts/build-extension.mjs",
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {

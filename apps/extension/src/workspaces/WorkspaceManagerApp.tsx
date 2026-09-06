@@ -12,6 +12,7 @@ import { agentServiceFetch } from '../service/agent-service-client';
 import { parseWorkspaceArchiveZip, serializeWorkspaceArchiveZip } from './workspace-archive';
 
 type WorkspaceStatus = 'active' | 'trashed';
+type SnapshotDiagnostics = { totalChars: number; cssChars: number; cssShare: number; generatedStyleRuleCount: number; generatedStyleShare: number; authorCssChars?: number; authorResourceCount?: number; authorResourceOriginCount?: number; authorRenderOnlyStyleCount?: number; authorResourceFailureCount?: number };
 const PAGE_SIZE = 18;
 
 function formatTime(value: string): string {
@@ -46,6 +47,7 @@ export function WorkspaceManagerApp() {
   const [renaming, setRenaming] = useState<ManagedWorkspace>();
   const [draftTitle, setDraftTitle] = useState('');
   const [transferBusy, setTransferBusy] = useState(false);
+  const [diagnostics, setDiagnostics] = useState<Record<string, SnapshotDiagnostics>>({});
   const importFileRef = useRef<HTMLInputElement>(null);
 
   useEffect(() => { void getAgentServiceUrl().then(setServiceUrl); }, []);
@@ -69,6 +71,15 @@ export function WorkspaceManagerApp() {
         return;
       }
       setData(nextData);
+      const entries = await Promise.all(nextData.items.map(async item => {
+        try {
+          const diagnosticResponse = await agentServiceFetch(`${serviceUrl.replace(/\/$/, '')}/v1/workspaces/${item.workspaceId}/diagnostics`, { cache: 'no-store' });
+          if (!diagnosticResponse.ok) return undefined;
+          const body = await diagnosticResponse.json() as { diagnostics?: SnapshotDiagnostics };
+          return body.diagnostics ? [item.workspaceId, body.diagnostics] as const : undefined;
+        } catch { return undefined; }
+      }));
+      setDiagnostics(Object.fromEntries(entries.filter((entry): entry is readonly [string, SnapshotDiagnostics] => Boolean(entry))));
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : '副本列表加载失败');
     } finally {
@@ -222,10 +233,17 @@ export function WorkspaceManagerApp() {
             </div>
             <h2>{workspace.title}</h2>
             <p className="source-url" title={workspace.sourceUrl}>{workspace.sourceUrl || '本地页面'}</p>
+            {diagnostics[workspace.workspaceId] && <p className="source-url">副本 {Math.round(diagnostics[workspace.workspaceId]!.totalChars / 1024)} KB · CSS {Math.round(diagnostics[workspace.workspaceId]!.cssShare * 100)}% · 展开样式 {Math.round(diagnostics[workspace.workspaceId]!.generatedStyleShare * 100)}%{diagnostics[workspace.workspaceId]!.authorCssChars ? ` · 原始规则 ${Math.round(diagnostics[workspace.workspaceId]!.authorCssChars! / 1024)} KB` : ''}{diagnostics[workspace.workspaceId]!.authorResourceCount ? ` · 资源 ${diagnostics[workspace.workspaceId]!.authorResourceCount}（${diagnostics[workspace.workspaceId]!.authorResourceOriginCount} 个来源）` : ''}{diagnostics[workspace.workspaceId]!.authorRenderOnlyStyleCount ? ` · 外链样式 ${diagnostics[workspace.workspaceId]!.authorRenderOnlyStyleCount}（依赖原站）` : ''}{diagnostics[workspace.workspaceId]!.authorResourceFailureCount ? ` · 本次资源失败 ${diagnostics[workspace.workspaceId]!.authorResourceFailureCount}` : ''}</p>}
+            {Boolean(diagnostics[workspace.workspaceId]?.authorRenderOnlyStyleCount) && <p className="source-url">部分样式依赖在线加载，离线或原站限制可能导致缺失；资源失败计数不包含这些外链的加载结果。</p>}
             <div className="revision-line"><i /><span>最近修改 {formatTime(workspace.updatedAt)}</span></div>
             <div className="workspace-actions">
               {status === 'active' ? <>
-                <button className="primary" onClick={() => void browser.tabs.create({ url: workspace.previewUrl })}>打开副本</button>
+              <button className="primary" onClick={() => void browser.tabs.create({ url: workspace.previewUrl })}>打开副本</button>
+              {diagnostics[workspace.workspaceId]?.authorCssChars ? <button onClick={() => {
+                const candidateUrl = new URL(workspace.previewUrl);
+                candidateUrl.searchParams.delete('candidate');
+                void browser.tabs.create({ url: candidateUrl.toString() });
+              }}>查看 A 基线</button> : null}
                 <button disabled={transferBusy} onClick={() => { setRenaming(workspace); setDraftTitle(workspace.title); }}>重命名</button>
                 <button className="danger" onClick={() => {
                   if (window.confirm(`将“${workspace.title}”移入回收站？`)) {

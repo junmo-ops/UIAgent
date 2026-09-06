@@ -29,6 +29,8 @@ export interface CompiledSourceWorkspace {
 
 export interface SourceWorkspaceCompileOptions {
   viewport?: { width: number; height: number };
+  /** Author-rule snapshots need original inline declarations and their cascade priority. */
+  preserveInlineStyles?: boolean;
 }
 
 function normalizeLegacyDeclaration(declaration: string): string {
@@ -116,6 +118,9 @@ export function compileSourceWorkspace(
 
   const styles = new Map<string, string>();
   for (const element of [...document.querySelectorAll('[style]')]) {
+    // These declarations are source state, not computed-style fallback rules.
+    // Converting them would discard them in the author-rules candidate.
+    if (options.preserveInlineStyles) continue;
     const declaration = normalizeLegacyDeclaration(element.getAttribute('style')?.trim() ?? '');
     if (!declaration) {
       element.removeAttribute('style');

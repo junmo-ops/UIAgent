@@ -74,7 +74,10 @@ class InstallationTokenAuthenticator implements Authenticator {
     const url = new URL(request.url);
     const previewClaims = this.verify(url.searchParams.get('preview_token') ?? undefined);
     if (previewClaims?.kind !== 'preview' || !previewClaims.workspaceId) return undefined;
-    if (url.pathname !== `/workspaces/${previewClaims.workspaceId}/preview`) return undefined;
+    const previewBasePath = `/workspaces/${previewClaims.workspaceId}/`;
+    const previewPath = url.pathname.slice(previewBasePath.length);
+    const candidatePreviewPath = /^candidates\/[0-9a-f-]{36}\/versions\/\d+\/(?:preview|author-overrides\.css)$/i.test(previewPath);
+    if (!candidatePreviewPath && !['preview', 'author.css', 'author-overrides.css'].includes(previewPath) && !previewPath.startsWith('assets/') && !previewPath.startsWith('author-sheets/')) return undefined;
     return this.principal(previewClaims);
   }
 

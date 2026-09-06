@@ -8,6 +8,8 @@ import {
   sourceTurnRequestSchema,
   sourceTurnAcceptedSchema,
   sourceTurnProgressSchema,
+  renderJobStatusSchema,
+  candidateGeometryValidationResultSchema,
   sourceWorkspaceCreatedSchema,
   sourceWorkspaceInfoSchema,
   workspaceChatEntrySchema,
@@ -17,6 +19,7 @@ import {
   type ContentCommandResult,
   type PageSelection,
   type SourceWorkspaceInfo,
+  type SourceTurnResponse,
   type SourceTurnProgress,
   type StaticSnapshot
 } from '@ui-agent/contracts';
@@ -32,6 +35,7 @@ import { agentServiceFetch } from '../service/agent-service-client';
 import { readAssistantEventStream } from '../service/assistant-event-stream';
 import {
   sourceWorkspaceSessionItem,
+  type ActiveSourceTurnSession,
   type WorkspaceChatEntry,
   type WorkspaceClarificationPrompt
 } from '../session/source-workspace-session';
@@ -48,6 +52,7 @@ void editorPort;
 
 type ClarificationPrompt = WorkspaceClarificationPrompt;
 type ChatEntry = WorkspaceChatEntry;
+type CompletedSourceTurn = Extract<SourceTurnResponse, { kind: 'completed' }>;
 type ServiceStatus = 'checking' | 'connected' | 'unavailable';
 interface ActiveWorkspace extends SourceWorkspaceInfo {
   tabId: number;
@@ -104,6 +109,18 @@ async function fetchAgentService(url: string, init?: RequestInit): Promise<Respo
   }
 }
 
+/** Accept both a committed workspace and an immutable candidate preview. */
+function previewWorkspaceId(value: string | undefined): string | undefined {
+  if (!value) return undefined;
+  try {
+    const path = new URL(value).pathname;
+    const match = /^\/workspaces\/([0-9a-f-]{36})(?:\/preview|\/candidates\/[0-9a-f-]{36}\/versions\/\d+\/preview)\/?$/i.exec(path);
+    return match?.[1];
+  } catch {
+    return undefined;
+  }
+}
+
 export function SidePanelApp() {
   const [instruction, setInstruction] = useState('');
   const [chat, setChat] = useState<ChatEntry[]>([]);
@@ -116,27 +133,31 @@ export function SidePanelApp() {
   const [editSessionId, setEditSessionId] = useState<string>(() => crypto.randomUUID());
   const [sourceWorkspace, setSourceWorkspace] = useState<ActiveWorkspace>();
   const [sourceProgress, setSourceProgress] = useState<SourceTurnProgress>();
+  const [activeSourceTurn, setActiveSourceTurn] = useState<ActiveSourceTurnSession>();
   const [pendingClarification, setPendingClarification] = useState<ClarificationPrompt>();
   const [assistantBusy, setAssistantBusy] = useState(false);
   const [streamingAnswerId, setStreamingAnswerId] = useState<string>();
   const [snapshotBusy, setSnapshotBusy] = useState(false);
-  const [useVisibleViewport, setUseVisibleViewport] = useState(false);
+  const [useVisibleViewport, setUseVisibleViewport] = useState(true);
   const [exportConfirmOpen, setExportConfirmOpen] = useState(false);
   const [moreOpen, setMoreOpen] = useState(false);
   const composerRef = useRef<TextAreaRef>(null);
   const snapshotFileRef = useRef<HTMLInputElement>(null);
-  const busy = snapshotBusy || assistantBusy;
+  const repairValidationAbortRef = useRef<AbortController | undefined>(undefined);
+  const resumedTurnIdsRef = useRef(new Set<string>());
+  const [recoveryAttempt, setRecoveryAttempt] = useState(0);
+  const busy = snapshotBusy || assistantBusy || Boolean(activeSourceTurn);
 
   useEffect(() => {
     getAgentServiceUrl().then(async url => {
       setServiceUrl(url);
       const [tab] = await browser.tabs.query({ active: true, currentWindow: true });
-      const match = /\/workspaces\/([0-9a-f-]{36})\/preview/i.exec(tab?.url ?? '');
-      if (!match || !tab?.id) return;
+      const workspaceId = previewWorkspaceId(tab?.url);
+      if (!workspaceId || !tab?.id || !tab.url) return;
       try {
         const [response, conversationResponse, persisted] = await Promise.all([
-          fetchAgentService(`${url.replace(/\/$/, '')}/v1/workspaces/${match[1]}`),
-          fetchAgentService(`${url.replace(/\/$/, '')}/v1/workspaces/${match[1]}/conversation`),
+          fetchAgentService(`${url.replace(/\/$/, '')}/v1/workspaces/${workspaceId}`),
+          fetchAgentService(`${url.replace(/\/$/, '')}/v1/workspaces/${workspaceId}/conversation`),
           sourceWorkspaceSessionItem.getValue()
         ]);
         if (!response.ok) return;
@@ -167,8 +188,10 @@ export function SidePanelApp() {
         if (persisted?.workspace.workspaceId === workspace.workspaceId) {
           setEditSessionId(persisted.editSessionId);
           setPendingClarification(persisted.pendingClarification);
+          setActiveSourceTurn(persisted.activeSourceTurn);
         }
-        await command({ type: 'bindEditorTab', tabId: tab.id, previewUrl: workspace.previewUrl });
+        // Keep the exact candidate URL: its identity is what enables render-job polling.
+        await command({ type: 'bindEditorTab', tabId: tab.id, previewUrl: tab.url });
       } catch { /* Keep the regular page mode when workspace restoration fails. */ }
     });
   }, []);
@@ -177,9 +200,9 @@ export function SidePanelApp() {
     const onActivated = async ({ tabId }: { tabId: number }) => {
       try {
         const tab = await browser.tabs.get(tabId);
-        const match = /\/workspaces\/([0-9a-f-]{36})\/preview/i.exec(tab.url ?? '');
-        if (!match || match[1] !== sourceWorkspace.workspaceId) return;
-        await command({ type: 'bindEditorTab', tabId, previewUrl: sourceWorkspace.previewUrl });
+        const workspaceId = previewWorkspaceId(tab.url);
+        if (!workspaceId || workspaceId !== sourceWorkspace.workspaceId || !tab.url) return;
+        await command({ type: 'bindEditorTab', tabId, previewUrl: tab.url });
         setSourceWorkspace(current => current ? { ...current, tabId } : current);
         setSelection(undefined);
         setSelecting(false);
@@ -211,9 +234,10 @@ export function SidePanelApp() {
       chat,
       editSessionId,
       sourceTabId: sourceWorkspace.sourceTabId,
-      pendingClarification
+      pendingClarification,
+      activeSourceTurn
     });
-  }, [sourceWorkspace, chat, editSessionId, pendingClarification]);
+  }, [sourceWorkspace, chat, editSessionId, pendingClarification, activeSourceTurn]);
   useEffect(() => {
     const heartbeat = () => { void command({ type: 'editorHeartbeat' }).catch(() => undefined); };
     const deactivate = () => { void command({ type: 'deactivateEditor' }).catch(() => undefined); };
@@ -248,6 +272,7 @@ export function SidePanelApp() {
       `${serviceUrl.replace(/\/$/, '')}/v1/workspaces/${workspace.workspaceId}/conversation`,
       {
         method: 'POST',
+        signal: AbortSignal.timeout(15_000),
         headers: { 'content-type': 'application/json' },
         body: JSON.stringify(payload)
       }
@@ -260,10 +285,10 @@ export function SidePanelApp() {
     text: string,
     clarification?: ClarificationPrompt,
     revision?: number,
-    entryId = crypto.randomUUID()
+    entryId: string = crypto.randomUUID()
   ) => {
     const entry: ChatEntry = { id: entryId, role, text, ...(clarification && { clarification }) };
-    setChat(entries => [...entries, entry]);
+    setChat(entries => entries.some(current => current.id === entry.id) ? entries : [...entries, entry]);
     await persistWorkspaceChat(entry, sourceWorkspace, revision);
     return entry;
   };
@@ -278,7 +303,7 @@ export function SidePanelApp() {
     replyToClarificationId?: string,
     clarificationOptionId?: string
   ) => {
-    if (!text) return;
+    if (!text || busy) return;
     const turnId = crypto.randomUUID();
     await appendChat('user', text, undefined, undefined, turnId);
     setInstruction('');
@@ -388,6 +413,7 @@ export function SidePanelApp() {
   };
 
   const history = async (type: 'undo' | 'redo' | 'reset') => {
+    if (busy) return;
     try {
       if (!sourceWorkspace) return;
       setSnapshotBusy(true);
@@ -417,6 +443,14 @@ export function SidePanelApp() {
   const returnToSource = async () => {
     if (!sourceWorkspace?.sourceTabId) return;
     try {
+      if (sourceWorkspace.sourceTabId === sourceWorkspace.tabId) {
+        await browser.tabs.update(sourceWorkspace.tabId, { url: sourceWorkspace.sourceUrl, active: true });
+        await sourceWorkspaceSessionItem.setValue(null);
+        setSourceWorkspace(undefined);
+        setChat([]);
+        setPendingClarification(undefined);
+        return;
+      }
       await browser.tabs.update(sourceWorkspace.sourceTabId, { active: true });
     } catch {
       fail(new Error('原页面标签页已关闭'));
@@ -425,6 +459,59 @@ export function SidePanelApp() {
   const openWorkspaceManager = async () => {
     await browser.tabs.create({ url: browser.runtime.getURL('/workspace-manager.html') });
   };
+  const refreshFormalWorkspace = async (workspace: ActiveWorkspace): Promise<ActiveWorkspace> => {
+    const response = await fetchAgentService(
+      `${serviceUrl.replace(/\/$/, '')}/v1/workspaces/${workspace.workspaceId}`,
+      { cache: 'no-store', signal: AbortSignal.timeout(15_000) }
+    );
+    if (!response.ok) throw await serviceResponseError(response, '刷新副本版本返回');
+    const latest = sourceWorkspaceInfoSchema.parse(await response.json());
+    const refreshed = { ...latest, tabId: workspace.tabId, sourceTabId: workspace.sourceTabId };
+    setSourceWorkspace(current => current?.workspaceId === workspace.workspaceId ? refreshed : current);
+    return refreshed;
+  };
+  const applyCompletedDirectTurn = async (
+    outcome: CompletedSourceTurn,
+    workspace: ActiveWorkspace,
+    assistantEntryId: string
+  ) => {
+    const refreshed = await refreshFormalWorkspace(workspace);
+    await appendChat('assistant', outcome.summary, undefined, refreshed.revision, assistantEntryId);
+    // 已满足需求时服务端不会产生新 Revision，预览页也无需重载。
+    if (!outcome.unchanged) await command({ type: 'reloadPreview' });
+  };
+  const persistActiveSourceTurn = async (workspace: ActiveWorkspace, activeTurn: ActiveSourceTurnSession) => {
+    const { tabId: _tabId, sourceTabId: _sourceTabId, ...persistedWorkspace } = workspace;
+    const existing = await sourceWorkspaceSessionItem.getValue();
+    await sourceWorkspaceSessionItem.setValue({
+      workspace: persistedWorkspace,
+      chat: existing?.workspace.workspaceId === workspace.workspaceId ? existing.chat : chat,
+      editSessionId,
+      sourceTabId: workspace.sourceTabId,
+      pendingClarification,
+      activeSourceTurn: activeTurn
+    });
+  };
+  const clearPersistedActiveSourceTurn = async (workspaceId: string, turnId: string) => {
+    const existing = await sourceWorkspaceSessionItem.getValue();
+    if (
+      existing?.workspace.workspaceId !== workspaceId
+      || existing.activeSourceTurn?.turnId !== turnId
+    ) return;
+    await sourceWorkspaceSessionItem.setValue({ ...existing, activeSourceTurn: undefined });
+  };
+  const waitForSourceTurn = async (workspaceId: string, turnId: string) => {
+    const url = `${serviceUrl.replace(/\/$/, '')}/v1/workspaces/${workspaceId}/turns/${turnId}/progress`;
+    while (true) {
+      const response = await fetchAgentService(url, { cache: 'no-store', signal: AbortSignal.timeout(15_000) });
+      if (response.status === 404) return undefined;
+      if (!response.ok) throw await serviceResponseError(response, '查询修改任务返回');
+      const progress = sourceTurnProgressSchema.parse(await response.json());
+      setSourceProgress(progress);
+      if (progress.status !== 'running' && progress.status !== 'cancelling') return progress;
+      await new Promise<void>(resolve => window.setTimeout(resolve, 650));
+    }
+  };
   const runSourceTurn = async (
     text: string,
     workspace: ActiveWorkspace,
@@ -432,7 +519,20 @@ export function SidePanelApp() {
     turnId = crypto.randomUUID()
   ) => {
     setSnapshotBusy(true);
+    let settled = false;
+    let requestMayHaveStarted = false;
+    setRecoveryAttempt(0);
+    const activeTurn: ActiveSourceTurnSession = {
+      turnId,
+      instruction: text,
+      baseRevision: workspace.revision,
+      assistantEntryId: crypto.randomUUID(),
+      startedAt: new Date().toISOString()
+    };
+    resumedTurnIdsRef.current.add(turnId);
+    setActiveSourceTurn(activeTurn);
     try {
+      await persistActiveSourceTurn(workspace, activeTurn);
       const request = sourceTurnRequestSchema.parse({
         protocolVersion: PROTOCOL_VERSION,
         editSessionId,
@@ -452,36 +552,26 @@ export function SidePanelApp() {
         updatedAt: new Date().toISOString(),
         activities: []
       });
-      const progressUrl = `${serviceUrl.replace(/\/$/, '')}/v1/workspaces/${workspace.workspaceId}/turns/${request.turnId}/progress`;
-      const refreshProgress = async (): Promise<SourceTurnProgress | undefined> => {
-        try {
-          const progressResponse = await fetchAgentService(progressUrl, { cache: 'no-store' });
-          if (!progressResponse.ok) return undefined;
-          const progress = sourceTurnProgressSchema.parse(await progressResponse.json());
-          setSourceProgress(progress);
-          return progress;
-        } catch {
-          return undefined;
-        }
-      };
+      requestMayHaveStarted = true;
       const response = await fetchAgentService(`${serviceUrl.replace(/\/$/, '')}/v1/workspaces/${workspace.workspaceId}/turns`, {
         method: 'POST',
+        signal: AbortSignal.timeout(15_000),
         headers: { 'content-type': 'application/json' },
         body: JSON.stringify(request)
       });
-      if (!response.ok) throw await serviceResponseError(response, '源码 Agent 返回');
-      sourceTurnAcceptedSchema.parse(await response.json());
-      let progress: SourceTurnProgress | undefined;
-      while (!progress || progress.status === 'running' || progress.status === 'cancelling') {
-        progress = await refreshProgress();
-        if (!progress || progress.status === 'running' || progress.status === 'cancelling') {
-          await new Promise<void>(resolve => window.setTimeout(resolve, 650));
-        }
+      if (!response.ok) {
+        // A server error may occur after acceptance; only explicit client rejection is final.
+        settled = response.status >= 400 && response.status < 500 && response.status !== 408;
+        throw await serviceResponseError(response, '源码 Agent 返回');
       }
+      sourceTurnAcceptedSchema.parse(await response.json());
+      const progress = await waitForSourceTurn(workspace.workspaceId, turnId);
+      if (!progress) throw new Error('任务状态已丢失，正在重新核对正式副本');
       const outcome = progress.result;
       if (!outcome) throw new Error('源码任务已结束，但未返回最终结果');
       if (outcome.kind === 'cancelled') {
-        await appendChat('assistant', outcome.message, undefined, workspace.revision);
+        await appendChat('assistant', outcome.message, undefined, workspace.revision, activeTurn.assistantEntryId);
+        settled = true;
         return;
       }
       if (outcome.kind === 'clarification') {
@@ -491,29 +581,226 @@ export function SidePanelApp() {
           allowFreeText: outcome.allowFreeText
         };
         setPendingClarification(clarification);
-        await appendChat('assistant', outcome.question, clarification, workspace.revision);
+        await appendChat('assistant', outcome.question, clarification, workspace.revision, activeTurn.assistantEntryId);
+        settled = true;
         return;
       }
-      if (outcome.kind === 'failed') throw new Error(`[${outcome.code}] ${outcome.message}`);
-      setSourceWorkspace(current => current ? {
-        ...current,
-        revision: outcome.revision,
-        canUndo: outcome.revision > 0,
-        canRedo: false
-      } : current);
-      await appendChat('assistant', outcome.summary, undefined, outcome.revision);
-      // 已满足需求时服务端不会产生新 Revision，预览页也无需重载。
-      if (!outcome.unchanged) await command({ type: 'reloadPreview' });
+      if (outcome.kind === 'failed') {
+        await appendChat('assistant', `本轮修改未完成：${outcome.message}`, undefined, workspace.revision, activeTurn.assistantEntryId);
+        settled = true;
+        return;
+      }
+      if (outcome.kind === 'draft') {
+        if (!outcome.previewUrl) throw new Error('候选草稿已生成，但没有可打开的预览地址');
+        const tab = await browser.tabs.update(workspace.tabId, { url: outcome.previewUrl, active: true });
+        const candidateTabId = tab?.id;
+        if (candidateTabId === undefined) throw new Error('候选草稿标签页不可用');
+        await command({ type: 'bindEditorTab', tabId: candidateTabId, previewUrl: outcome.previewUrl });
+        setSourceWorkspace(current => current ? { ...current, tabId: candidateTabId } : current);
+        // A retained candidate is useful audit/repair input, but it must not
+        // become the editing baseline after a failed validation.  The next
+        // source turn is always created from the formal workspace revision.
+        const returnToFormalPreview = async () => {
+          const workspaceResponse = await fetchAgentService(
+            `${serviceUrl.replace(/\/$/, '')}/v1/workspaces/${workspace.workspaceId}`,
+            { cache: 'no-store' }
+          );
+          if (!workspaceResponse.ok) throw await serviceResponseError(workspaceResponse, '返回正式副本');
+          const published = sourceWorkspaceInfoSchema.parse(await workspaceResponse.json());
+          const formalTab = await browser.tabs.update(candidateTabId, { url: published.previewUrl, active: true });
+          const formalTabId = formalTab?.id;
+          if (formalTabId === undefined) throw new Error('正式副本标签页不可用');
+          await command({ type: 'bindEditorTab', tabId: formalTabId, previewUrl: published.previewUrl });
+          setSourceWorkspace(current => current ? { ...published, tabId: formalTabId } : current);
+        };
+        await appendChat('assistant', `${outcome.summary}。正在等待真实渲染与验证。`, undefined, workspace.revision);
+        setNotice('候选草稿已生成，正在检查渲染结果');
+        const waitForCandidate = async (draft: {
+          summary: string;
+          candidate: typeof outcome.candidate;
+          intent: typeof outcome.intent;
+          renderJobId?: string;
+          previewUrl?: string;
+          attempt?: number;
+        }): Promise<void> => {
+          if (!draft.renderJobId) {
+            await returnToFormalPreview();
+            setNotice('候选草稿没有渲染任务，已保留草稿并返回正式副本');
+            return;
+          }
+          const statusUrl = `${serviceUrl.replace(/\/$/, '')}/v1/workspaces/${workspace.workspaceId}/render-jobs/${draft.renderJobId}`;
+            const deadline = Date.now() + 35_000;
+            while (Date.now() < deadline) {
+              await new Promise<void>(resolve => window.setTimeout(resolve, 700));
+              const response = await fetchAgentService(statusUrl, { cache: 'no-store' }).catch(() => undefined);
+              if (!response?.ok) continue;
+              const status = renderJobStatusSchema.parse(await response.json());
+              if (status.status === 'completed') {
+                if (!status.result) {
+                  await returnToFormalPreview();
+                  setNotice('真实渲染任务未提供观察结果，候选草稿已保留，已返回正式副本');
+                  await appendChat('assistant', '候选草稿未发布：真实渲染任务没有提供可用于验证的观察结果。候选草稿已保留，已返回正式副本。', undefined, workspace.revision);
+                  return;
+                }
+                setNotice('真实渲染证据已收集，正在进行几何验证');
+                setSourceProgress(current => current ? {
+                  ...current,
+                  status: 'running',
+                  phase: 'validating',
+                  message: '正在根据真实浏览器测量验证候选…',
+                  updatedAt: new Date().toISOString()
+                } : current);
+                const validationAbort = new AbortController();
+                repairValidationAbortRef.current = validationAbort;
+                let validationResponse: Response | undefined;
+                try {
+                  validationResponse = await fetchAgentService(
+                    `${serviceUrl.replace(/\/$/, '')}/v1/workspaces/${workspace.workspaceId}/candidates/${draft.candidate.candidateId}/geometry-validations`,
+                    {
+                      method: 'POST',
+                      headers: { 'content-type': 'application/json' },
+                      signal: validationAbort.signal,
+                      body: JSON.stringify({
+                        workspaceId: workspace.workspaceId,
+                        baseRevision: draft.candidate.baseRevision,
+                        candidateId: draft.candidate.candidateId,
+                        candidateVersion: draft.candidate.candidateVersion,
+                        contentHash: draft.candidate.contentHash,
+                        renderMode: draft.candidate.renderMode,
+                        intentId: draft.intent.intentId,
+                        intentVersion: draft.intent.version,
+                        candidateObservationId: status.result.observationId,
+                        summary: draft.summary,
+                        commitId: crypto.randomUUID()
+                      })
+                    }
+                  );
+                } catch (error) {
+                  if (validationAbort.signal.aborted) {
+                    await returnToFormalPreview();
+                    setNotice('已停止候选验证，候选草稿已保留，已返回正式副本');
+                    await appendChat('assistant', '已停止候选验证，候选草稿未发布并已保留。', undefined, workspace.revision);
+                    return;
+                  }
+                  throw error;
+                } finally {
+                  if (repairValidationAbortRef.current === validationAbort) repairValidationAbortRef.current = undefined;
+                }
+                if (!validationResponse) throw new Error('几何验证没有返回响应');
+                if (!validationResponse.ok) throw await serviceResponseError(validationResponse, '几何验证返回');
+                const verification = candidateGeometryValidationResultSchema.parse(await validationResponse.json());
+                if (!verification.publication) {
+                  const details = verification.validation.constraintResults
+                    .filter(check => check.status !== 'passed')
+                    .map(check => `${check.id}：${check.message}`)
+                    .join('\n');
+                  if (verification.repair) {
+                    const repair = verification.repair;
+                    if (repair.kind === 'clarification') {
+                      await returnToFormalPreview();
+                      const clarification = {
+                        clarificationId: repair.clarificationId,
+                        options: repair.options,
+                        allowFreeText: repair.allowFreeText
+                      };
+                      setPendingClarification(clarification);
+                      setNotice('自动修正需要你确认后才能继续，已返回正式副本');
+                      await appendChat('assistant', repair.question, clarification, workspace.revision);
+                      return;
+                    }
+                    if (repair.kind === 'failed') {
+                      await returnToFormalPreview();
+                      setNotice('自动修正未完成，候选草稿已保留，已返回正式副本');
+                      await appendChat('assistant', `自动修正未完成：${repair.message}。候选草稿已保留，已返回正式副本。`, undefined, workspace.revision);
+                      return;
+                    }
+                    const repairedTab = await browser.tabs.update(candidateTabId, { url: repair.previewUrl, active: true });
+                    const repairedTabId = repairedTab?.id;
+                    if (repairedTabId === undefined) throw new Error('修正候选标签页不可用');
+                    await command({ type: 'bindEditorTab', tabId: repairedTabId, previewUrl: repair.previewUrl });
+                    setSourceWorkspace(current => current ? { ...current, tabId: repairedTabId } : current);
+                    setNotice(`第 ${repair.attempt} 次自动修正已生成，正在重新检查渲染结果`);
+                    await appendChat('assistant', `几何验证发现可修正问题，已生成第 ${repair.attempt} 次自动修正候选，正在重新渲染验证。${details ? `\n${details}` : ''}`, undefined, workspace.revision);
+                    await waitForCandidate(repair);
+                    return;
+                  }
+                  await returnToFormalPreview();
+                  setNotice(verification.validation.overall === 'unverifiable'
+                    ? '当前证据不足以验证该需求，候选草稿已保留，已返回正式副本'
+                    : '几何验证未通过，候选草稿已保留，已返回正式副本');
+                  await appendChat(
+                    'assistant',
+                    `候选草稿未发布：${verification.validation.overall === 'unverifiable' ? '当前渲染证据不足以验证需求。' : '几何验证未通过。'}候选草稿已保留，已返回正式副本。${details ? `\n${details}` : ''}`,
+                    undefined,
+                    workspace.revision
+                  );
+                  return;
+                }
+                const workspaceResponse = await fetchAgentService(
+                  `${serviceUrl.replace(/\/$/, '')}/v1/workspaces/${workspace.workspaceId}`,
+                  { cache: 'no-store' }
+                );
+                if (!workspaceResponse.ok) throw await serviceResponseError(workspaceResponse, '刷新正式副本返回');
+                const published = sourceWorkspaceInfoSchema.parse(await workspaceResponse.json());
+                const publishedTab = await browser.tabs.update(candidateTabId, { url: published.previewUrl, active: true });
+                const publishedTabId = publishedTab?.id;
+                if (publishedTabId === undefined) throw new Error('正式副本标签页不可用');
+                await command({ type: 'bindEditorTab', tabId: publishedTabId, previewUrl: published.previewUrl });
+                setSourceWorkspace(current => current ? { ...published, tabId: publishedTabId } : current);
+                setNotice('几何验证通过，已保存正式 Revision');
+                await appendChat('assistant', `${draft.summary}。已完成真实几何验证并保存为 Revision ${verification.publication.revision}。`, undefined, verification.publication.revision);
+                return;
+              }
+              if (status.status === 'failed' || status.status === 'cancelled') {
+                await returnToFormalPreview();
+                setNotice(`候选草稿未完成渲染：${status.failure ?? status.status}；已返回正式副本`);
+                await appendChat('assistant', `候选草稿未完成渲染：${status.failure ?? status.status}。候选草稿已保留，已返回正式副本。`, undefined, workspace.revision);
+                return;
+              }
+            }
+            await returnToFormalPreview();
+            setNotice('候选草稿等待渲染超时，已保留草稿并返回正式副本');
+            await appendChat('assistant', '候选草稿未发布：等待真实渲染超时。候选草稿已保留，已返回正式副本。', undefined, workspace.revision);
+        };
+        try {
+          await waitForCandidate(outcome);
+          settled = true;
+        } catch (error) {
+          await returnToFormalPreview().catch(() => undefined);
+          throw error;
+        }
+        return;
+      }
+      await applyCompletedDirectTurn(outcome, workspace, activeTurn.assistantEntryId);
+      settled = true;
     } catch (error) {
       fail(error);
     } finally {
       setSnapshotBusy(false);
-      setSourceProgress(undefined);
+      if (settled || !requestMayHaveStarted) {
+        setSourceProgress(undefined);
+        setActiveSourceTurn(undefined);
+        await clearPersistedActiveSourceTurn(workspace.workspaceId, activeTurn.turnId).catch(() => undefined);
+      } else {
+        resumedTurnIdsRef.current.delete(turnId);
+        setRecoveryAttempt(attempt => attempt + 1);
+      }
     }
   };
 
   const cancelSourceTurn = async () => {
     if (!sourceWorkspace || !sourceProgress || sourceProgress.status !== 'running') return;
+    if (repairValidationAbortRef.current) {
+      repairValidationAbortRef.current.abort(new Error('用户停止候选验证'));
+      setSourceProgress(current => current ? {
+        ...current,
+        status: 'cancelling',
+        phase: 'finishing',
+        message: '正在停止候选验证…',
+        updatedAt: new Date().toISOString()
+      } : current);
+      return;
+    }
     try {
       const response = await fetchAgentService(
         `${serviceUrl.replace(/\/$/, '')}/v1/workspaces/${sourceWorkspace.workspaceId}/turns/${sourceProgress.turnId}/cancel`,
@@ -528,6 +815,70 @@ export function SidePanelApp() {
       } : current);
     } catch (error) {
       fail(error);
+    }
+  };
+  const resumeSourceTurn = async (workspace: ActiveWorkspace, activeTurn: ActiveSourceTurnSession) => {
+    let settled = false;
+    setSnapshotBusy(true);
+    setSourceProgress({
+      workspaceId: workspace.workspaceId,
+      turnId: activeTurn.turnId,
+      status: 'running',
+      phase: 'finishing',
+      message: '正在恢复上次修改任务…',
+      modelCalls: 0,
+      toolCalls: 0,
+      updatedAt: new Date().toISOString(),
+      activities: []
+    });
+    try {
+      {
+        const progress = await waitForSourceTurn(workspace.workspaceId, activeTurn.turnId);
+        if (!progress) {
+          const refreshed = await refreshFormalWorkspace(workspace);
+          const message = '上次修改任务的运行状态无法恢复，服务可能已重启。当前已保存的副本版本仍可继续编辑。';
+          setNotice(message);
+          await appendChat('assistant', message, undefined, refreshed.revision, activeTurn.assistantEntryId);
+          await command({ type: 'reloadPreview' });
+          settled = true;
+          return;
+        }
+        const outcome = progress.result;
+        if (!outcome) throw new Error('已恢复的修改任务缺少最终结果');
+        if (outcome.kind === 'completed') {
+          await applyCompletedDirectTurn(outcome, workspace, activeTurn.assistantEntryId);
+        } else if (outcome.kind === 'cancelled') {
+          await appendChat('assistant', outcome.message, undefined, workspace.revision, activeTurn.assistantEntryId);
+        } else if (outcome.kind === 'clarification') {
+          const clarification = {
+            clarificationId: outcome.clarificationId ?? crypto.randomUUID(),
+            options: outcome.options,
+            allowFreeText: outcome.allowFreeText
+          };
+          setPendingClarification(clarification);
+          await appendChat('assistant', outcome.question, clarification, workspace.revision, activeTurn.assistantEntryId);
+        } else if (outcome.kind === 'failed') {
+          await appendChat('assistant', `本轮修改未完成：${outcome.message}`, undefined, workspace.revision, activeTurn.assistantEntryId);
+        } else {
+          const refreshed = await refreshFormalWorkspace(workspace);
+          await appendChat('assistant', '上次任务生成了未发布候选草稿；当前已返回正式副本。', undefined, refreshed.revision, activeTurn.assistantEntryId);
+        }
+        settled = true;
+        return;
+      }
+    } catch (error) {
+      fail(error);
+    } finally {
+      setSnapshotBusy(false);
+      if (settled) {
+        setSourceProgress(undefined);
+        setActiveSourceTurn(undefined);
+        await clearPersistedActiveSourceTurn(workspace.workspaceId, activeTurn.turnId).catch(() => undefined);
+      } else {
+        setNotice('暂时无法确认修改结果，正在重试连接。任务恢复后可继续编辑。');
+        resumedTurnIdsRef.current.delete(activeTurn.turnId);
+        setRecoveryAttempt(attempt => attempt + 1);
+      }
     }
   };
 
@@ -587,12 +938,20 @@ export function SidePanelApp() {
   const createSourceWorkspace = async () => {
     setSnapshotBusy(true);
     try {
-      // The Background completes this operation after closing the source Side
-      // Panel. Closing is required: otherwise window.innerWidth reflects the
-      // compressed side-panel viewport and responsive layouts are captured wrong.
       await command({
         type: useVisibleViewport ? 'createWorkspaceFromVisibleViewport' : 'createWorkspaceFromFullViewport'
       });
+      const persisted = await sourceWorkspaceSessionItem.getValue();
+      const [tab] = await browser.tabs.query({ active: true, currentWindow: true });
+      if (!persisted || !tab?.id) throw new Error('副本已创建，但当前侧栏未能恢复工作区状态');
+      setSourceWorkspace({
+        ...persisted.workspace,
+        tabId: tab.id,
+        sourceTabId: persisted.sourceTabId
+      });
+      setChat(persisted.chat);
+      setPendingClarification(persisted.pendingClarification);
+      setSnapshotBusy(false);
     } catch (error) {
       fail(error);
       setSnapshotBusy(false);
@@ -641,6 +1000,17 @@ export function SidePanelApp() {
     setError(error instanceof Error ? error.message : '操作失败');
     setNotice(undefined);
   };
+  useEffect(() => {
+    if (!sourceWorkspace || !activeSourceTurn) return;
+    if (resumedTurnIdsRef.current.has(activeSourceTurn.turnId)) return;
+    const timer = window.setTimeout(() => {
+      resumedTurnIdsRef.current.add(activeSourceTurn.turnId);
+      setError(undefined);
+      setNotice(undefined);
+      void resumeSourceTurn(sourceWorkspace, activeSourceTurn);
+    }, recoveryAttempt === 0 ? 0 : Math.min(1000 * 2 ** Math.min(recoveryAttempt, 4), 15_000));
+    return () => window.clearTimeout(timer);
+  }, [sourceWorkspace?.workspaceId, activeSourceTurn?.turnId, recoveryAttempt]);
   const openLogs = async () => {
     await browser.tabs.create({ url: `${browser.runtime.getURL('')}logs.html` });
   };
@@ -807,7 +1177,7 @@ export function SidePanelApp() {
             <div className="snapshot-width-setting">
               <div>
                 <strong>副本宽度</strong>
-                <span>{useVisibleViewport ? '当前可见范围（保留侧边栏占用）' : '原始页面宽度（推荐）'}</span>
+                <span>{useVisibleViewport ? '当前可见范围（保持侧边栏打开）' : '当前可见范围（等待布局稳定）'}</span>
               </div>
               <Switch
                 size="small"

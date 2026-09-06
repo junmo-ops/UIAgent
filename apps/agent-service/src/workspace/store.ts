@@ -8,15 +8,33 @@ import {
   writeFileSync
 } from 'node:fs';
 import { basename, dirname, resolve, sep } from 'node:path';
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { parseHTML } from 'linkedom';
 import { type CodingAgentConversationTurn, type CodingWorkspaceTools } from '@ui-agent/agent-runtime';
 import {
   PROTOCOL_VERSION,
   staticSnapshotSchema,
   MAX_STATIC_SNAPSHOT_HTML_CHARS,
+  authorStyleCaptureSchema,
+  authorStyleSheetSchema,
+  candidateObservationRequestSchema,
+  candidateGeometryValidationRequestSchema,
+  renderArtifactRequestSchema,
+  workspaceIntentSchema,
+  validationRecordRequestSchema,
+  candidatePublishRequestSchema,
   type SnapshotMetrics,
+  type AuthorStyleCapture,
+  type AuthorStyleResource,
+  type AuthorStyleSheet,
   type StaticSnapshot,
+  type WorkspaceCandidate,
+  type CandidateObservation,
+  type RenderArtifact,
+  type LiveWorkspaceObservation,
+  type WorkspaceIntent,
+  type ValidationRecord,
+  type CandidatePublishResult,
   type SourceTurnRequest,
   type SourceTurnResponse,
   type WorkspaceChatEntry
@@ -24,10 +42,17 @@ import {
 import { compileSourceWorkspace, refreshWorkspaceIndexes } from './compiler';
 import { validateControlledInteractions } from './interactions';
 import { analyzeStaticVisibility, staticVisibilityIssueKey } from './visibility';
+import { diagnoseSnapshotPackage, type SnapshotDiagnostics } from './snapshot-diagnostics';
 
-const WORKSPACE_FILES = ['index.html', 'snapshot.css', 'outline.json', 'source-map.json'] as const;
+const WORKSPACE_FILES = ['index.html', 'snapshot.css', 'author-overrides.css', 'outline.json', 'source-map.json'] as const;
 type WorkspaceFile = typeof WORKSPACE_FILES[number];
 type WorkspaceFiles = Record<WorkspaceFile, string>;
+
+interface CandidateManifest extends WorkspaceCandidate {
+  workspaceId: string;
+  /** Bounded, observation-triggered repair attempts for this candidate lineage. */
+  repairAttempts: number;
+}
 
 interface StructureNode {
   sourceId: string;
@@ -111,6 +136,36 @@ interface WorkspaceManifest {
   chat?: WorkspaceChatEntry[];
 }
 
+function validateAuthorCss(css: string, resources: AuthorStyleResource[]): string {
+  if (css.length > 30_000_000) throw new Error('author.css 超过 30 MB 限制');
+  if (/<\/style/i.test(css) || /\b(?:javascript\s*:|expression\s*\(|-moz-binding\b|behavior\s*:)/i.test(css)) {
+    throw new Error('author.css 包含不安全的可执行内容');
+  }
+  const executableCss = css.replace(/\/\*[\s\S]*?\*\//g, '');
+  const imports = new Set(cssImportSources(executableCss));
+  for (const source of imports) {
+    if (!/^https?:\/\//i.test(source)) throw new Error('author.css 包含不安全的 @import');
+  }
+  const allowedUrls = new Set(resources.map(resource => resource.url));
+  for (const match of css.matchAll(/\burl\s*\(\s*(?:"([^"]*)"|'([^']*)'|([^)]*))\s*\)/gi)) {
+    const target = (match[1] ?? match[2] ?? match[3] ?? '').trim();
+    if (!target || target.startsWith('#') || target.startsWith('data:')) continue;
+    if (imports.has(target)) continue;
+    if (!allowedUrls.has(target)) throw new Error('author.css 引用了未在资源清单中声明的外部 url()');
+  }
+  return 'author.css 与资源清单校验通过';
+}
+
+function cssImportSources(css: string): string[] {
+  const sources: string[] = [];
+  const pattern = /@import\s+(?:url\(\s*(?:"([^"]*)"|'([^']*)'|([^)]*?))\s*\)|"([^"]*)"|'([^']*)')/gi;
+  for (const match of css.matchAll(pattern)) {
+    const source = (match[1] ?? match[2] ?? match[3] ?? match[4] ?? match[5] ?? '').trim();
+    if (source) sources.push(source);
+  }
+  return sources;
+}
+
 interface WorkspaceConversationTurn extends CodingAgentConversationTurn {
   /** Workspace revision visible immediately after this turn. */
   revision?: number;
@@ -132,6 +187,7 @@ export interface SourceWorkspace {
   revision: number;
   canUndo: boolean;
   canRedo: boolean;
+  snapshotMetrics?: SnapshotMetrics;
 }
 
 function validateHtml(html: string): string {
@@ -371,6 +427,12 @@ export interface WorkspaceListOptions {
 export interface SourceWorkspaceStoreOptions {
   /** Keep workspace ownership checks enabled unless a pilot explicitly opts out. */
   identityIsolation?: boolean;
+  /**
+   * Keep the frozen computed-style (A) variant available for diagnostics.
+   * Production creation is currently wired with this disabled so replicas
+   * use the author-rules (B) variant directly.
+   */
+  frozenStyleVariantEnabled?: boolean;
 }
 
 function sourceElementInnerRange(
@@ -623,18 +685,36 @@ function cssRulesForClass(content: string, className: string): string[] {
 export class SourceWorkspaceStore {
   private readonly root: string;
   private readonly identityIsolation: boolean;
+  private readonly frozenStyleVariantEnabled: boolean;
   private readonly active = new Set<string>();
+  private readonly resourceLoadFailures = new Map<string, Map<number, string>>();
 
   constructor(root = '.snapshots/source-workspaces', options: SourceWorkspaceStoreOptions = {}) {
     this.root = resolve(root);
     this.identityIsolation = options.identityIsolation ?? true;
+    this.frozenStyleVariantEnabled = options.frozenStyleVariantEnabled ?? true;
     mkdirSync(this.root, { recursive: true, mode: 0o700 });
   }
 
   create(input: unknown, owner: WorkspaceOwner = LOCAL_WORKSPACE_OWNER): SourceWorkspace {
     const snapshot = staticSnapshotSchema.parse(input);
+    if (!this.frozenStyleVariantEnabled) {
+      const authorCapture = snapshot.authorStyles;
+      const hasAuthorRules = Boolean(authorCapture && (
+        authorCapture.cssText.trim()
+        || (authorCapture.unreadableSources?.length ?? 0) > 0
+        || authorCapture.sheets?.some(sheet => sheet.renderOnly || Boolean(sheet.cssText?.trim()))
+      ));
+      if (!hasAuthorRules) {
+        throw new Error('当前页面没有可用的 B 方案样式资源，已禁用 A 方案兜底');
+      }
+    }
     validateHtml(snapshot.html);
-    const compiled = compileSourceWorkspace(snapshot.html, { viewport: snapshot.viewport });
+    if (snapshot.authorOverrides !== undefined) validateCss(snapshot.authorOverrides);
+    const compiled = compileSourceWorkspace(snapshot.html, {
+      viewport: snapshot.viewport,
+      preserveInlineStyles: Boolean(snapshot.authorStyles)
+    });
     validateHtml(compiled.html);
     validateCss(compiled.css);
     const workspaceId = randomUUID();
@@ -644,11 +724,21 @@ export class SourceWorkspaceStore {
     const files: WorkspaceFiles = {
       'index.html': compiled.html,
       'snapshot.css': compiled.css,
+      // B keeps captured author rules immutable. User/agent visual edits live
+      // in this versioned layer so they can be undone without mutating capture.
+      'author-overrides.css': snapshot.authorOverrides ?? '',
       'outline.json': compiled.outline,
       'source-map.json': compiled.sourceMap
     };
     this.writeWorkspaceFiles(directory, files);
     this.writeWorkspaceFiles(initialRevision, files);
+    if (snapshot.authorStyles) {
+      this.atomicWrite(resolve(directory, 'author.css'), snapshot.authorStyles.cssText);
+      this.atomicWrite(resolve(directory, 'author-resources.json'), JSON.stringify(snapshot.authorStyles.resources ?? []));
+      this.atomicWrite(resolve(directory, 'author-capture.json'), JSON.stringify(snapshot.authorStyles));
+      this.atomicWrite(resolve(directory, 'author-style-links.json'), JSON.stringify(snapshot.authorStyles.unreadableSources ?? []));
+      this.atomicWrite(resolve(directory, 'author-sheets.json'), JSON.stringify(snapshot.authorStyles.sheets ?? []));
+    }
     const now = new Date().toISOString();
     this.writeManifest(directory, {
       workspaceVersion: 2,
@@ -677,6 +767,201 @@ export class SourceWorkspaceStore {
     const manifest = this.readManifest(directory);
     if (manifest.deletedAt) return undefined;
     return this.workspaceFromManifest(manifest);
+  }
+
+  diagnostics(workspaceId: string): SnapshotDiagnostics {
+    const directory = this.workspacePath(workspaceId);
+    if (!existsSync(resolve(directory, 'workspace.json'))) throw new Error('静态源码工作区不存在');
+    const files = this.readWorkspaceFiles(directory);
+    return diagnoseSnapshotPackage({
+      html: files['index.html'],
+      css: files['snapshot.css'],
+      outline: files['outline.json'],
+      sourceMap: files['source-map.json'],
+      authorCss: this.readOptionalFile(resolve(directory, 'author.css')),
+      authorResources: this.authorStyleResources(workspaceId),
+      authorRenderOnlyStyleCount: this.externalAuthorStyleSources(workspaceId).length,
+      authorResourceFailureCount: this.resourceLoadFailures.get(workspaceId)?.size ?? 0
+    });
+  }
+
+  authorStyles(workspaceId: string): { cssText: string; available: boolean } {
+    const directory = this.workspacePath(workspaceId);
+    if (!existsSync(resolve(directory, 'workspace.json'))) throw new Error('静态源码工作区不存在');
+    const path = resolve(directory, 'author.css');
+    return { cssText: this.readOptionalFile(path) ?? '', available: existsSync(path) };
+  }
+
+  authorCss(workspaceId: string): string | undefined {
+    const styles = this.authorStyles(workspaceId);
+    if (!styles.available || !styles.cssText) return undefined;
+    validateAuthorCss(styles.cssText, this.authorStyleResources(workspaceId));
+    return styles.cssText;
+  }
+
+  /**
+   * These are stylesheet URLs the browser can apply but the capture pipeline
+   * could not inspect. They are deliberately kept separate from author.css:
+   * rendering may use them, but an Agent must not treat them as observable or
+   * editable source rules.
+   */
+  unreadableAuthorStyleSources(workspaceId: string): string[] {
+    const raw = this.readOptionalFile(resolve(this.workspacePath(workspaceId), 'author-style-links.json'));
+    if (!raw) return [];
+    try {
+      const sources = JSON.parse(raw) as unknown;
+      return Array.isArray(sources)
+        ? [...new Set(sources.filter((source): source is string => typeof source === 'string' && /^https?:\/\//i.test(source)))]
+        : [];
+    } catch {
+      return [];
+    }
+  }
+
+  hasAuthorRuleCandidate(workspaceId: string): boolean {
+    const sheets = this.authorStyleSheets(workspaceId);
+    return Boolean(this.authorCss(workspaceId))
+      || this.unreadableAuthorStyleSources(workspaceId).length > 0
+      || sheets.some(sheet => sheet.renderOnly || Boolean(sheet.cssText?.trim()));
+  }
+
+  isFrozenStyleVariantEnabled(): boolean {
+    return this.frozenStyleVariantEnabled;
+  }
+
+  private externalAuthorStyleSources(workspaceId: string): string[] {
+    const sheets = this.authorStyleSheets(workspaceId);
+    const sources = sheets
+      .filter(sheet => sheet.renderOnly)
+      .map(sheet => sheet.sourceUrl);
+    // Match previewHtml's choice of per-sheet links versus legacy author.css.
+    // Old workspaces have no sheet manifest but can still contain @import.
+    const cssTexts = sheets.length
+      ? sheets.filter(sheet => !sheet.renderOnly).map(sheet => sheet.cssText ?? '')
+      : [this.authorStyles(workspaceId).cssText];
+    const imports = cssTexts.flatMap(css => cssImportSources(css.replace(/\/\*[\s\S]*?\*\//g, '')));
+    return [...new Set([...(sheets.length ? sources : this.unreadableAuthorStyleSources(workspaceId)), ...imports])];
+  }
+
+  externalAuthorStyleOrigins(workspaceId: string): string[] {
+    return [...new Set(this.externalAuthorStyleSources(workspaceId).flatMap(source => {
+      try {
+        const url = new URL(source);
+        return /^https?:$/.test(url.protocol) ? [url.origin] : [];
+      } catch { return []; }
+    }))];
+  }
+
+  authorStyleSheets(workspaceId: string): AuthorStyleSheet[] {
+    const raw = this.readOptionalFile(resolve(this.workspacePath(workspaceId), 'author-sheets.json'));
+    if (!raw) return [];
+    try {
+      const parsed = JSON.parse(raw) as unknown;
+      const result = authorStyleSheetSchema.array().safeParse(parsed);
+      return result.success ? result.data : [];
+    } catch {
+      return [];
+    }
+  }
+
+  authorOverrides(workspaceId: string): string {
+    const directory = this.workspacePath(workspaceId);
+    if (!this.get(workspaceId)) throw new Error('静态源码工作区不存在');
+    const css = this.readOptionalFile(resolve(directory, 'author-overrides.css')) ?? '';
+    validateCss(css);
+    return css;
+  }
+
+  /**
+   * Serves every recorded author-CSS resource from the workspace origin. A web
+   * font loaded by a local preview otherwise needs the remote host to opt into
+   * CORS, which is not true for many production asset CDNs.
+   */
+  authorCssForPreview(workspaceId: string, assetQuery = ''): string | undefined {
+    const css = this.authorCss(workspaceId);
+    if (!css) return undefined;
+    return this.localizeAuthorCssResources(css, workspaceId, assetQuery);
+  }
+
+  authorStyleSheetCssForPreview(workspaceId: string, index: number, assetQuery = ''): string | undefined {
+    if (!Number.isSafeInteger(index) || index < 0) return undefined;
+    const sheet = this.authorStyleSheets(workspaceId)[index];
+    if (!sheet || sheet.renderOnly || sheet.cssText === undefined) return undefined;
+    validateAuthorCss(sheet.cssText, this.authorStyleResources(workspaceId));
+    return this.localizeAuthorCssResources(sheet.cssText, workspaceId, assetQuery, '../assets/');
+  }
+
+  private localizeAuthorCssResources(
+    css: string,
+    workspaceId: string,
+    assetQuery: string,
+    resourcePrefix = 'assets/'
+  ): string {
+    const resources = this.authorStyleResources(workspaceId);
+    const indexes = new Map(resources.map((resource, index) => [resource.url, index]));
+    const imports = new Set(cssImportSources(css));
+    return css.replace(/\burl\s*\(\s*(?:"([^"]*)"|'([^']*)'|([^)]*))\s*\)/gi, (token, doubleQuoted, singleQuoted, bare) => {
+      const target = (doubleQuoted ?? singleQuoted ?? bare ?? '').trim();
+      // Older captures can still list an import URL as a resource. Preserve
+      // its original base URL so relative URLs inside that stylesheet work.
+      if (imports.has(target)) return token;
+      const index = indexes.get(target);
+      return index === undefined ? token : `url("${resourcePrefix}${index}${assetQuery}")`;
+    });
+  }
+
+  authorStyleResource(workspaceId: string, index: number): AuthorStyleResource | undefined {
+    if (!Number.isSafeInteger(index) || index < 0) return undefined;
+    return this.authorStyleResources(workspaceId)[index];
+  }
+
+  recordAuthorResourceFailure(workspaceId: string, index: number, reason: string): void {
+    if (!this.authorStyleResource(workspaceId, index)) return;
+    const failures = this.resourceLoadFailures.get(workspaceId) ?? new Map<number, string>();
+    failures.set(index, reason.slice(0, 300));
+    this.resourceLoadFailures.set(workspaceId, failures);
+  }
+
+  clearAuthorResourceFailure(workspaceId: string, index: number): void {
+    const failures = this.resourceLoadFailures.get(workspaceId);
+    if (!failures) return;
+    failures.delete(index);
+    if (failures.size === 0) this.resourceLoadFailures.delete(workspaceId);
+  }
+
+  private localizeSnapshotResources(html: string, resources: AuthorStyleResource[], workspaceAssetPath = '', assetQuery = ''): string {
+    const indexes = new Map(resources.map((resource, index) => [resource.url, index]));
+    return html.replace(/\sdata-ui-agent-resource-url="([^"]*)"/gi, (attribute, encodedUrl) => {
+      try {
+        const index = indexes.get(decodeURIComponent(encodedUrl));
+        return index === undefined ? attribute : ` src="${workspaceAssetPath}assets/${index}${assetQuery}"`;
+      } catch {
+        return attribute;
+      }
+    });
+  }
+
+  authorStyleResources(workspaceId: string): AuthorStyleResource[] {
+    const directory = this.workspacePath(workspaceId);
+    const raw = this.readOptionalFile(resolve(directory, 'author-resources.json'));
+    if (!raw) return [];
+    try {
+      const resources = JSON.parse(raw) as AuthorStyleResource[];
+      return resources.filter(resource => /^https?:\/\//i.test(resource.url) && /^https?:\/\//i.test(resource.sourceUrl));
+    } catch {
+      return [];
+    }
+  }
+
+  authorStyleCapture(workspaceId: string): AuthorStyleCapture | undefined {
+    const raw = this.readOptionalFile(resolve(this.workspacePath(workspaceId), 'author-capture.json'));
+    if (!raw) return undefined;
+    try {
+      const parsed = authorStyleCaptureSchema.safeParse(JSON.parse(raw));
+      return parsed.success ? parsed.data : undefined;
+    } catch {
+      return undefined;
+    }
   }
 
   list(
@@ -768,6 +1053,11 @@ export class SourceWorkspaceStore {
         ? html.replace(/<body\b/i, `${style}\n<body`)
         : html;
     const nodeCount = (withStyles.match(/\bdata-ui-source-id\s*=\s*["']/gi) ?? []).length;
+    const authorCss = this.readOptionalFile(resolve(directory, 'author.css'));
+    const authorResources = this.authorStyleResources(workspaceId);
+    const authorCapture = this.authorStyleCapture(workspaceId);
+    const authorSheets = this.authorStyleSheets(workspaceId);
+    const authorOverrides = this.readOptionalFile(resolve(directory, 'author-overrides.css')) ?? '';
     return {
       protocolVersion: PROTOCOL_VERSION,
       title: manifest.title,
@@ -777,6 +1067,20 @@ export class SourceWorkspaceStore {
       nodeCount: Math.max(1, nodeCount),
       selectedSourceId: manifest.selectedSourceId,
       ...(manifest.snapshotMetrics ? { metrics: manifest.snapshotMetrics } : {}),
+      ...(this.hasAuthorRuleCandidate(workspaceId) ? {
+        authorStyles: {
+          cssText: authorCss ?? '',
+          readableSheets: authorCapture?.readableSheets ?? manifest.snapshotMetrics?.authorReadableSheets ?? 0,
+          unreadableSheets: authorCapture?.unreadableSheets ?? manifest.snapshotMetrics?.authorUnreadableSheets ?? 0,
+          missing: authorCapture?.missing ?? manifest.snapshotMetrics?.authorMissingSources ?? [],
+          sources: authorCapture?.sources,
+          unreadableSources: this.unreadableAuthorStyleSources(workspaceId),
+          sheets: authorSheets.length ? authorSheets : undefined,
+          resources: authorResources
+        },
+        authorStyleSources: authorCapture?.sources ?? authorResources.map(resource => resource.sourceUrl).filter((value, index, values) => values.indexOf(value) === index)
+      } : {}),
+      ...(authorOverrides ? { authorOverrides } : {}),
       viewport: manifest.viewport ?? { width: 1440, height: 900 }
     };
   }
@@ -800,19 +1104,435 @@ export class SourceWorkspaceStore {
       .map(item => item.snapshot);
   }
 
-  previewHtml(workspaceId: string): string | undefined {
-    if (!this.get(workspaceId)) return undefined;
-    const directory = this.workspacePath(workspaceId);
-    const html = this.readOptionalFile(resolve(directory, 'index.html'));
-    if (!html) return undefined;
-    const css = this.readOptionalFile(resolve(directory, 'snapshot.css'));
-    if (!css) return html;
-    validateHtml(html);
+  createCandidate(workspaceId: string, baseRevision?: number): WorkspaceCandidate {
+    const workspace = this.get(workspaceId);
+    if (!workspace) throw new Error('静态源码工作区不存在');
+    if (this.active.has(workspaceId)) throw new Error('当前工作区已有正在执行的修改，不能创建候选');
+    const revision = baseRevision ?? workspace.revision;
+    const sourceDirectory = resolve(this.workspacePath(workspaceId), 'revisions', String(revision).padStart(3, '0'));
+    if (revision < 0 || !existsSync(resolve(sourceDirectory, 'index.html'))) throw new Error('候选基线版本不存在');
+    const files = this.readWorkspaceFiles(sourceDirectory);
+    this.validateWorkspaceFiles(files);
+    const candidateId = randomUUID();
+    const candidateDirectory = resolve(this.workspacePath(workspaceId), 'candidates', candidateId, 'versions', '000');
+    mkdirSync(candidateDirectory, { recursive: true, mode: 0o700 });
+    this.writeWorkspaceFiles(candidateDirectory, files);
+    const hasAuthorRules = this.hasAuthorRuleCandidate(workspaceId);
+    if (!hasAuthorRules && !this.frozenStyleVariantEnabled) {
+      throw new Error('当前副本没有可用的 B 方案样式资源，已禁用 A 方案兜底');
+    }
+    const manifest: CandidateManifest = {
+      workspaceId,
+      baseRevision: revision,
+      candidateId,
+      candidateVersion: 0,
+      contentHash: this.contentHash(workspaceId, files),
+      renderMode: hasAuthorRules ? 'B' : 'A',
+      createdAt: new Date().toISOString(),
+      status: 'active',
+      repairAttempts: 0
+    };
+    this.atomicWrite(resolve(this.workspacePath(workspaceId), 'candidates', candidateId, 'manifest.json'), JSON.stringify(manifest, null, 2));
+    return manifest;
+  }
+
+  candidate(workspaceId: string, candidateId: string, candidateVersion: number): WorkspaceCandidate | undefined {
+    if (!this.get(workspaceId) || !this.isSafeCandidateId(candidateId) || !Number.isSafeInteger(candidateVersion) || candidateVersion < 0) return undefined;
+    const root = resolve(this.workspacePath(workspaceId), 'candidates', candidateId);
+    const raw = this.readOptionalFile(resolve(root, 'manifest.json'));
+    if (!raw) return undefined;
+    try {
+      const parsed = JSON.parse(raw) as Partial<CandidateManifest>;
+      // Candidates created before renderMode became part of the immutable
+      // document identity remain usable as the conservative frozen-style mode.
+      const manifest: CandidateManifest = {
+        ...parsed,
+        renderMode: parsed.renderMode === 'B' ? 'B' : 'A',
+        repairAttempts: Number.isSafeInteger(parsed.repairAttempts) && (parsed.repairAttempts ?? 0) >= 0
+          ? parsed.repairAttempts!
+          : 0
+      } as CandidateManifest;
+      if (manifest.workspaceId !== workspaceId || manifest.candidateId !== candidateId || manifest.candidateVersion !== candidateVersion) return undefined;
+      const files = this.readWorkspaceFiles(resolve(root, 'versions', String(candidateVersion).padStart(3, '0')));
+      if (this.contentHash(workspaceId, files) !== manifest.contentHash) return undefined;
+      return manifest;
+    } catch {
+      return undefined;
+    }
+  }
+
+  /**
+   * Reserve one repair budget before asking the model to change a candidate.
+   * The reservation is durable so retries, duplicate requests, or a process
+   * failure cannot create an unbounded correction loop.
+   */
+  reserveCandidateRepair(workspaceId: string, candidateId: string, candidateVersion: number, maxAttempts = 2): { candidate: WorkspaceCandidate; attempt: number } | undefined {
+    const candidate = this.candidate(workspaceId, candidateId, candidateVersion);
+    if (!candidate || candidate.status !== 'active') return undefined;
+    const path = resolve(this.workspacePath(workspaceId), 'candidates', candidateId, 'manifest.json');
+    const raw = this.readOptionalFile(path);
+    if (!raw) return undefined;
+    try {
+      const manifest = JSON.parse(raw) as CandidateManifest;
+      const attempts = Number.isSafeInteger(manifest.repairAttempts) && manifest.repairAttempts >= 0
+        ? manifest.repairAttempts
+        : 0;
+      if (attempts >= maxAttempts) return undefined;
+      const nextAttempt = attempts + 1;
+      this.atomicWrite(path, JSON.stringify({ ...manifest, repairAttempts: nextAttempt }, null, 2));
+      return { candidate, attempt: nextAttempt };
+    } catch {
+      return undefined;
+    }
+  }
+
+  /**
+   * Persist a complete, validated next candidate version. The caller must have
+   * produced `files` through controlled workspace tools; this method owns the
+   * compare-and-swap and is the single point that invalidates prior evidence.
+   */
+  updateCandidateFiles(workspaceId: string, candidateId: string, expectedVersion: number, files: WorkspaceFiles): WorkspaceCandidate {
+    const current = this.candidate(workspaceId, candidateId, expectedVersion);
+    if (!current || current.status !== 'active') throw new Error('候选版本已变化，拒绝写入');
+    this.validateWorkspaceFiles(files);
+    const nextVersion = expectedVersion + 1;
+    const root = resolve(this.workspacePath(workspaceId), 'candidates', candidateId);
+    const destination = resolve(root, 'versions', String(nextVersion).padStart(3, '0'));
+    if (existsSync(destination)) throw new Error('候选下一版本已存在，拒绝覆盖');
+    this.writeWorkspaceFiles(destination, files);
+    const next: CandidateManifest = {
+      ...current,
+      candidateVersion: nextVersion,
+      contentHash: this.contentHash(workspaceId, files),
+      createdAt: new Date().toISOString(),
+      status: 'active',
+      repairAttempts: (current as CandidateManifest).repairAttempts ?? 0
+    };
+    this.atomicWrite(resolve(root, 'manifest.json'), JSON.stringify(next, null, 2));
+    return next;
+  }
+
+  candidatePreviewHtml(
+    workspaceId: string,
+    candidateId: string,
+    candidateVersion: number,
+    assetQuery = '',
+    workspaceAssetPath = '',
+    candidateAssetPath = workspaceAssetPath
+  ): string | undefined {
+    const manifest = this.candidate(workspaceId, candidateId, candidateVersion);
+    if (!manifest || manifest.status !== 'active') return undefined;
+    if (manifest.renderMode === 'A' && !this.frozenStyleVariantEnabled) return undefined;
+    const files = this.readWorkspaceFiles(resolve(this.workspacePath(workspaceId), 'candidates', candidateId, 'versions', String(candidateVersion).padStart(3, '0')));
+    const preview = this.previewHtmlFromFiles(workspaceId, files, manifest.renderMode, assetQuery, workspaceAssetPath, candidateAssetPath);
+    if (!preview) return undefined;
+    const marker = `<meta name="ui-agent-document-ref" data-workspace-id="${escapeHtmlAttribute(manifest.workspaceId)}" data-candidate-id="${escapeHtmlAttribute(manifest.candidateId)}" data-candidate-version="${manifest.candidateVersion}" data-content-hash="${escapeHtmlAttribute(manifest.contentHash)}" data-render-mode="${manifest.renderMode}">`;
+    return /<\/head>/i.test(preview) ? preview.replace(/<\/head>/i, `${marker}\n</head>`) : `${marker}\n${preview}`;
+  }
+
+  candidateAuthorOverrides(workspaceId: string, candidateId: string, candidateVersion: number): string | undefined {
+    const manifest = this.candidate(workspaceId, candidateId, candidateVersion);
+    if (!manifest || manifest.status !== 'active') return undefined;
+    const css = this.readOptionalFile(resolve(
+      this.workspacePath(workspaceId), 'candidates', candidateId, 'versions', String(candidateVersion).padStart(3, '0'), 'author-overrides.css'
+    ));
+    if (css === undefined) return undefined;
     validateCss(css);
-    const style = `<style data-ui-agent-workspace-styles>\n${css}\n</style>`;
-    return /<\/head>/i.test(html)
-      ? html.replace(/<\/head>/i, `${style}\n</head>`)
-      : html.replace(/<body\b/i, `${style}\n<body`);
+    return css;
+  }
+
+  recordCandidateObservation(input: unknown): CandidateObservation {
+    const request = candidateObservationRequestSchema.parse(input);
+    const candidate = this.candidate(request.workspaceId, request.candidateId, request.candidateVersion);
+    if (!candidate || candidate.status !== 'active') throw new Error('候选版本不存在或已失效');
+    if (candidate.baseRevision !== request.baseRevision || candidate.contentHash !== request.contentHash || candidate.renderMode !== request.renderMode) {
+      throw new Error('候选版本已变化，拒绝写入过期观察结果');
+    }
+    const observation: CandidateObservation = {
+      ...request,
+      observationId: randomUUID(),
+      recordedAt: new Date().toISOString()
+    };
+    const directory = resolve(this.workspacePath(request.workspaceId), 'candidates', request.candidateId, 'observations');
+    mkdirSync(directory, { recursive: true, mode: 0o700 });
+    this.atomicWrite(resolve(directory, `${observation.observationId}.json`), JSON.stringify(observation));
+    return observation;
+  }
+
+  recordIntent(workspaceId: string, candidateId: string, candidateVersion: number, input: unknown): WorkspaceIntent {
+    const intent = workspaceIntentSchema.parse(input);
+    const candidate = this.candidate(workspaceId, candidateId, candidateVersion);
+    if (!candidate || candidate.status !== 'active') throw new Error('候选版本不存在或已失效');
+    const directory = resolve(this.workspacePath(workspaceId), 'candidates', candidateId, 'intents');
+    mkdirSync(directory, { recursive: true, mode: 0o700 });
+    const path = resolve(directory, `${intent.intentId}.json`);
+    const existing = this.readOptionalFile(path);
+    if (existing) {
+      // Intent identifiers are immutable audit references.  Retrying the same
+      // request is safe; replacing its contents after evidence was collected
+      // is not.
+      try {
+        const parsed = workspaceIntentSchema.parse(JSON.parse(existing));
+        if (JSON.stringify(parsed) === JSON.stringify(intent)) return parsed;
+      } catch {
+        // A malformed existing record must not be overwritten either.
+      }
+      throw new Error('同一 intentId 已记录为不同内容，拒绝覆盖审计意图');
+    }
+    this.atomicWrite(path, JSON.stringify(intent));
+    return intent;
+  }
+
+  geometryVerificationContext(input: unknown): { candidate: WorkspaceCandidate; intent: WorkspaceIntent; observation: CandidateObservation } {
+    const request = candidateGeometryValidationRequestSchema.parse(input);
+    const candidate = this.candidate(request.workspaceId, request.candidateId, request.candidateVersion);
+    if (!candidate || candidate.status !== 'active' || candidate.baseRevision !== request.baseRevision
+      || candidate.contentHash !== request.contentHash || candidate.renderMode !== request.renderMode) {
+      throw new Error('候选版本已变化，拒绝启动几何验证');
+    }
+    const intent = this.readCandidateIntent(request.workspaceId, request.candidateId, request.intentId);
+    if (!intent || intent.version !== request.intentVersion) throw new Error('几何验证引用的需求意图不存在、来自旧协议或版本不匹配；请重新规划候选');
+    const observation = this.readCandidateJson<CandidateObservation>(request.workspaceId, request.candidateId, 'observations', request.candidateObservationId);
+    if (!observation || observation.baseRevision !== request.baseRevision || observation.candidateVersion !== request.candidateVersion
+      || observation.contentHash !== request.contentHash || observation.renderMode !== request.renderMode) {
+      throw new Error('几何验证引用的候选观察不存在或版本不匹配');
+    }
+    return { candidate, intent, observation };
+  }
+
+  recordValidation(input: unknown): ValidationRecord {
+    const request = validationRecordRequestSchema.parse(input);
+    const candidate = this.candidate(request.workspaceId, request.candidateId, request.candidateVersion);
+    if (!candidate || candidate.status !== 'active' || candidate.baseRevision !== request.baseRevision
+      || candidate.contentHash !== request.contentHash || candidate.renderMode !== request.renderMode) {
+      throw new Error('候选版本已变化，拒绝写入过期验证');
+    }
+    const intent = this.readCandidateIntent(request.workspaceId, request.candidateId, request.intentId);
+    if (!intent || intent.version !== request.intentVersion) throw new Error('验证引用的需求意图不存在、来自旧协议或版本不匹配；请重新规划候选');
+    const observation = this.readCandidateJson<CandidateObservation>(request.workspaceId, request.candidateId, 'observations', request.candidateObservationId);
+    if (!observation || observation.baseRevision !== request.baseRevision || observation.candidateVersion !== request.candidateVersion
+      || observation.contentHash !== request.contentHash || observation.renderMode !== request.renderMode) {
+      throw new Error('验证引用的候选观察不存在或版本不匹配');
+    }
+    const files = this.readWorkspaceFiles(resolve(this.workspacePath(request.workspaceId), 'candidates', request.candidateId, 'versions', String(request.candidateVersion).padStart(3, '0')));
+    let staticOk = false;
+    let staticMessage = '';
+    try {
+      this.validateWorkspaceFiles(files);
+      staticOk = true;
+      staticMessage = 'HTML、CSS、结构与资源引用校验通过';
+    } catch (error) {
+      staticMessage = error instanceof Error ? error.message : '静态校验失败';
+    }
+    const visualArtifacts = request.visualReview?.artifactIds ?? [];
+    const visualOk = !request.policy.visualRequired || (request.visualReview?.status === 'passed'
+      && Boolean(observation.screenshotArtifactId)
+      && visualArtifacts.includes(observation.screenshotArtifactId!)
+      && visualArtifacts.every(artifactId => this.candidateArtifactMatches(request, artifactId)));
+    const results = new Map(request.constraintResults.map(item => [item.id, item]));
+    const requiredResultPassed = (id: string) => {
+      const result = results.get(id);
+      return Boolean(result?.required && result.status === 'passed' && result.observationId === observation.observationId);
+    };
+    // The names are deliberately derived from durable intent data, rather than
+    // from page classes or natural-language keywords.  A verifier must provide
+    // one observation-backed result for each declared target and constraint.
+    const expectedSourceChecks = intent.sourceIds.map(sourceId => `source:${sourceId}`);
+    const expectedConstraintChecks = intent.renderConstraintIndexes.map(index => `constraint:${index}`);
+    const intentCoverageOk = expectedSourceChecks.concat(expectedConstraintChecks).every(requiredResultPassed);
+    // A target may intentionally disappear (for example, "remove this
+    // banner").  Its source result is still required and must cite this
+    // observation, but presence itself is decided by the declared constraint
+    // rather than imposed as a universal invariant here.
+    const readiness = observation.observation.readiness;
+    const renderReady = readiness.layoutStable && readiness.fonts === 'ready'
+      && readiness.images.failed === 0 && readiness.images.ready >= readiness.images.total;
+    const requiredOk = request.constraintResults.filter(item => item.required).every(item => item.status === 'passed');
+    const hasUnknown = request.constraintResults.some(item => item.required && item.status === 'unknown')
+      || (request.policy.visualRequired && (request.visualReview?.status === 'unknown' || !request.visualReview));
+    const overall = staticOk && request.staticChecks.status === 'passed' && requiredOk && intentCoverageOk
+      && renderReady && visualOk
+      ? 'passed' as const
+      : hasUnknown ? 'unverifiable' as const : 'failed' as const;
+    const record: ValidationRecord = {
+      ...request,
+      staticChecks: {
+        status: staticOk ? request.staticChecks.status : 'failed',
+        message: `${request.staticChecks.message}\n${staticMessage}\n意图覆盖=${intentCoverageOk}；渲染就绪=${renderReady}`.slice(0, 4_000)
+      },
+      validationId: randomUUID(),
+      overall,
+      recordedAt: new Date().toISOString()
+    };
+    const directory = resolve(this.workspacePath(request.workspaceId), 'candidates', request.candidateId, 'validations');
+    mkdirSync(directory, { recursive: true, mode: 0o700 });
+    this.atomicWrite(resolve(directory, `${record.validationId}.json`), JSON.stringify(record));
+    return record;
+  }
+
+  publishCandidate(input: unknown): CandidatePublishResult {
+    const request = candidatePublishRequestSchema.parse(input);
+    const candidate = this.candidate(request.workspaceId, request.candidateId, request.candidateVersion);
+    if (!candidate || candidate.status !== 'active' || candidate.baseRevision !== request.baseRevision
+      || candidate.contentHash !== request.contentHash || candidate.renderMode !== request.renderMode) throw new Error('候选版本已变化，拒绝发布');
+    const commit = this.readCandidateJson<CandidatePublishResult>(request.workspaceId, request.candidateId, 'commits', request.commitId);
+    if (commit) return commit;
+    const validation = this.readCandidateJson<ValidationRecord>(request.workspaceId, request.candidateId, 'validations', request.validationId);
+    if (!validation || validation.overall !== 'passed' || validation.baseRevision !== request.baseRevision
+      || validation.candidateVersion !== request.candidateVersion || validation.contentHash !== request.contentHash
+      || validation.renderMode !== request.renderMode) throw new Error('没有可用于发布的通过验证记录');
+    const intent = this.readCandidateIntent(request.workspaceId, request.candidateId, validation.intentId);
+    if (!intent || intent.version !== validation.intentVersion || intent.sourceIds.length === 0 || intent.constraints.length === 0) {
+      throw new Error('通过验证记录引用的需求意图不存在、不完整或版本不匹配');
+    }
+    const files = this.readWorkspaceFiles(resolve(this.workspacePath(request.workspaceId), 'candidates', request.candidateId, 'versions', String(request.candidateVersion).padStart(3, '0')));
+    const commitsDirectory = resolve(this.workspacePath(request.workspaceId), 'candidates', request.candidateId, 'commits');
+    mkdirSync(commitsDirectory, { recursive: true, mode: 0o700 });
+    const pendingPath = resolve(commitsDirectory, `${request.commitId}.pending.json`);
+    const pending = this.readOptionalFile(pendingPath);
+    if (!pending) {
+      // Persist the idempotency identity before changing the formal document.
+      // If the process stops after commitWorkingCopy, a retry can recover the
+      // receipt from the already-written revision instead of committing again.
+      this.atomicWrite(pendingPath, JSON.stringify({ request, preparedAt: new Date().toISOString() }));
+    }
+    const manifest = this.readManifest(this.workspacePath(request.workspaceId));
+    const recoveredRevision = request.baseRevision + 1;
+    const recoveredFilesPath = resolve(this.workspacePath(request.workspaceId), 'revisions', String(recoveredRevision).padStart(3, '0'));
+    if (manifest.revision === recoveredRevision && existsSync(resolve(recoveredFilesPath, 'index.html'))) {
+      const recoveredFiles = this.readWorkspaceFiles(recoveredFilesPath);
+      if (this.contentHash(request.workspaceId, recoveredFiles) === request.contentHash) {
+        const recovered: CandidatePublishResult = {
+          workspaceId: request.workspaceId, candidateId: request.candidateId, candidateVersion: request.candidateVersion,
+          revision: recoveredRevision, committedAt: new Date().toISOString(), unchanged: false
+        };
+        this.atomicWrite(resolve(commitsDirectory, `${request.commitId}.json`), JSON.stringify(recovered));
+        return recovered;
+      }
+    }
+    if (manifest.revision !== request.baseRevision) throw new Error('正式版本已变化，候选基线过期');
+    const revision = this.commitWorkingCopy(request.workspaceId, files, request.summary);
+    const result: CandidatePublishResult = {
+      workspaceId: request.workspaceId, candidateId: request.candidateId, candidateVersion: request.candidateVersion,
+      revision, committedAt: new Date().toISOString(), unchanged: false
+    };
+    this.atomicWrite(resolve(commitsDirectory, `${request.commitId}.json`), JSON.stringify(result));
+    return result;
+  }
+
+  createRenderArtifact(input: unknown): RenderArtifact {
+    const request = renderArtifactRequestSchema.parse(input);
+    const candidate = this.candidate(request.workspaceId, request.candidateId, request.candidateVersion);
+    if (!candidate || candidate.status !== 'active'
+      || candidate.baseRevision !== request.baseRevision || candidate.contentHash !== request.contentHash
+      || candidate.renderMode !== request.renderMode) throw new Error('候选版本已变化，拒绝写入截图证据');
+    const encoded = request.dataUrl.slice('data:image/png;base64,'.length);
+    const bytes = Buffer.from(encoded, 'base64');
+    if (!bytes.length || bytes.length > 20 * 1024 * 1024) throw new Error('截图大小不在允许范围内');
+    // PNG signature prevents a data URL MIME declaration from disguising a different file.
+    if (!bytes.subarray(0, 8).equals(Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]))) throw new Error('截图不是有效 PNG');
+    const artifact: RenderArtifact = {
+      workspaceId: request.workspaceId,
+      baseRevision: request.baseRevision,
+      candidateId: request.candidateId,
+      candidateVersion: request.candidateVersion,
+      contentHash: request.contentHash,
+      renderMode: request.renderMode,
+      jobId: request.jobId,
+      sampleId: request.sampleId,
+      capture: request.capture,
+      artifactId: randomUUID(),
+      mimeType: 'image/png',
+      byteLength: bytes.length,
+      createdAt: new Date().toISOString()
+    };
+    const directory = resolve(this.workspacePath(request.workspaceId), 'candidates', request.candidateId, 'artifacts');
+    mkdirSync(directory, { recursive: true, mode: 0o700 });
+    this.atomicWrite(resolve(directory, `${artifact.artifactId}.png`), bytes);
+    this.atomicWrite(resolve(directory, `${artifact.artifactId}.json`), JSON.stringify(artifact));
+    return artifact;
+  }
+
+  renderArtifactMatches(document: Pick<RenderArtifact, 'workspaceId' | 'baseRevision' | 'candidateId' | 'candidateVersion' | 'contentHash' | 'renderMode' | 'jobId' | 'sampleId'>, observation: Pick<LiveWorkspaceObservation, 'viewport' | 'scroll'>, artifactId: string): boolean {
+    if (!/^[0-9a-f-]{36}$/i.test(artifactId)) return false;
+    const raw = this.readOptionalFile(resolve(this.workspacePath(document.workspaceId), 'candidates', document.candidateId, 'artifacts', `${artifactId}.json`));
+    if (!raw) return false;
+    try {
+      const artifact = JSON.parse(raw) as RenderArtifact;
+      return artifact.artifactId === artifactId && artifact.workspaceId === document.workspaceId
+        && artifact.baseRevision === document.baseRevision && artifact.candidateId === document.candidateId
+        && artifact.candidateVersion === document.candidateVersion && artifact.contentHash === document.contentHash
+        && artifact.renderMode === document.renderMode && artifact.jobId === document.jobId && artifact.sampleId === document.sampleId
+        && artifact.capture.viewport.width === observation.viewport.width && artifact.capture.viewport.height === observation.viewport.height
+        && artifact.capture.viewport.devicePixelRatio === observation.viewport.devicePixelRatio
+        && artifact.capture.scroll.x === observation.scroll.x && artifact.capture.scroll.y === observation.scroll.y;
+    } catch {
+      return false;
+    }
+  }
+
+  private candidateArtifactMatches(document: Pick<ValidationRecord, 'workspaceId' | 'baseRevision' | 'candidateId' | 'candidateVersion' | 'contentHash' | 'renderMode'>, artifactId: string): boolean {
+    if (!/^[0-9a-f-]{36}$/i.test(artifactId)) return false;
+    const raw = this.readOptionalFile(resolve(this.workspacePath(document.workspaceId), 'candidates', document.candidateId, 'artifacts', `${artifactId}.json`));
+    if (!raw) return false;
+    try {
+      const artifact = JSON.parse(raw) as RenderArtifact;
+      return artifact.artifactId === artifactId && artifact.workspaceId === document.workspaceId
+        && artifact.baseRevision === document.baseRevision && artifact.candidateId === document.candidateId
+        && artifact.candidateVersion === document.candidateVersion && artifact.contentHash === document.contentHash
+        && artifact.renderMode === document.renderMode;
+    } catch { return false; }
+  }
+
+  previewHtml(workspaceId: string, candidate: 'A' | 'B' = 'A', assetQuery = ''): string | undefined {
+    if (!this.get(workspaceId)) return undefined;
+    if (candidate === 'A' && !this.frozenStyleVariantEnabled) return undefined;
+    const directory = this.workspacePath(workspaceId);
+    return this.previewHtmlFromFiles(workspaceId, this.readWorkspaceFiles(directory), candidate, assetQuery);
+  }
+
+  private previewHtmlFromFiles(
+    workspaceId: string,
+    files: WorkspaceFiles,
+    candidate: 'A' | 'B',
+    assetQuery: string,
+    workspaceAssetPath = '',
+    candidateAssetPath = workspaceAssetPath
+  ): string | undefined {
+    const html = files['index.html'];
+    const css = files['snapshot.css'];
+    const authorOverrides = files['author-overrides.css'];
+    const authorResources = this.authorStyleResources(workspaceId);
+    const unreadableStyleSources = this.unreadableAuthorStyleSources(workspaceId);
+    const authorSheets = this.authorStyleSheets(workspaceId);
+    validateHtml(html);
+    if (css) validateCss(css);
+    if (authorOverrides) validateCss(authorOverrides);
+    let previewCss = css;
+    let style = `<style data-ui-agent-workspace-styles data-ui-agent-candidate="A">\n${previewCss}\n</style>`;
+    if (candidate === 'B') {
+      if (!this.hasAuthorRuleCandidate(workspaceId)) return undefined;
+      // B intentionally has no frozen snapshot rules. The capture frame fixes
+      // the page to the original viewport and causes overflow in responsive
+      // layouts; computed classes would also override the author cascade.
+      previewCss = '';
+      const orderedStyleLinks = authorSheets.length
+        ? authorSheets.map((sheet, index) => {
+          const attributes = `${sheet.media ? ` media="${escapeHtmlAttribute(sheet.media)}"` : ''}${sheet.disabled ? ' disabled' : ''}`;
+          return sheet.renderOnly
+            ? `<link rel="stylesheet" href="${escapeHtmlAttribute(sheet.sourceUrl)}"${attributes} data-ui-agent-render-only-stylesheet>`
+            : `<link rel="stylesheet" href="${workspaceAssetPath}author-sheets/${index}${assetQuery}"${attributes} data-ui-agent-author-styles data-ui-agent-candidate="B">`;
+        }
+        ).join('\n')
+        : `${this.authorCss(workspaceId)
+          ? `<link rel="stylesheet" href="${workspaceAssetPath}author.css${assetQuery}" data-ui-agent-author-styles data-ui-agent-candidate="B">`
+          : ''}${unreadableStyleSources.map(source => `\n<link rel="stylesheet" href="${escapeHtmlAttribute(source)}" data-ui-agent-render-only-stylesheet>`).join('')}`;
+      style = `${orderedStyleLinks}\n<link rel="stylesheet" href="${candidateAssetPath}author-overrides.css${assetQuery}" data-ui-agent-author-overrides>`;
+    }
+    const localizedHtml = this.localizeSnapshotResources(html, authorResources, workspaceAssetPath, assetQuery);
+    return /<\/head>/i.test(localizedHtml)
+      ? localizedHtml.replace(/<\/head>/i, `${style}\n</head>`)
+      : localizedHtml.replace(/<body\b/i, `${style}\n<body`);
   }
 
   conversation(workspaceId: string): CodingAgentConversationTurn[] {
@@ -850,6 +1570,9 @@ export class SourceWorkspaceStore {
   }
 
   recordTurn(workspaceId: string, request: SourceTurnRequest, response: SourceTurnResponse): void {
+    // Candidate drafts are intentionally not mixed into the formal-revision
+    // conversation history. M3 will add draft-session recovery separately.
+    if (response.kind === 'draft') return;
     const directory = this.workspacePath(workspaceId);
     const manifest = this.readManifest(directory);
     if (response.kind === 'failed' || response.kind === 'cancelled') return;
@@ -904,17 +1627,28 @@ export class SourceWorkspaceStore {
     });
   }
 
-  tools(workspaceId: string): CodingWorkspaceTools {
-    const directory = this.workspacePath(workspaceId);
+  tools(workspaceId: string, candidateInput?: WorkspaceCandidate): CodingWorkspaceTools {
+    const workspaceDirectory = this.workspacePath(workspaceId);
     if (!this.get(workspaceId)) throw new Error('静态源码工作区不存在');
     if (this.active.has(workspaceId)) throw new Error('当前工作区已有正在执行的修改');
+    const candidate = candidateInput && this.candidate(workspaceId, candidateInput.candidateId, candidateInput.candidateVersion);
+    if (candidateInput && (!candidate || candidate.status !== 'active')) throw new Error('候选版本不存在或已失效');
+    const directory = candidate
+      ? resolve(workspaceDirectory, 'candidates', candidate.candidateId, 'versions', String(candidate.candidateVersion).padStart(3, '0'))
+      : workspaceDirectory;
     this.active.add(workspaceId);
     const original = this.readWorkspaceFiles(directory);
     let working: WorkspaceFiles = { ...original };
-    const initial = this.readWorkspaceFiles(resolve(directory, 'revisions', '000'));
-    const baselineVisibilityIssues = new Set(
-      analyzeStaticVisibility(initial['index.html'], initial['snapshot.css']).map(staticVisibilityIssueKey)
-    );
+    const authorRuleMode = this.hasAuthorRuleCandidate(workspaceId);
+    const editableStylePath: 'snapshot.css' | 'author-overrides.css' = authorRuleMode
+      ? 'author-overrides.css'
+      : 'snapshot.css';
+    const initial = candidate
+      ? this.readWorkspaceFiles(directory)
+      : this.readWorkspaceFiles(resolve(directory, 'revisions', '000'));
+    const baselineVisibilityIssues = authorRuleMode
+      ? new Set<string>()
+      : new Set(analyzeStaticVisibility(initial['index.html'], initial['snapshot.css']).map(staticVisibilityIssueKey));
     let closed = false;
     const refreshIndexes = () => {
       const indexes = refreshWorkspaceIndexes(working['index.html']);
@@ -923,25 +1657,39 @@ export class SourceWorkspaceStore {
     };
     const validateWorking = () => {
       validateHtml(working['index.html']);
-      validateCss(working['snapshot.css']);
-      const newVisibilityIssues = analyzeStaticVisibility(
+      validateCss(working[editableStylePath]);
+      const newVisibilityIssues = authorRuleMode ? [] : analyzeStaticVisibility(
         working['index.html'],
         working['snapshot.css']
       ).filter(issue => !baselineVisibilityIssues.has(staticVisibilityIssueKey(issue)));
       if (newVisibilityIssues.length) {
         throw new Error(`静态可见性校验失败：${newVisibilityIssues.slice(0, 3).map(issue => issue.message).join('；')}。请调整父容器尺寸、overflow 或元素定位后重新校验。`);
       }
-      return 'HTML、CSS、结构、安全与静态可见性规则校验通过';
+      return authorRuleMode
+        ? 'HTML、author-overrides.css 与安全规则校验通过；原始规则模式仍需真实浏览器几何验证'
+        : 'HTML、CSS、结构、安全与静态可见性规则校验通过';
     };
     const close = () => {
       if (closed) return;
       closed = true;
       this.active.delete(workspaceId);
     };
+    const readableContent = (path: string): string => {
+      if (path === 'author.css' && this.authorCss(workspaceId)) return this.authorCss(workspaceId)!;
+      if (path === 'author-style-links.json' && authorRuleMode) return JSON.stringify(this.unreadableAuthorStyleSources(workspaceId), null, 2);
+      this.assertReadablePath(path);
+      return working[path as WorkspaceFile];
+    };
 
     let toolset!: CodingWorkspaceTools;
     toolset = {
-      listFiles: async () => WORKSPACE_FILES.map(path => ({ path, chars: working[path].length })),
+      listFiles: async () => [
+        ...WORKSPACE_FILES.map(path => ({ path, chars: working[path].length })),
+        ...(this.authorCss(workspaceId) ? [{ path: 'author.css', chars: this.authorCss(workspaceId)!.length }] : []),
+        ...(this.unreadableAuthorStyleSources(workspaceId).length
+          ? [{ path: 'author-style-links.json', chars: JSON.stringify(this.unreadableAuthorStyleSources(workspaceId)).length }]
+          : [])
+      ],
       queryWorkspaceStructure: async (query, options = {}) => {
         const terms = structureQueryTerms(query);
         if (!terms.length) throw new Error('结构查询至少需要一个长度不少于 2 的语义词');
@@ -977,8 +1725,7 @@ export class SourceWorkspaceStore {
         }, null, 2);
       },
       searchText: async (query, path = 'index.html') => {
-        this.assertReadablePath(path);
-        const content = working[path as WorkspaceFile];
+        const content = readableContent(path);
         const matches: Array<{ index: number; contextStart: number; contextEnd: number }> = [];
         let offset = 0;
         while (matches.length < 10) {
@@ -999,8 +1746,7 @@ export class SourceWorkspaceStore {
           : `${path} 中没有找到“${query}”`;
       },
       readFile: async (path, startLine = 1, endLine, startChar, endChar) => {
-        this.assertReadablePath(path);
-        const content = working[path as WorkspaceFile];
+        const content = readableContent(path);
         if (startChar !== undefined || endChar !== undefined) {
           const start = Math.max(0, startChar ?? 0);
           const end = Math.min(content.length, endChar ?? start + 16_000);
@@ -1059,17 +1805,21 @@ export class SourceWorkspaceStore {
         if (!/^[a-zA-Z0-9_-]{1,120}$/.test(className)) {
           throw new Error('样式类名格式无效，请传入 inspect_element 返回的单个 class 名');
         }
-        const rules = cssRulesForClass(working['snapshot.css'], className);
+        // In B mode only the editable override layer can have been changed by
+        // this turn. Spatial validation reads that layer to reject new fixed
+        // positioning without treating immutable author.css as editable.
+        const stylePath = authorRuleMode ? 'author-overrides.css' : 'snapshot.css';
+        const rules = cssRulesForClass(working[stylePath], className);
         if (rules.length !== 1) {
           throw new Error(rules.length === 0
-            ? `snapshot.css 中不存在 .${className} 规则`
-            : `snapshot.css 中 .${className} 命中 ${rules.length} 条规则，请改用更具体的样式类`);
+            ? `${stylePath} 中不存在 .${className} 规则`
+            : `${stylePath} 中 .${className} 命中 ${rules.length} 条规则，请改用更具体的样式类`);
         }
-        return `snapshot.css 中 .${className} 的完整规则：\n${rules[0]!.slice(0, 16_000)}`;
+        return `${stylePath} 中 .${className} 的完整规则：\n${rules[0]!.slice(0, 16_000)}`;
       },
       replaceText: async (path, search, replacement) => {
-        this.assertEditablePath(path);
-        const file = path as Extract<WorkspaceFile, 'index.html' | 'snapshot.css'>;
+        this.assertEditablePath(path, editableStylePath);
+        const file = path as Extract<WorkspaceFile, 'index.html' | 'snapshot.css' | 'author-overrides.css'>;
         const content = working[file];
         const occurrences = countOccurrences(content, search);
         if (occurrences !== 1) {
@@ -1089,9 +1839,9 @@ export class SourceWorkspaceStore {
         return `替换成功；${file} 当前 ${next.length} 字符；工作区校验通过`;
       },
       applyPatch: async (path, edits) => {
-        this.assertEditablePath(path);
+        this.assertEditablePath(path, editableStylePath);
         if (edits.length < 1 || edits.length > 20) throw new Error('Patch 必须包含 1-20 个编辑操作');
-        const file = path as Extract<WorkspaceFile, 'index.html' | 'snapshot.css'>;
+        const file = path as Extract<WorkspaceFile, 'index.html' | 'snapshot.css' | 'author-overrides.css'>;
         let next = working[file];
         for (const [index, edit] of edits.entries()) {
           if (edit.kind === 'replace') {
@@ -1167,8 +1917,8 @@ export class SourceWorkspaceStore {
         const next = `${html.slice(0, inner.start)}${escapeHtmlText(text)}${html.slice(inner.end)}`;
         validateHtml(next);
         working['index.html'] = next;
-        working['snapshot.css'] = withoutSourceScopedCss(working['snapshot.css'], removedSourceIds);
-        validateCss(working['snapshot.css']);
+        working[editableStylePath] = withoutSourceScopedCss(working[editableStylePath], removedSourceIds);
+        validateCss(working[editableStylePath]);
         refreshIndexes();
         return `元素 ${sourceId} 的文本内容已设置；${removedSourceIds.length} 个原后代元素已移除；HTML、CSS 与安全规则校验通过`;
       },
@@ -1188,7 +1938,7 @@ export class SourceWorkspaceStore {
       insertElement: async (targetSourceId, position, fragmentHtml, options) => {
         const html = working['index.html'];
         const fragment = fragmentWithFreshSourceIds(html, fragmentHtml);
-        const insertionHtml = options?.styleReferenceSourceId
+        const insertionHtml = options?.styleReferenceSourceId && !authorRuleMode
           ? applyFrozenReferenceStyles(
             fragment.html,
             fragment.rootSourceIds,
@@ -1209,7 +1959,7 @@ export class SourceWorkspaceStore {
         validateHtml(next);
         working['index.html'] = next;
         refreshIndexes();
-        return `已在元素 ${targetSourceId} 的 ${position} 位置插入 ${fragment.rootSourceIds.length} 个顶层元素：${fragment.rootSourceIds.join(', ')}${options?.styleReferenceSourceId ? `；已复制 ${options.styleReferenceSourceId} 的冻结计算样式作为布局参照` : ''}；HTML、结构与安全规则校验通过`;
+        return `已在元素 ${targetSourceId} 的 ${position} 位置插入 ${fragment.rootSourceIds.length} 个顶层元素：${fragment.rootSourceIds.join(', ')}${options?.styleReferenceSourceId && !authorRuleMode ? `；已复制 ${options.styleReferenceSourceId} 的冻结计算样式作为布局参照` : ''}；HTML、结构与安全规则校验通过`;
       },
       wrapElement: async (sourceId, tagName, attributes) => {
         const html = working['index.html'];
@@ -1232,8 +1982,8 @@ export class SourceWorkspaceStore {
         const next = `${html.slice(0, range.start)}${innerHtml}${html.slice(range.end)}`;
         validateHtml(next);
         working['index.html'] = next;
-        working['snapshot.css'] = withoutSourceScopedCss(working['snapshot.css'], [sourceId]);
-        validateCss(working['snapshot.css']);
+        working[editableStylePath] = withoutSourceScopedCss(working[editableStylePath], [sourceId]);
+        validateCss(working[editableStylePath]);
         refreshIndexes();
         return `容器元素 ${sourceId} 已解除包裹，其原有子节点保留在原位置；HTML、CSS、结构与安全规则校验通过`;
       },
@@ -1247,8 +1997,8 @@ export class SourceWorkspaceStore {
         const next = `${html.slice(0, range.start)}${html.slice(range.end)}`;
         validateHtml(next);
         working['index.html'] = next;
-        working['snapshot.css'] = withoutSourceScopedCss(working['snapshot.css'], removedSourceIds);
-        validateCss(working['snapshot.css']);
+        working[editableStylePath] = withoutSourceScopedCss(working[editableStylePath], removedSourceIds);
+        validateCss(working[editableStylePath]);
         refreshIndexes();
         return `元素 ${sourceId} 已完整删除；其 ${Math.max(0, removedSourceIds.length - 1)} 个后代节点及对应 sourceId 专属样式已同步移除；HTML、CSS、结构与安全规则校验通过`;
       },
@@ -1322,7 +2072,7 @@ export class SourceWorkspaceStore {
         refreshIndexes();
         return `元素 ${sourceId} 已完整移动到${destination}；原始结构和样式保持不变；HTML 与安全规则校验通过`;
       },
-      cloneElement: async (templateSourceId, position, targetSourceId, replacements) => {
+      cloneElement: async (templateSourceId, position, targetSourceId, replacements = []) => {
         const html = working['index.html'];
         const templateRange = sourceElementRange(html, templateSourceId);
         const templateAncestry = sourceElementAncestry(html, templateSourceId);
@@ -1340,7 +2090,7 @@ export class SourceWorkspaceStore {
         }
 
         const clone = cloneWithFreshSourceIds(html, clonedHtml);
-        const clonedScopedCss = clonedSourceScopedCss(working['snapshot.css'], clone.sourceIdMap);
+        const clonedScopedCss = clonedSourceScopedCss(working[editableStylePath], clone.sourceIdMap);
         let base = html;
         let insertionIndex: number;
         let destination: string;
@@ -1368,13 +2118,13 @@ export class SourceWorkspaceStore {
         const next = `${base.slice(0, insertionIndex)}${clone.html}${base.slice(insertionIndex)}`;
         validateHtml(next);
         working['index.html'] = next;
-        working['snapshot.css'] = [
-          working['snapshot.css'].trimEnd(),
+        working[editableStylePath] = [
+          working[editableStylePath].trimEnd(),
           clonedScopedCss
         ].filter(Boolean).join('\n') + '\n';
-        validateCss(working['snapshot.css']);
+        validateCss(working[editableStylePath]);
         refreshIndexes();
-        return `已从模板 ${templateSourceId} 完整克隆元素 ${clone.rootSourceId}${destination}；结构、冻结样式和伪元素样式已同步；HTML、CSS 与安全规则校验通过`;
+        return `已从模板 ${templateSourceId} 完整克隆元素 ${clone.rootSourceId}${destination}；结构与${authorRuleMode ? '可编辑覆盖样式' : '冻结样式'}已同步；HTML、CSS 与安全规则校验通过`;
       },
       applyDomOperations: async operations => {
         if (!operations.length || operations.length > 20) throw new Error('批量 DOM 操作必须包含 1-20 项');
@@ -1418,14 +2168,22 @@ export class SourceWorkspaceStore {
       },
       validate: async () => validateWorking(),
       commit: async (summary, options = {}) => {
-        if (working['index.html'] === original['index.html'] && working['snapshot.css'] === original['snapshot.css']) {
+        if (working['index.html'] === original['index.html'] && working[editableStylePath] === original[editableStylePath]) {
           if (!options.allowNoChanges) throw new Error('Agent 没有对静态源码产生修改');
           validateWorking();
-          const revision = this.readManifest(directory).revision;
+          const revision = this.readManifest(workspaceDirectory).revision;
           close();
-          return { revision, changed: false };
+          return candidate ? {
+            revision, changed: false,
+            candidate
+          } : { revision, changed: false };
         }
         validateWorking();
+        if (candidate) {
+          const updated = this.updateCandidateFiles(workspaceId, candidate.candidateId, candidate.candidateVersion, working);
+          close();
+          return { revision: updated.baseRevision, changed: true, candidate: updated };
+        }
         const revision = this.commitWorkingCopy(workspaceId, working, summary);
         close();
         return { revision, changed: true };
@@ -1499,9 +2257,9 @@ export class SourceWorkspaceStore {
     return this.get(workspaceId)!;
   }
 
-  private assertEditablePath(path: string) {
-    if (path !== 'index.html' && path !== 'snapshot.css') {
-      throw new Error(`源码 Agent 只能修改 index.html 或 snapshot.css，拒绝路径 ${path}`);
+  private assertEditablePath(path: string, editableStylePath: 'snapshot.css' | 'author-overrides.css') {
+    if (path !== 'index.html' && path !== editableStylePath) {
+      throw new Error(`源码 Agent 当前只能修改 index.html 或 ${editableStylePath}，拒绝路径 ${path}`);
     }
   }
 
@@ -1518,6 +2276,7 @@ export class SourceWorkspaceStore {
     return {
       'index.html': html,
       'snapshot.css': css,
+      'author-overrides.css': this.readOptionalFile(resolve(directory, 'author-overrides.css')) ?? '',
       'outline.json': this.readOptionalFile(resolve(directory, 'outline.json')) ?? generated.outline,
       'source-map.json': this.readOptionalFile(resolve(directory, 'source-map.json')) ?? generated.sourceMap
     };
@@ -1535,8 +2294,51 @@ export class SourceWorkspaceStore {
   private validateWorkspaceFiles(files: WorkspaceFiles): void {
     validateHtml(files['index.html']);
     validateCss(files['snapshot.css']);
+    validateCss(files['author-overrides.css']);
     JSON.parse(files['outline.json']);
     JSON.parse(files['source-map.json']);
+  }
+
+  private contentHash(workspaceId: string, files: WorkspaceFiles): string {
+    const hash = createHash('sha256');
+    for (const path of WORKSPACE_FILES) {
+      hash.update(path, 'utf8');
+      hash.update('\0', 'utf8');
+      hash.update(files[path], 'utf8');
+      hash.update('\0', 'utf8');
+    }
+    // These files are read by B preview from the workspace rather than the
+    // candidate directory. They therefore belong to the rendered-document
+    // identity even though the candidate never edits them.
+    for (const path of ['author.css', 'author-resources.json', 'author-sheets.json', 'author-style-links.json']) {
+      hash.update(path, 'utf8');
+      hash.update('\0', 'utf8');
+      hash.update(this.readOptionalFile(resolve(this.workspacePath(workspaceId), path)) ?? '', 'utf8');
+      hash.update('\0', 'utf8');
+    }
+    return hash.digest('hex');
+  }
+
+  private isSafeCandidateId(candidateId: string): boolean {
+    return /^[0-9a-f-]{36}$/i.test(candidateId);
+  }
+
+  private readCandidateJson<T>(workspaceId: string, candidateId: string, category: 'intents' | 'observations' | 'validations' | 'commits', id: string): T | undefined {
+    if (!this.isSafeCandidateId(candidateId) || !/^[0-9a-f-]{36}$/i.test(id)) return undefined;
+    const raw = this.readOptionalFile(resolve(this.workspacePath(workspaceId), 'candidates', candidateId, category, `${id}.json`));
+    if (!raw) return undefined;
+    try { return JSON.parse(raw) as T; } catch { return undefined; }
+  }
+
+  /**
+   * Intent records are protocol data, not an unchecked JSON blob.  In
+   * particular, this prevents candidates created before a required
+   * verification field was introduced from failing later with a TypeError.
+   */
+  private readCandidateIntent(workspaceId: string, candidateId: string, intentId: string): WorkspaceIntent | undefined {
+    const raw = this.readCandidateJson<unknown>(workspaceId, candidateId, 'intents', intentId);
+    const parsed = workspaceIntentSchema.safeParse(raw);
+    return parsed.success ? parsed.data : undefined;
   }
 
   private readOptionalFile(path: string): string | undefined {
@@ -1559,6 +2361,7 @@ export class SourceWorkspaceStore {
       revision: manifest.revision,
       canUndo: manifest.revision > 0,
       canRedo: manifest.revision < manifest.maxRevision,
+      ...(manifest.snapshotMetrics ? { snapshotMetrics: manifest.snapshotMetrics } : {}),
       createdAt: manifest.createdAt,
       updatedAt: manifest.updatedAt,
       ...(manifest.deletedAt && { deletedAt: manifest.deletedAt })
@@ -1605,9 +2408,10 @@ export class SourceWorkspaceStore {
     this.atomicWrite(resolve(directory, 'workspace.json'), JSON.stringify(manifest, null, 2));
   }
 
-  private atomicWrite(path: string, content: string) {
+  private atomicWrite(path: string, content: string | Uint8Array) {
     const temporary = resolve(dirname(path), `.${basename(path)}.${randomUUID()}.tmp`);
-    writeFileSync(temporary, content, { encoding: 'utf8', mode: 0o600 });
+    if (typeof content === 'string') writeFileSync(temporary, content, { encoding: 'utf8', mode: 0o600 });
+    else writeFileSync(temporary, content, { mode: 0o600 });
     renameSync(temporary, path);
   }
 }
