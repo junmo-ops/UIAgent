@@ -394,6 +394,7 @@ export function createApp(
     })
     .get('/health', c => c.json({
       ok: true,
+      replicaAEnabled: frozenStyleVariantEnabled,
       modelMode: env.MODEL_MODE ?? 'mock',
       ...(env.MODEL_MODE === 'remote' && {
         modelProvider: env.MODEL_PROVIDER ?? 'openai-compatible',
@@ -741,7 +742,7 @@ export function createApp(
           workspaceId: c.req.param('workspaceId'),
           revision: workspace?.revision ?? 0,
           candidate: 'A-frozen-computed-style',
-          diagnostics: workspaceStore.diagnostics(c.req.param('workspaceId')),
+          diagnostics: { ...workspaceStore.diagnostics(c.req.param('workspaceId')), replicaAEnabled: frozenStyleVariantEnabled },
           capability: workspace?.snapshotMetrics ? {
             authorReadableSheets: workspace.snapshotMetrics.authorReadableSheets ?? null,
             authorUnreadableSheets: workspace.snapshotMetrics.authorUnreadableSheets ?? null,

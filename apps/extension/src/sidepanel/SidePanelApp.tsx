@@ -146,9 +146,18 @@ export function SidePanelApp() {
   const repairValidationAbortRef = useRef<AbortController | undefined>(undefined);
   const resumedTurnIdsRef = useRef(new Set<string>());
   const [recoveryAttempt, setRecoveryAttempt] = useState(0);
-  const busy = snapshotBusy || assistantBusy || Boolean(activeSourceTurn);
+  const [initializationAttempt, setInitializationAttempt] = useState(0);
+  const [sessionReady, setSessionReady] = useState(false);
+  const busy = snapshotBusy || assistantBusy || Boolean(activeSourceTurn) || Boolean(sourceWorkspace && !sessionReady);
 
   useEffect(() => {
+    let disposed = false;
+    let retryTimer: ReturnType<typeof setTimeout> | undefined;
+    const retry = () => {
+      if (disposed) return;
+      setNotice('正在重新连接副本服务…');
+      retryTimer = setTimeout(() => setInitializationAttempt(value => value + 1), 3000);
+    };
     getAgentServiceUrl().then(async url => {
       setServiceUrl(url);
       const [tab] = await browser.tabs.query({ active: true, currentWindow: true });
@@ -156,11 +165,16 @@ export function SidePanelApp() {
       if (!workspaceId || !tab?.id || !tab.url) return;
       try {
         const [response, conversationResponse, persisted] = await Promise.all([
-          fetchAgentService(`${url.replace(/\/$/, '')}/v1/workspaces/${workspaceId}`),
-          fetchAgentService(`${url.replace(/\/$/, '')}/v1/workspaces/${workspaceId}/conversation`),
-          sourceWorkspaceSessionItem.getValue()
+          fetchAgentService(`${url.replace(/\/$/, '')}/v1/workspaces/${workspaceId}`, { signal: AbortSignal.timeout(15_000) }),
+          fetchAgentService(`${url.replace(/\/$/, '')}/v1/workspaces/${workspaceId}/conversation`, { signal: AbortSignal.timeout(15_000) }),
+          sourceWorkspaceSessionItem.getValue(workspaceId)
         ]);
-        if (!response.ok) return;
+        if (response.status === 404) {
+          if (!disposed) { setError('该副本不存在或当前账号无法访问'); setNotice(undefined); }
+          return;
+        }
+        if (!response.ok || !conversationResponse.ok) throw new Error('副本服务暂不可用');
+        if (disposed) return;
         const workspace = sourceWorkspaceInfoSchema.parse(await response.json());
         const restoredWorkspace = persisted?.workspace.workspaceId === workspace.workspaceId
           ? { ...workspace, selectedSourceId: persisted.workspace.selectedSourceId }
@@ -192,9 +206,11 @@ export function SidePanelApp() {
         }
         // Keep the exact candidate URL: its identity is what enables render-job polling.
         await command({ type: 'bindEditorTab', tabId: tab.id, previewUrl: tab.url });
-      } catch { /* Keep the regular page mode when workspace restoration fails. */ }
-    });
-  }, []);
+        if (!disposed) { setSessionReady(true); setNotice(undefined); }
+      } catch { retry(); }
+    }).catch(retry);
+    return () => { disposed = true; clearTimeout(retryTimer); };
+  }, [initializationAttempt]);
   useEffect(() => {
     if (!sourceWorkspace) return;
     const onActivated = async ({ tabId }: { tabId: number }) => {
@@ -227,7 +243,7 @@ export function SidePanelApp() {
     };
   }, [serviceUrl]);
   useEffect(() => {
-    if (!sourceWorkspace) return;
+    if (!sourceWorkspace || !sessionReady) return;
     const { tabId: _tabId, sourceTabId: _sourceTabId, ...workspace } = sourceWorkspace;
     void sourceWorkspaceSessionItem.setValue({
       workspace,
@@ -237,7 +253,7 @@ export function SidePanelApp() {
       pendingClarification,
       activeSourceTurn
     });
-  }, [sourceWorkspace, chat, editSessionId, pendingClarification, activeSourceTurn]);
+  }, [sourceWorkspace, chat, editSessionId, pendingClarification, activeSourceTurn, sessionReady]);
   useEffect(() => {
     const heartbeat = () => { void command({ type: 'editorHeartbeat' }).catch(() => undefined); };
     const deactivate = () => { void command({ type: 'deactivateEditor' }).catch(() => undefined); };
@@ -482,7 +498,7 @@ export function SidePanelApp() {
   };
   const persistActiveSourceTurn = async (workspace: ActiveWorkspace, activeTurn: ActiveSourceTurnSession) => {
     const { tabId: _tabId, sourceTabId: _sourceTabId, ...persistedWorkspace } = workspace;
-    const existing = await sourceWorkspaceSessionItem.getValue();
+    const existing = await sourceWorkspaceSessionItem.getValue(workspace.workspaceId);
     await sourceWorkspaceSessionItem.setValue({
       workspace: persistedWorkspace,
       chat: existing?.workspace.workspaceId === workspace.workspaceId ? existing.chat : chat,
@@ -493,7 +509,7 @@ export function SidePanelApp() {
     });
   };
   const clearPersistedActiveSourceTurn = async (workspaceId: string, turnId: string) => {
-    const existing = await sourceWorkspaceSessionItem.getValue();
+    const existing = await sourceWorkspaceSessionItem.getValue(workspaceId);
     if (
       existing?.workspace.workspaceId !== workspaceId
       || existing.activeSourceTurn?.turnId !== turnId
@@ -941,8 +957,9 @@ export function SidePanelApp() {
       await command({
         type: useVisibleViewport ? 'createWorkspaceFromVisibleViewport' : 'createWorkspaceFromFullViewport'
       });
-      const persisted = await sourceWorkspaceSessionItem.getValue();
       const [tab] = await browser.tabs.query({ active: true, currentWindow: true });
+      const workspaceId = previewWorkspaceId(tab?.url);
+      const persisted = workspaceId ? await sourceWorkspaceSessionItem.getValue(workspaceId) : null;
       if (!persisted || !tab?.id) throw new Error('副本已创建，但当前侧栏未能恢复工作区状态');
       setSourceWorkspace({
         ...persisted.workspace,
@@ -951,6 +968,8 @@ export function SidePanelApp() {
       });
       setChat(persisted.chat);
       setPendingClarification(persisted.pendingClarification);
+      setEditSessionId(persisted.editSessionId);
+      setSessionReady(true);
       setSnapshotBusy(false);
     } catch (error) {
       fail(error);
@@ -961,7 +980,8 @@ export function SidePanelApp() {
     setExportConfirmOpen(false);
     setSnapshotBusy(true);
     try {
-      const captured = await command({ type: 'capturePageSnapshot' });
+      // Portable exports retain their existing standalone frozen representation.
+      const captured = await command({ type: 'capturePageSnapshot', includeFrozenStyles: true });
       if (!captured.snapshot) throw new Error('页面没有返回可导出的静态快照');
       const portable = createPortableSnapshotPackage(captured.snapshot);
       const blob = new Blob([serializePortableSnapshotPackage(portable)], { type: 'application/json' });
@@ -1001,7 +1021,7 @@ export function SidePanelApp() {
     setNotice(undefined);
   };
   useEffect(() => {
-    if (!sourceWorkspace || !activeSourceTurn) return;
+    if (!sourceWorkspace || !activeSourceTurn || !sessionReady) return;
     if (resumedTurnIdsRef.current.has(activeSourceTurn.turnId)) return;
     const timer = window.setTimeout(() => {
       resumedTurnIdsRef.current.add(activeSourceTurn.turnId);
@@ -1010,7 +1030,7 @@ export function SidePanelApp() {
       void resumeSourceTurn(sourceWorkspace, activeSourceTurn);
     }, recoveryAttempt === 0 ? 0 : Math.min(1000 * 2 ** Math.min(recoveryAttempt, 4), 15_000));
     return () => window.clearTimeout(timer);
-  }, [sourceWorkspace?.workspaceId, activeSourceTurn?.turnId, recoveryAttempt]);
+  }, [sourceWorkspace?.workspaceId, activeSourceTurn?.turnId, recoveryAttempt, sessionReady]);
   const openLogs = async () => {
     await browser.tabs.create({ url: `${browser.runtime.getURL('')}logs.html` });
   };

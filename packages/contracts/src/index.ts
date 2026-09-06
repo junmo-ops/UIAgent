@@ -656,8 +656,8 @@ export type ContentCommand =
   | { type: 'editorHeartbeat' }
   | { type: 'deactivateEditor' }
   | { type: 'startSelection' }
-  | { type: 'capturePageSnapshot' }
-  | { type: 'capturePageSnapshotAfterViewportReflow' }
+  | { type: 'capturePageSnapshot'; includeFrozenStyles?: boolean }
+  | { type: 'capturePageSnapshotAfterViewportReflow'; includeFrozenStyles?: boolean }
   | { type: 'createWorkspaceFromFullViewport' }
   | { type: 'createWorkspaceFromVisibleViewport' }
   | { type: 'bindEditorTab'; tabId: number; previewUrl: string }

@@ -211,7 +211,7 @@ export default defineContentScript({
           return { ok: true } satisfies ContentCommandResult;
         }
         if (command.type === 'capturePageSnapshot') {
-          return { ok: true, snapshot: captureStaticSnapshot(document.body) } satisfies ContentCommandResult;
+          return { ok: true, snapshot: captureStaticSnapshot(document.body, command.includeFrozenStyles === true) } satisfies ContentCommandResult;
         }
         if (command.type === 'capturePageSnapshotAfterViewportReflow') {
           // Side Panel removal changes CSS media queries and layout. Capture only
@@ -227,7 +227,7 @@ export default defineContentScript({
               stableFrames = 0;
             }
           }
-          return { ok: true, snapshot: captureStaticSnapshot(document.body) } satisfies ContentCommandResult;
+          return { ok: true, snapshot: captureStaticSnapshot(document.body, command.includeFrozenStyles === true) } satisfies ContentCommandResult;
         }
         if (command.type === 'prepareScreenshot') { selection.hide(); return { ok: true } satisfies ContentCommandResult; }
         if (command.type === 'finishScreenshot') { selection.refresh(); return { ok: true } satisfies ContentCommandResult; }

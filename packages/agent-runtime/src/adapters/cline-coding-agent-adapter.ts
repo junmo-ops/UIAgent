@@ -294,6 +294,12 @@ export class ClineCodingAgentAdapter implements CodingAgentPort {
     observe?: CodingAgentObserver,
     signal?: AbortSignal
   ): Promise<CodingAgentRunResult> {
+    const finishDescription = workspace.submissionMode === 'candidate'
+      ? 'finish 校验并物化候选草稿，不发布正式 Revision；服务随后执行真实渲染验证。'
+      : 'finish 校验并直接提交正式 Revision；当前未启用自动渲染验证，实际页面效果由用户检查，不得声称正在等待自动渲染验证。';
+    const modeRules = clineSourceRules.replace(
+      'finish 只会生成等待真实渲染验证的候选草稿，不会发布正式 Revision。', finishDescription
+    );
     const startedAt = new Date().toISOString();
     const steps: CodingAgentStep[] = [];
     let completion: Completion | undefined;
@@ -1039,7 +1045,7 @@ export class ClineCodingAgentAdapter implements CodingAgentPort {
         evidence?: string;
       }, string>({
         name: 'finish',
-        description: '目标已经达成时，校验并物化候选草稿，结束本轮。服务随后会执行真实渲染验证；此工具不会发布正式 Revision。若已验证当前副本本来就满足需求且无需改动，设置 outcome=already_satisfied，并提供源码证据。',
+        description: `${finishDescription}若当前副本无需改动，设置 outcome=already_satisfied，并提供源码证据。`,
         inputSchema: objectSchema({
           summary: stringProperty('面向用户的简洁修改说明。'),
           outcome: {
@@ -1134,7 +1140,7 @@ export class ClineCodingAgentAdapter implements CodingAgentPort {
         modelId: this.options.modelName,
         apiKey: this.options.apiKey,
         baseUrl: this.options.baseUrl,
-        systemPrompt: `${clineSourceRules}\n单轮最多 ${this.maxIterations} 次模型决策；从第 ${Math.max(1, this.maxIterations - FINALIZATION_WINDOW + 1)} 轮起必须停止扩展读取，只能完成必要修改、校验并 finish，或 clarify。`,
+        systemPrompt: `${modeRules}\n单轮最多 ${this.maxIterations} 次模型决策；从第 ${Math.max(1, this.maxIterations - FINALIZATION_WINDOW + 1)} 轮起必须停止扩展读取，只能完成必要修改、校验并 finish，或 clarify。`,
         tools,
         maxIterations: this.maxIterations
       });
@@ -1154,7 +1160,7 @@ export class ClineCodingAgentAdapter implements CodingAgentPort {
       // because the model omitted the lifecycle tool call.
       if (!completion && result.status === 'completed' && !result.error) {
         const finalizationResult = await activeAgent.run(JSON.stringify({
-          instruction: '本轮源码修改与 validate_workspace 已完成。请不要继续读取或修改；现在必须立即调用 finish 生成候选草稿，等待真实渲染验证。如果无法安全生成草稿，调用 clarify 说明原因。',
+          instruction: `本轮源码修改与 validate_workspace 已完成。请不要继续读取或修改；现在调用 finish。${finishDescription}如果无法完成，调用 clarify 说明原因。`,
           selectedSourceId: turn.request.sourceId,
           conversation: turn.conversation.slice(-2),
           files

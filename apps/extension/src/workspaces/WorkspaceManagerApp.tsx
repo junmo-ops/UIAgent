@@ -12,7 +12,7 @@ import { agentServiceFetch } from '../service/agent-service-client';
 import { parseWorkspaceArchiveZip, serializeWorkspaceArchiveZip } from './workspace-archive';
 
 type WorkspaceStatus = 'active' | 'trashed';
-type SnapshotDiagnostics = { totalChars: number; cssChars: number; cssShare: number; generatedStyleRuleCount: number; generatedStyleShare: number; authorCssChars?: number; authorResourceCount?: number; authorResourceOriginCount?: number; authorRenderOnlyStyleCount?: number; authorResourceFailureCount?: number };
+type SnapshotDiagnostics = { replicaAEnabled?: boolean; totalChars: number; cssChars: number; cssShare: number; generatedStyleRuleCount: number; generatedStyleShare: number; authorCssChars?: number; authorResourceCount?: number; authorResourceOriginCount?: number; authorRenderOnlyStyleCount?: number; authorResourceFailureCount?: number };
 const PAGE_SIZE = 18;
 
 function formatTime(value: string): string {
@@ -239,7 +239,7 @@ export function WorkspaceManagerApp() {
             <div className="workspace-actions">
               {status === 'active' ? <>
               <button className="primary" onClick={() => void browser.tabs.create({ url: workspace.previewUrl })}>打开副本</button>
-              {diagnostics[workspace.workspaceId]?.authorCssChars ? <button onClick={() => {
+              {diagnostics[workspace.workspaceId]?.replicaAEnabled ? <button onClick={() => {
                 const candidateUrl = new URL(workspace.previewUrl);
                 candidateUrl.searchParams.delete('candidate');
                 void browser.tabs.create({ url: candidateUrl.toString() });

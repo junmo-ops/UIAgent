@@ -723,7 +723,7 @@ export class SourceWorkspaceStore {
     mkdirSync(initialRevision, { recursive: true, mode: 0o700 });
     const files: WorkspaceFiles = {
       'index.html': compiled.html,
-      'snapshot.css': compiled.css,
+      'snapshot.css': this.frozenStyleVariantEnabled ? compiled.css : '',
       // B keeps captured author rules immutable. User/agent visual edits live
       // in this versioned layer so they can be undone without mutating capture.
       'author-overrides.css': snapshot.authorOverrides ?? '',
@@ -931,6 +931,12 @@ export class SourceWorkspaceStore {
 
   private localizeSnapshotResources(html: string, resources: AuthorStyleResource[], workspaceAssetPath = '', assetQuery = ''): string {
     const indexes = new Map(resources.map((resource, index) => [resource.url, index]));
+    html = html.replace(/#ui-agent-resource-([a-z0-9%_.~-]+)/gi, (marker, encoded) => {
+      try {
+        const index = indexes.get(decodeURIComponent(encoded));
+        return index === undefined ? marker : `${workspaceAssetPath}assets/${index}${assetQuery}`;
+      } catch { return marker; }
+    });
     return html.replace(/\sdata-ui-agent-resource-url="([^"]*)"/gi, (attribute, encodedUrl) => {
       try {
         const index = indexes.get(decodeURIComponent(encodedUrl));
@@ -1683,6 +1689,7 @@ export class SourceWorkspaceStore {
 
     let toolset!: CodingWorkspaceTools;
     toolset = {
+      submissionMode: candidate ? 'candidate' : 'direct',
       listFiles: async () => [
         ...WORKSPACE_FILES.map(path => ({ path, chars: working[path].length })),
         ...(this.authorCss(workspaceId) ? [{ path: 'author.css', chars: this.authorCss(workspaceId)!.length }] : []),

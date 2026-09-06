@@ -231,14 +231,18 @@ async function createWorkspaceFromViewport(tab: Browser.tabs.Tab, restoreOrigina
     // The preview replaces the source in this same tab.  Capturing the current
     // viewport keeps the Side Panel alive and avoids forcing the user to open
     // the extension again in a newly created preview tab.
+    const serviceUrl = await getAgentServiceUrl();
+    const capabilitiesResponse = await agentServiceFetch(`${serviceUrl.replace(/\/$/, '')}/health`, { signal: AbortSignal.timeout(15_000) });
+    if (!capabilitiesResponse.ok) throw new Error('无法读取副本采集配置');
+    const capabilities = await capabilitiesResponse.json() as { replicaAEnabled?: boolean };
     const captured = await sendToContent(tab, {
-      type: restoreOriginalViewport ? 'capturePageSnapshotAfterViewportReflow' : 'capturePageSnapshot'
+      type: restoreOriginalViewport ? 'capturePageSnapshotAfterViewportReflow' : 'capturePageSnapshot',
+      includeFrozenStyles: capabilities.replicaAEnabled === true
     });
     if (!captured.ok) throw new BrowserCommandError(captured.code, captured.error);
     if (!captured.snapshot) throw new BrowserCommandError('PAGE_OPERATION_FAILED', '页面没有返回静态源码副本');
     const hydratedSnapshot = await hydrateAuthorStyles(tab, captured.snapshot);
 
-    const serviceUrl = await getAgentServiceUrl();
     const response = await agentServiceFetch(`${serviceUrl.replace(/\/$/, '')}/v1/workspaces`, {
       method: 'POST',
       headers: { 'content-type': 'application/json' },

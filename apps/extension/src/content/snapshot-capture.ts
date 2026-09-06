@@ -65,16 +65,29 @@ function isCapturableStyle(property: string, value: string): boolean {
   return !/url\s*\(/i.test(value);
 }
 
-function preserveSafeInlineStyle(element: HTMLElement): void {
+function preserveSafeInlineStyle(element: HTMLElement, resources: AuthorStyleResource[] = []): void {
   for (const property of [...element.style]) {
     const value = element.style.getPropertyValue(property);
     if (/\b(?:javascript\s*:|expression\s*\(|-moz-binding\b|behavior\s*:)/i.test(value)) {
       element.style.removeProperty(property);
       continue;
     }
-    // External resources remain out of the frozen A package. B obtains its
-    // declared resources from the preserved author stylesheet instead.
-    if (/url\s*\(/i.test(value)) element.style.removeProperty(property);
+    // Keep author declarations and priority; only recorded resources can be
+    // resolved from these opaque fragment markers by the preview service.
+    if (/url\s*\(/i.test(value)) {
+      const localized = value.replace(/url\(\s*(?:"([^"]*)"|'([^']*)'|([^)]*?))\s*\)/gi, (_token, double, single, bare) => {
+        const target = String(double ?? single ?? bare ?? '').trim();
+        if (target.startsWith('#') || target.startsWith('data:')) return _token;
+        try {
+          const url = new URL(target, document.baseURI);
+          if (!/^https?:$/.test(url.protocol)) return 'none';
+          resources.push({ url: url.href, sourceUrl: location.href, kind: 'image' });
+          const encoded = encodeURIComponent(url.href).replace(/[!'()*]/g, char => `%${char.charCodeAt(0).toString(16)}`);
+          return `url(#ui-agent-resource-${encoded})`;
+        } catch { return 'none'; }
+      });
+      element.style.setProperty(property, localized, element.style.getPropertyPriority(property));
+    }
   }
   if (!element.getAttribute('style')?.trim()) element.removeAttribute('style');
 }
@@ -145,7 +158,6 @@ function applyComputedStyle(source: Element, clone: Element, registry: StyleRegi
   registry.rules.set(declaration, className);
   registry.inlineStyleCharsBefore += declaration.length + 8;
   clone.classList.add(className);
-  if (clone instanceof HTMLElement) preserveSafeInlineStyle(clone);
 }
 
 function captureImageResource(source: Element, clone: Element, resources: AuthorStyleResource[]): void {
@@ -175,9 +187,10 @@ function capturePseudoStyle(source: Element, sourceId: string, pseudo: '::before
   return `[data-ui-source-id="${sourceId}"]${pseudo}{${declarations.join(';')}}`;
 }
 
-function sanitizeElement(source: Element, clone: Element, registry: StyleRegistry, resources: AuthorStyleResource[]): void {
+function sanitizeElement(source: Element, clone: Element, registry: StyleRegistry, resources: AuthorStyleResource[], includeFrozenStyles: boolean): void {
   copyLiveState(source, clone);
-  applyComputedStyle(source, clone, registry);
+  if (includeFrozenStyles) applyComputedStyle(source, clone, registry);
+  if (clone instanceof HTMLElement) preserveSafeInlineStyle(clone, resources);
   captureImageResource(source, clone, resources);
 
   for (const attribute of [...clone.attributes]) {
@@ -212,7 +225,7 @@ function capturedRect(source: Element): string {
     .join(',');
 }
 
-function sanitizeTree(sourceRoot: HTMLElement, cloneRoot: HTMLElement, registry: StyleRegistry, resources: AuthorStyleResource[]): string[] {
+function sanitizeTree(sourceRoot: HTMLElement, cloneRoot: HTMLElement, registry: StyleRegistry, resources: AuthorStyleResource[], includeFrozenStyles: boolean): string[] {
   const sourceElements = [sourceRoot, ...sourceRoot.querySelectorAll('*')];
   const cloneElements = [cloneRoot, ...cloneRoot.querySelectorAll('*')];
   const pseudoRules: string[] = [];
@@ -228,8 +241,8 @@ function sanitizeTree(sourceRoot: HTMLElement, cloneRoot: HTMLElement, registry:
     const sourceId = `source-${index}`;
     clone.setAttribute('data-ui-source-id', sourceId);
     clone.setAttribute('data-ui-agent-source-rect', capturedRect(source));
-    sanitizeElement(source, clone, registry, resources);
-    for (const pseudo of ['::before', '::after'] as const) {
+    sanitizeElement(source, clone, registry, resources, includeFrozenStyles);
+    for (const pseudo of includeFrozenStyles ? ['::before', '::after'] as const : []) {
       const rule = capturePseudoStyle(source, sourceId, pseudo);
       if (rule) pseudoRules.push(rule);
     }
@@ -300,7 +313,7 @@ function bodyContextAttributes(sourceBody: HTMLElement): string {
   return contextAttributes.length ? ` ${contextAttributes.join(' ')}` : '';
 }
 
-export function captureStaticSnapshot(sourceRoot: HTMLElement): StaticSnapshot {
+export function captureStaticSnapshot(sourceRoot: HTMLElement, includeFrozenStyles = false): StaticSnapshot {
   const authorStyles = captureAccessibleAuthorStyles(document);
   const authorStyleSources = Array.from(document.querySelectorAll<HTMLLinkElement>('link[rel~="stylesheet"][href]'))
     .map(link => link.href)
@@ -308,7 +321,7 @@ export function captureStaticSnapshot(sourceRoot: HTMLElement): StaticSnapshot {
   const cloneRoot = sourceRoot.cloneNode(true) as HTMLElement;
   const registry: StyleRegistry = { rules: new Map(), inlineStyleCharsBefore: 0 };
   const visualResources: AuthorStyleResource[] = [];
-  const pseudoRules = sanitizeTree(sourceRoot, cloneRoot, registry, visualResources);
+  const pseudoRules = sanitizeTree(sourceRoot, cloneRoot, registry, visualResources, includeFrozenStyles);
   normalizeNestedListItems(cloneRoot);
   authorStyles.resources = [...new Map(
     [...(authorStyles.resources ?? []), ...visualResources].map(resource => [resource.url, resource])
@@ -325,7 +338,7 @@ export function captureStaticSnapshot(sourceRoot: HTMLElement): StaticSnapshot {
   const nodeCount = 1 + renderedRoot.querySelectorAll('*').length;
   const viewportWidth = Math.max(1, Math.round(innerWidth));
   const viewportHeight = Math.max(1, Math.round(innerHeight));
-  const pageBackground = getComputedStyle(document.body).backgroundColor || '#ffffff';
+  const pageBackground = includeFrozenStyles ? getComputedStyle(document.body).backgroundColor || '#ffffff' : '';
   const title = `${document.title || '未命名页面'} · 静态快照`;
 
   renderedRoot.setAttribute('data-ui-agent-snapshot-root', '');
@@ -343,14 +356,14 @@ export function captureStaticSnapshot(sourceRoot: HTMLElement): StaticSnapshot {
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>${escapeHtml(title)}</title>
-  <style>
+  ${includeFrozenStyles ? `<style>
     html,body{margin:0;width:100%;min-width:${viewportWidth}px;min-height:${viewportHeight}px;box-sizing:border-box}
     *,*::before,*::after{box-sizing:border-box}
     body{padding:0;background:${pageBackground};overflow:auto}
     [data-ui-agent-snapshot-stage]{display:block;width:${viewportWidth}px;min-width:${viewportWidth}px;min-height:${viewportHeight}px;margin:0 auto;transform:translateZ(0)}
     ${capturedStyles}
     ${pseudoRules.join('\n    ')}
-  </style>
+  </style>` : ''}
 </head>
 <body data-ui-agent-static-snapshot="true"${sourceRoot === document.body ? bodyContextAttributes(sourceRoot) : ''}>
   <main data-ui-agent-snapshot-stage>${renderedRoot.outerHTML}</main>

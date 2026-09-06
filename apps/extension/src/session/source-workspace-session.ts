@@ -41,7 +41,29 @@ export interface PersistedWorkspaceSession {
   activeSourceTurn?: ActiveSourceTurnSession;
 }
 
-export const sourceWorkspaceSessionItem = storage.defineItem<PersistedWorkspaceSession | null>(
+const legacySessionItem = storage.defineItem<PersistedWorkspaceSession | null>(
   'local:sourceWorkspaceSession',
   { fallback: null }
 );
+
+const workspaceSession = (workspaceId: string) => storage.defineItem<PersistedWorkspaceSession | null>(
+  `local:sourceWorkspaceSession:${workspaceId}`, { fallback: null }
+);
+
+export const sourceWorkspaceSessionItem = {
+  async getValue(workspaceId?: string): Promise<PersistedWorkspaceSession | null> {
+    if (!workspaceId) return legacySessionItem.getValue();
+    const saved = await workspaceSession(workspaceId).getValue();
+    if (saved) return saved;
+    const legacy = await legacySessionItem.getValue();
+    if (legacy?.workspace.workspaceId !== workspaceId) return null;
+    await workspaceSession(workspaceId).setValue(legacy);
+    return legacy;
+  },
+  async setValue(value: PersistedWorkspaceSession | null) {
+    if (value) await workspaceSession(value.workspace.workspaceId).setValue(value);
+    // The legacy key is only the latest-created workspace handoff. Clearing it
+    // when returning to the source must not erase a workspace's running turn.
+    await legacySessionItem.setValue(value);
+  }
+};

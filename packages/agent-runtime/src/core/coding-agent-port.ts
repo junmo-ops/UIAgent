@@ -20,6 +20,7 @@ export interface GeometryVerificationResult {
 }
 
 export interface CodingWorkspaceTools {
+  readonly submissionMode?: 'direct' | 'candidate';
   listFiles(): Promise<Array<{ path: string; chars: number }>>;
   /**
    * Query the compact, system-maintained workspace structure before falling
