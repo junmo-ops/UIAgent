@@ -285,6 +285,23 @@ describe('SourceWorkspaceStore', () => {
     await tools.rollback();
   });
 
+  it('allows javascript text but rejects executable javascript URL attributes', () => {
+    const store = createStore();
+    expect(() => store.create({
+      ...snapshot,
+      html: '<!doctype html><html><head><title>javascript: 使用说明</title><style>.hint::before{content:"javascript: 示例"}</style></head><body><p data-ui-source-id="source-0">不要使用 javascript: URL</p></body></html>'
+    })).not.toThrow();
+
+    expect(() => store.create({
+      ...snapshot,
+      html: '<!doctype html><html><body><a data-ui-source-id="source-0" href="javascript:alert(1)">危险链接</a></body></html>'
+    })).toThrow('javascript URL');
+    expect(() => store.create({
+      ...snapshot,
+      html: '<!doctype html><html><body><a data-ui-source-id="source-0" href="java&#x0A;script:alert(1)">危险链接</a></body></html>'
+    })).toThrow('javascript URL');
+  });
+
   it('allows local SVG paint references but rejects external CSS URLs', () => {
     const store = createStore();
     expect(() => store.create({
