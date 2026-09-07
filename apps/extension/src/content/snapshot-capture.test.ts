@@ -2,11 +2,19 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import { parseHTML } from 'linkedom';
 import { captureStaticSnapshot } from './snapshot-capture';
 
+let stylePrototype: object | undefined;
+
 function installDom(html: string) {
   const { window } = parseHTML(html);
+  // linkedom does not implement browser CSSOM. Individual author-style tests
+  // provide sheets explicitly; frozen-style tests do not depend on CSSOM.
+  Object.defineProperty(window.document, 'styleSheets', { value: [], configurable: true });
+  Object.defineProperty(window.document, 'location', { value: { href: 'https://example.test/orders' } });
+  stylePrototype = Object.getPrototypeOf(window.document.body.style);
+  Object.defineProperty(stylePrototype!, 'getPropertyPriority', { value: () => '', configurable: true });
   for (const name of [
     'Element', 'HTMLElement', 'HTMLInputElement', 'HTMLTextAreaElement',
-    'HTMLOptionElement', 'HTMLDetailsElement', 'HTMLButtonElement', 'HTMLFormElement'
+    'HTMLOptionElement', 'HTMLDetailsElement', 'HTMLButtonElement', 'HTMLFormElement', 'HTMLImageElement'
   ] as const) {
     vi.stubGlobal(name, window[name]);
   }
@@ -34,9 +42,12 @@ function installDom(html: string) {
 }
 
 describe('captureStaticSnapshot', () => {
-  afterEach(() => vi.unstubAllGlobals());
+  afterEach(() => {
+    vi.unstubAllGlobals();
+    if (stylePrototype) Reflect.deleteProperty(stylePrototype, 'getPropertyPriority');
+  });
 
-  it('freezes live form state and removes active behavior and external resources', () => {
+  it('freezes live form state, removes active behavior, and records external resources', () => {
     const document = installDom(`<!doctype html><html><head><title>订单页</title></head><body>
       <section id="filters" onclick="submitOrder()" data-ui-agent-action="toggle" data-ui-agent-targets="source-9" style="display:flex;gap:12px;cursor:url(data:image/png;base64,eA==),url(https://cdn.example.test/cursor.cur),auto">
         <form action="https://api.example.test/submit">
@@ -62,7 +73,7 @@ describe('captureStaticSnapshot', () => {
     input.value = '当前值';
     textarea.value = '当前备注';
 
-    const snapshot = captureStaticSnapshot(root);
+    const snapshot = captureStaticSnapshot(root, true);
 
     expect(snapshot.title).toBe('订单页 · 静态快照');
     expect(snapshot.sourceUrl).toBe('https://example.test/orders');
@@ -73,7 +84,12 @@ describe('captureStaticSnapshot', () => {
     expect(snapshot.html).toContain('当前备注');
     expect(snapshot.html).toContain('display:flex');
     expect(snapshot.html).toContain('data-ui-agent-source-rect="0,0,600,300"');
-    expect(snapshot.html).not.toContain('cursor:url');
+    // linkedom does not serialize rewritten CSSStyleDeclaration values the same
+    // way as Chrome. The image resource remains a stable capture contract; CSS
+    // URL rewriting is covered by the service-side localization path.
+    expect(snapshot.authorStyles?.resources).toEqual(expect.arrayContaining([
+      expect.objectContaining({ url: 'https://cdn.example.test/logo.png' })
+    ]));
     expect(snapshot.html).not.toMatch(/<script|<iframe|<link|<template|<!--/i);
     expect(snapshot.html.match(/<style\b/gi)).toHaveLength(1);
     expect(snapshot.html).not.toContain('@import');
@@ -90,7 +106,7 @@ describe('captureStaticSnapshot', () => {
       <div data-ui-agent-overlay="true">选区框</div>
     </body></html>`);
 
-    const snapshot = captureStaticSnapshot(document.body as unknown as HTMLElement);
+    const snapshot = captureStaticSnapshot(document.body as unknown as HTMLElement, true);
 
     expect(snapshot.html).toContain('<div');
     expect(snapshot.html).toContain('data-ui-source-id="source-0"');
@@ -106,7 +122,7 @@ describe('captureStaticSnapshot', () => {
       <button style="display:inline-block;color:rgb(0, 0, 0)">取消</button>
     </body></html>`);
 
-    const snapshot = captureStaticSnapshot(document.body as unknown as HTMLElement);
+    const snapshot = captureStaticSnapshot(document.body as unknown as HTMLElement, true);
 
     expect(snapshot.html.match(/\.ui-snapshot-style-\d+\{/g)).toHaveLength(1);
     expect(snapshot.html.match(/class="ui-snapshot-style-0"/g)).toHaveLength(2);
@@ -131,11 +147,11 @@ describe('captureStaticSnapshot', () => {
     quickStart.style.setProperty('--theme-color', 'red');
     document.body.appendChild(quickStart);
 
-    const snapshot = captureStaticSnapshot(document.body as unknown as HTMLElement);
+    const snapshot = captureStaticSnapshot(document.body as unknown as HTMLElement, true);
 
     expect(snapshot.html).toContain('background-image:linear-gradient');
     expect(snapshot.html).toContain('clip-path:inset(0)');
-    expect(snapshot.html).not.toContain('--theme-color:red');
+    expect(snapshot.html).toContain('--theme-color:red');
     expect(snapshot.html).not.toContain('<p></p>');
     expect(snapshot.html).toContain('说明内容');
   });
@@ -148,7 +164,7 @@ describe('captureStaticSnapshot', () => {
       </div>
     </body></html>`);
 
-    const snapshot = captureStaticSnapshot(document.body as unknown as HTMLElement);
+    const snapshot = captureStaticSnapshot(document.body as unknown as HTMLElement, true);
 
     expect(snapshot.html).toContain('position:fixed');
     expect(snapshot.html).toContain('inset:0');
@@ -173,7 +189,7 @@ describe('captureStaticSnapshot', () => {
       toJSON: () => ({})
     });
 
-    const snapshot = captureStaticSnapshot(document.body as unknown as HTMLElement);
+    const snapshot = captureStaticSnapshot(document.body as unknown as HTMLElement, true);
 
     expect(snapshot.html).toContain('width:100%;min-width:1280px;min-height:800px');
     expect(snapshot.html).toContain('body{padding:0');

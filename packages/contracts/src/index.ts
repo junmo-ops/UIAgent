@@ -669,7 +669,7 @@ export type ContentCommand =
   | { type: 'readWorkspacePreviewState'; document: DocumentRef };
 
 export type ContentCommandResult =
-  | { ok: true; selection?: PageSelection; snapshot?: StaticSnapshot; observation?: LiveWorkspaceObservation; renderState?: { viewport: { width: number; height: number; devicePixelRatio: number }; scroll: { x: number; y: number } } }
+  | { ok: true; selection?: PageSelection; snapshot?: StaticSnapshot; workspace?: SourceWorkspaceInfo; observation?: LiveWorkspaceObservation; renderState?: { viewport: { width: number; height: number; devicePixelRatio: number }; scroll: { x: number; y: number } } }
   | { ok: false; code: ExtensionErrorCode; error: string };
 
 export interface BrowserCommandRequest {

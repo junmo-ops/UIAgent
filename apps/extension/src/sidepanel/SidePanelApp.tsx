@@ -954,21 +954,25 @@ export function SidePanelApp() {
   const createSourceWorkspace = async () => {
     setSnapshotBusy(true);
     try {
-      await command({
+      const result = await command({
         type: useVisibleViewport ? 'createWorkspaceFromVisibleViewport' : 'createWorkspaceFromFullViewport'
       });
+      const workspace = result.workspace;
+      if (!workspace) throw new Error('副本已创建，但后台没有返回工作区信息');
       const [tab] = await browser.tabs.query({ active: true, currentWindow: true });
-      const workspaceId = previewWorkspaceId(tab?.url);
-      const persisted = workspaceId ? await sourceWorkspaceSessionItem.getValue(workspaceId) : null;
-      if (!persisted || !tab?.id) throw new Error('副本已创建，但当前侧栏未能恢复工作区状态');
+      if (!tab?.id) throw new Error('副本已创建，但预览标签页不可用');
+      // The background persisted this before navigating the tab. It is useful
+      // for continuity, but creation must not fail if storage propagation lags.
+      const persisted = await sourceWorkspaceSessionItem.getValue(workspace.workspaceId);
+      await command({ type: 'bindEditorTab', tabId: tab.id, previewUrl: workspace.previewUrl });
       setSourceWorkspace({
-        ...persisted.workspace,
+        ...workspace,
         tabId: tab.id,
-        sourceTabId: persisted.sourceTabId
+        sourceTabId: persisted?.sourceTabId ?? tab.id
       });
-      setChat(persisted.chat);
-      setPendingClarification(persisted.pendingClarification);
-      setEditSessionId(persisted.editSessionId);
+      setChat(persisted?.chat ?? []);
+      setPendingClarification(persisted?.pendingClarification);
+      setEditSessionId(persisted?.editSessionId ?? crypto.randomUUID());
       setSessionReady(true);
       setSnapshotBusy(false);
     } catch (error) {

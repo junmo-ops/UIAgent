@@ -46,12 +46,16 @@ async function declareIntent(config: ClineAgentFactoryInput, iteration: number):
   await findTool<{
     summary: string;
     relevantSourceIds: string[];
+    verificationSourceIds: string[];
     visualConstraints: string[];
+    renderConstraintIndexes: number[];
     ambiguityAssessment: string;
   }>(config, 'declare_intent').execute({
     summary: '按用户要求修改选中元素',
     relevantSourceIds: ['source-0'],
-    visualConstraints: ['保持无关结构和样式不变'],
+    verificationSourceIds: ['source-0'],
+    visualConstraints: ['目标元素可见且未被裁切', '保持无关结构和样式不变'],
+    renderConstraintIndexes: [1],
     ambiguityAssessment: '目标元素和修改内容已经明确'
   }, context(iteration));
 }

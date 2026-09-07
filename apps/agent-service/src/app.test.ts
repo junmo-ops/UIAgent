@@ -98,6 +98,7 @@ describe('agent service', () => {
         body: JSON.stringify({
           protocolVersion: PROTOCOL_VERSION,
           title: 'Alice workspace',
+          authorStyles: { cssText: 'main { color: red }', readableSheets: 1, unreadableSheets: 0, missing: [] },
           sourceUrl: 'https://example.test/alice',
           capturedAt: '2026-08-08T00:00:00.000Z',
           html: '<!doctype html><html><body><main data-ui-source-id="source-0">Alice</main></body></html>',
@@ -197,6 +198,7 @@ describe('agent service', () => {
         body: JSON.stringify({
           protocolVersion: PROTOCOL_VERSION,
           title: '安装身份的副本',
+          authorStyles: { cssText: 'main { color: red }', readableSheets: 1, unreadableSheets: 0, missing: [] },
           sourceUrl: 'https://example.test/installation',
           capturedAt: '2026-08-08T00:00:00.000Z',
           html: '<!doctype html><html><body><main data-ui-source-id="source-0">Installation</main></body></html>',
@@ -239,7 +241,7 @@ describe('agent service', () => {
     }
   });
 
-  it('creates and serves a persistent static source workspace', async () => {
+  it('creates and serves a legacy frozen workspace when explicitly enabled', async () => {
     const root = mkdtempSync(join(tmpdir(), 'ui-agent-app-workspace-'));
     try {
       const app = createApp(
@@ -248,7 +250,8 @@ describe('agent service', () => {
           MODEL_BASE_URL: 'https://example.test',
           MODEL_API_KEY: 'test-key',
           MODEL_NAME: 'test-model',
-          PUBLIC_BASE_URL: 'https://ui-agent.example.test'
+          PUBLIC_BASE_URL: 'https://ui-agent.example.test',
+          REPLICA_A_ENABLED: 'true'
         },
         new TurnLogStore({ persist: false }),
         new SourceWorkspaceStore(root)
@@ -269,7 +272,7 @@ describe('agent service', () => {
       });
       expect(response.status).toBe(201);
       const created = await response.json() as { workspaceId: string; previewUrl: string };
-      expect(created.previewUrl).toBe(`https://ui-agent.example.test/workspaces/${created.workspaceId}/preview`);
+      expect(created.previewUrl).toBe(`https://ui-agent.example.test/workspaces/${created.workspaceId}/preview?candidate=A`);
       const info = await app.request(`/v1/workspaces/${created.workspaceId}`);
       expect(await info.json()).toMatchObject({ workspaceId: created.workspaceId, revision: 0, canUndo: false });
       const listed = await app.request('/v1/workspaces?query=orders');
@@ -287,7 +290,7 @@ describe('agent service', () => {
       expect(preview.headers.get('content-security-policy')).toContain("script-src 'none'");
       const previewHtml = await preview.text();
       expect(previewHtml).toContain('data-ui-source-id="source-0"');
-      expect(previewHtml).toContain('<style data-ui-agent-workspace-styles>');
+      expect(previewHtml).toContain('<style data-ui-agent-workspace-styles data-ui-agent-candidate="A">');
       expect(previewHtml).toContain('.ui-snapshot-style-0{color:red}');
       const archive = await app.request('/v1/workspaces/export-all');
       expect(archive.status).toBe(200);
@@ -360,12 +363,14 @@ describe('agent service', () => {
           title: '订单页 · 静态副本',
           sourceUrl: 'https://example.test/orders',
           capturedAt: '2026-07-31T00:00:00.000Z',
+          authorStyles: { cssText: 'button { color: red }', readableSheets: 1, unreadableSheets: 0, missing: [] },
           html: '<!doctype html><html><body><button data-ui-source-id="source-0">查询</button></body></html>',
           nodeCount: 1,
           selectedSourceId: 'source-0',
           viewport: { width: 1280, height: 800 }
         })
       });
+      expect(createdResponse.status).toBe(201);
       const created = await createdResponse.json() as { workspaceId: string };
       const turnResponse = await app.request(`/v1/workspaces/${created.workspaceId}/turns`, {
         method: 'POST',
@@ -394,7 +399,8 @@ describe('agent service', () => {
         toolCalls: 1,
         result: { kind: 'completed', revision: 1 }
       });
-      const preview = await app.request(`/workspaces/${created.workspaceId}/preview`);
+      const preview = await app.request(`/workspaces/${created.workspaceId}/preview?candidate=B`);
+      expect(preview.status).toBe(200);
       expect(await preview.text()).toContain('确定');
       expect(logStore.get(logStore.list()[0]!.id)).toMatchObject({
         codingAgent: {

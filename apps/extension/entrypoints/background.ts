@@ -5,6 +5,7 @@ import {
   renderArtifactSchema,
   type RenderJobLease,
   type AuthorStyleResource,
+  type SourceWorkspaceInfo,
   type ContentCommand,
   type ContentCommandResult,
   type ExtensionErrorCode
@@ -225,7 +226,7 @@ async function captureRenderEvidence(tab: Browser.tabs.Tab, document: Extract<Co
   }
 }
 
-async function createWorkspaceFromViewport(tab: Browser.tabs.Tab, restoreOriginalViewport: boolean): Promise<void> {
+async function createWorkspaceFromViewport(tab: Browser.tabs.Tab, restoreOriginalViewport: boolean): Promise<SourceWorkspaceInfo> {
   if (!tab.id) throw new BrowserCommandError('TAB_UNAVAILABLE', '当前标签页不可用');
   try {
     // The preview replaces the source in this same tab.  Capturing the current
@@ -266,6 +267,13 @@ async function createWorkspaceFromViewport(tab: Browser.tabs.Tab, restoreOrigina
       sourceTabId: tab.id
     });
     await browser.tabs.update(tab.id, { url: created.previewUrl, active: true });
+    return {
+      ...created,
+      sourceUrl: hydratedSnapshot.sourceUrl,
+      revision: 0,
+      canUndo: false,
+      canRedo: false
+    };
   } catch (error) {
     const message = error instanceof Error ? error.message : '创建静态副本失败';
     console.error('[ui-agent] Failed to create workspace snapshot', error);
@@ -511,12 +519,10 @@ export default defineBackground(() => {
         throw new BrowserCommandError('TAB_CHANGED', '插件仍绑定在打开它时的页面。请切回原页面，或在当前页面重新点击插件图标。');
       }
       if (command.type === 'createWorkspaceFromFullViewport') {
-        await createWorkspaceFromViewport(tab, true);
-        return { ok: true };
+        return { ok: true, workspace: await createWorkspaceFromViewport(tab, true) };
       }
       if (command.type === 'createWorkspaceFromVisibleViewport') {
-        await createWorkspaceFromViewport(tab, false);
-        return { ok: true };
+        return { ok: true, workspace: await createWorkspaceFromViewport(tab, false) };
       }
       if (command.type === 'exportScreenshot') return await exportScreenshot(tab);
       return await sendToContent(tab, command);
