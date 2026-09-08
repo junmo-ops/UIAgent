@@ -1,4 +1,5 @@
 import { lazy, Suspense, useEffect, useRef, useState } from 'react';
+import { AgentDebugDetails } from './AgentDebugDetails';
 import { Alert, Button, Input, Modal, Spin, Switch, Tooltip } from 'antd';
 import type { TextAreaRef } from 'antd/es/input/TextArea';
 import {
@@ -1170,7 +1171,7 @@ export function SidePanelApp() {
                   ))}
                 </div>
               )}
-              <p>展示的是可审计操作摘要，不包含模型的隐式推理内容。</p>
+              <AgentDebugDetails progress={sourceProgress} />
             </div>
           ) : sourceWorkspace && assistantBusy && !streamingAnswerId ? (
             <div className="bubble assistant working">
@@ -1183,6 +1184,7 @@ export function SidePanelApp() {
               <span>正在读取并修改静态源码…</span>
             </div>
           )}
+          {!snapshotBusy && sourceProgress && sourceWorkspace?.workspaceId === sourceProgress.workspaceId && <AgentDebugDetails progress={sourceProgress} />}
           {notice && <Alert className="inline-alert" type="info" showIcon message={notice} closable onClose={() => setNotice(undefined)} />}
           {error && <Alert className="inline-alert" type="error" showIcon message={error} closable onClose={() => setError(undefined)} />}
         </section>

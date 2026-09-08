@@ -19,6 +19,7 @@ const BLOCKED_TAGS = new Set([
 ]);
 const URL_ATTRIBUTES = new Set(['href', 'src', 'srcset', 'action', 'formaction', 'poster', 'xlink:href']);
 const CONTROLLED_INTERACTION_ATTRIBUTES = new Set([
+  'data-ui-agent-dismiss',
   'data-ui-agent-action', 'data-ui-agent-targets', 'data-ui-agent-state-group',
   'data-ui-agent-state-value', 'data-ui-agent-state-when', 'data-ui-agent-active-class',
   'data-ui-agent-state-active'

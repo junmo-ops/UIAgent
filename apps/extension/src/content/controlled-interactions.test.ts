@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import { parseHTML } from 'linkedom';
 import { ControlledInteractionRuntime } from './controlled-interactions';
 
@@ -8,6 +8,33 @@ function setup(html: string) {
 }
 
 describe('ControlledInteractionRuntime', () => {
+  afterEach(() => vi.unstubAllGlobals());
+  it.each(['display:block', 'display:flex', 'display:grid', 'position:relative', 'overflow:auto;height:80px'])(
+    'dismisses outside or Escape but preserves inside clicks in %s containers', style => {
+      const { document, runtime } = setup(`<main style="${style}">
+        <button id="trigger" data-ui-agent-action="toggle" data-ui-agent-targets="panel" data-ui-agent-dismiss="outside escape">open</button>
+        <section data-ui-source-id="panel" hidden><input id="field"></section>
+        <button id="outside">outside</button></main>`);
+      vi.stubGlobal('Element', document.defaultView!.Element);
+      vi.stubGlobal('HTMLElement', document.defaultView!.HTMLElement);
+      const trigger = document.querySelector<HTMLElement>('#trigger')!;
+      const panel = document.querySelector<HTMLElement>('[data-ui-source-id="panel"]')!;
+      const click = (selector: string) => document.querySelector(selector)!.dispatchEvent(new document.defaultView!.Event('click', { bubbles: true, cancelable: true }));
+      const focus = vi.spyOn(trigger, 'focus');
+      runtime.mount();
+      click('#trigger'); expect(panel.hidden).toBe(false);
+      click('#field'); expect(panel.hidden).toBe(false);
+      expect(click('#outside')).toBe(true);
+      expect(panel.hidden).toBe(true);
+      expect(trigger.getAttribute('aria-expanded')).toBe('false');
+      click('#trigger'); click('#trigger'); expect(panel.hidden).toBe(true);
+      click('#trigger');
+      const escape = new document.defaultView!.Event('keydown', { bubbles: true, cancelable: true });
+      Object.defineProperty(escape, 'key', { value: 'Escape' });
+      document.querySelector('#field')!.dispatchEvent(escape);
+      expect(panel.hidden).toBe(true); expect(focus).toHaveBeenCalled();
+      runtime.unmount(); click('#trigger'); expect(panel.hidden).toBe(true);
+    });
   it('toggles, shows, and hides stable source-id targets', () => {
     const { document, runtime } = setup(`
       <button id="toggle" data-ui-agent-action="toggle" data-ui-agent-targets="source-2"></button>

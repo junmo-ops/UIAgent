@@ -1802,9 +1802,13 @@ export class SourceWorkspaceStore {
           : [])
       ],
       queryWorkspaceStructure: async (query, options = {}) => {
+        const exactOutline = JSON.parse(working['outline.json']) as { nodes: StructureNode[] };
+        const exactNode = exactOutline.nodes.find(node => node.sourceId === query.trim());
+        if (exactNode) return JSON.stringify({ query, match: 'sourceId',
+          candidates: [structureNeighborhood(exactOutline.nodes, exactNode.sourceId)] });
         const terms = structureQueryTerms(query);
         if (!terms.length) throw new Error('结构查询至少需要一个长度不少于 2 的语义词');
-        const outline = JSON.parse(working['outline.json']) as { nodes: StructureNode[] };
+        const outline = exactOutline;
         const selectedPath = options.selectedSourceId
           ? new Set(sourceElementAncestry(working['index.html'], options.selectedSourceId).map(item => item.sourceId))
           : new Set<string>();

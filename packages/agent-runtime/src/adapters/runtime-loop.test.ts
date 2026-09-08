@@ -18,6 +18,37 @@ const finish = (execute = async () => 'done') => createTool({
 beforeEach(() => mocks.stream.mockReset());
 
 describe('runtime task lifecycle', () => {
+  it('records explicit blocked outcomes without reporting tool execution success', async () => {
+    const blocked = createTool({ name: 'lookup', description: '', inputSchema: {}, execute: (_input, context) => {
+      context.emitUpdate?.({ type: 'tool-outcome', outcome: 'blocked' }); return 'budget exhausted';
+    } });
+    mocks.stream.mockImplementationOnce((options: any) => ({ ...step([]), fullStream: (async function* () {
+      yield { type: 'tool-call' }; await options.tools.lookup.execute({});
+    })() }));
+    mocks.stream.mockImplementationOnce((options: any) => ({ ...step([]), fullStream: (async function* () {
+      yield { type: 'tool-call' }; await options.tools.finish.execute({});
+    })() }));
+    const run = await agent([blocked, finish()]).run('edit');
+    expect(run.diagnostics?.calls[0]).toMatchObject({ executedToolCallCount: 0, blockedToolCallCount: 1, tools: [{ status: 'blocked' }] });
+    expect(run.status).toBe('completed');
+  });
+  it('streams bounded provider reasoning separately and reports nested reasoning usage', async () => {
+    mocks.stream.mockImplementation(() => ({ ...step([
+      { type: 'reasoning-delta', text: 'r'.repeat(13000) },
+      { type: 'text-delta', text: 'answer' }
+    ]), usage: Promise.resolve({ inputTokens: 10, outputTokens: 20, outputTokenDetails: { reasoningTokens: 12 } }) }));
+    const instance = agent([], 1, false);
+    const events: any[] = [];
+    instance.subscribe(event => events.push(event));
+    const result = await instance.run('question');
+    expect(result.outputText).toBe('answer');
+    expect(result.usage.reasoningTokens).toBe(12);
+    const updates = events.filter(event => event.type === 'model-call-updated');
+    expect(updates[0].call).toMatchObject({ modelCall: 1, status: 'running' });
+    expect(updates.at(-1).call).toMatchObject({ status: 'completed', reasoningTruncated: true, usage: { reasoningTokens: 12 } });
+    expect(updates.at(-1).call.reasoning).toHaveLength(12000);
+    expect(result.diagnostics?.calls[0]?.reasoning).toHaveLength(12000);
+  });
   it('reports stream error instead of completed even without a tool call', async () => {
     mocks.stream.mockImplementation(() => step([{ type: 'error', error: new Error('provider unavailable') }]));
     const result = await agent().run('edit');

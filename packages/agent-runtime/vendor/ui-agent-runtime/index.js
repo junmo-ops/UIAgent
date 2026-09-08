@@ -59,7 +59,7 @@ export class Agent {
     let emptyContinuations = 0;
     const usage = {};
     const runtimeStarted = Date.now();
-    const diagnostics = { version: 1, runtimeRevision: '2026-09-08-tool-recovery-v5',
+    const diagnostics = { version: 1, runtimeRevision: '2026-09-08-requirement-review-v7',
       countingBasis: 'streamText invocations; SDK internal network retries are not counted',
       maxIterations: this.config.maxIterations ?? 12, requiredCompletionTool: this.config.completionPolicy?.requireCompletionTool === true,
       calls: [], continuationCount: 0 };
@@ -94,9 +94,10 @@ export class Agent {
           currentCall?.tools.push(toolLog);
           try {
             const value = await tool.execute(args, { agentId, runId, iteration: iterations,
-              toolCallId: call?.toolCallId, signal: controller.signal, metadata: this.config.toolContextMetadata });
+              toolCallId: call?.toolCallId, signal: controller.signal, metadata: this.config.toolContextMetadata,
+              emitUpdate: update => { if (update?.type === 'tool-outcome' && update.outcome === 'blocked') toolLog.status = 'blocked'; } });
             if (tool.lifecycle?.completesRun) { completed = true; completionOutput = value; }
-            toolLog.status = 'succeeded';
+            if (toolLog.status !== 'blocked') toolLog.status = 'succeeded';
             if (tool.lifecycle?.completesRun) diagnostics.completionTool = tool.name;
             return value;
           } catch (error) {
@@ -127,6 +128,8 @@ export class Agent {
         currentCall = { modelCall: iterations, startedAt: new Date(callStarted).toISOString(),
           status: 'running', inputMessageCount: messages.length, availableTools: Object.keys(tools), outputTextChars: 0, tools: [] };
         diagnostics.calls.push(currentCall);
+        this.emit({ type: 'model-call-updated', call: { modelCall: iterations, startedAt: currentCall.startedAt, status: 'running' } });
+        let reasoning = '', reasoningTruncated = false, lastReasoningUpdate = 0;
         let calls = 0, inputErrors = 0, text = '';
         const stream = streamText({ model: provider.chatModel(this.config.modelId),
           system: this.config.systemPrompt, messages, tools, stopWhen: stepCountIs(1), abortSignal: controller.signal });
@@ -136,6 +139,17 @@ export class Agent {
           }
           if (event.type === 'error') throw asError(event.error);
           if (event.type === 'abort') throw new Error('Model stream aborted');
+          if (event.type === 'reasoning-delta') {
+            const delta = event.text ?? event.textDelta ?? '';
+            reasoningTruncated ||= reasoning.length + delta.length > 12000;
+            reasoning = (reasoning + delta).slice(0, 12000);
+            currentCall.reasoning = reasoning;
+            currentCall.reasoningTruncated = reasoningTruncated;
+            if (Date.now() - lastReasoningUpdate > 500) {
+              lastReasoningUpdate = Date.now();
+              this.emit({ type: 'model-call-updated', call: { modelCall: iterations, startedAt: currentCall.startedAt, status: 'running', reasoning, reasoningTruncated } });
+            }
+          }
           if (event.type === 'text-delta') {
             const delta = event.text ?? event.textDelta ?? '';
             text += delta; outputText += delta;
@@ -168,10 +182,17 @@ export class Agent {
         messages.push(...await stream.responseMessages);
         const stepUsage = await stream.usage;
         currentCall.usage = Object.fromEntries(Object.entries(stepUsage ?? {}).filter(([, value]) => typeof value === 'number'));
-        for (const [key, value] of Object.entries(stepUsage ?? {})) if (typeof value === 'number') usage[key] = (usage[key] ?? 0) + value;
+        const reasoningTokens = stepUsage?.outputTokenDetails?.reasoningTokens ?? stepUsage?.outputTokensDetails?.reasoningTokens;
+        const cachedInputTokens = stepUsage?.inputTokenDetails?.cacheReadTokens ?? stepUsage?.inputTokensDetails?.cacheReadTokens;
+        if (typeof reasoningTokens === 'number') currentCall.usage.reasoningTokens = reasoningTokens;
+        if (typeof cachedInputTokens === 'number') currentCall.usage.cachedInputTokens = cachedInputTokens;
+        this.emit({ type: 'model-call-updated', call: { modelCall: iterations, startedAt: currentCall.startedAt,
+          status: 'completed', durationMs: currentCall.durationMs, usage: currentCall.usage, tools: currentCall.tools, reasoning, reasoningTruncated } });
+        for (const [key, value] of Object.entries(currentCall.usage)) usage[key] = (usage[key] ?? 0) + value;
         currentCall.toolCallCount = calls;
         currentCall.toolInputErrorCount = inputErrors;
-        currentCall.executedToolCallCount = currentCall.tools.length;
+        currentCall.blockedToolCallCount = currentCall.tools.filter(tool => tool.status === 'blocked').length;
+        currentCall.executedToolCallCount = currentCall.tools.filter(tool => tool.status !== 'blocked').length;
         if (controller.signal.aborted) throw new Error('Run aborted');
         if (completed) {
           if (!outputText && typeof completionOutput === 'string') outputText = completionOutput;
@@ -206,6 +227,8 @@ export class Agent {
         currentCall.status = 'failed';
         currentCall.durationMs = Date.now() - Date.parse(currentCall.startedAt);
         currentCall.error = errorInfo(error);
+        this.emit({ type: 'model-call-updated', call: { modelCall: iterations, startedAt: currentCall.startedAt,
+          status: 'failed', durationMs: currentCall.durationMs, tools: currentCall.tools } });
       }
       const final = result(this.externallyAborted ? 'aborted' : 'failed', asError(error));
       this.emit({ type: 'run-failed', error: final.error, result: final }); return final;

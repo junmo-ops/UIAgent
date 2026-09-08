@@ -77,6 +77,7 @@ describe('SourceWorkspaceStore', () => {
     expect(store.html(workspace.workspaceId)).toContain('查 询');
     const tools = store.tools(workspace.workspaceId);
     expect(await tools.queryWorkspaceStructure('查询')).toContain('source-0');
+    expect(await tools.queryWorkspaceStructure('source-0')).toContain('"match":"sourceId"');
     expect(await tools.queryWorkspaceStructure('不存在的语义')).toContain('未找到');
     expect(await tools.searchText('查 询')).toMatch(/命中字符.+button/s);
     expect(await tools.readFile('index.html', 1, 3)).toMatch(/doctype/i);

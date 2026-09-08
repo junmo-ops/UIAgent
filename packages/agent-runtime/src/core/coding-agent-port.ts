@@ -125,6 +125,8 @@ export interface CodingAgentCheckpoint {
 }
 
 export type CodingAgentEvent =
+  | { type: 'coding-agent.model.updated'; timestamp: string; call: import('@ui-agent/contracts').ModelCallProgress }
+  | { type: 'coding-agent.tool.started'; timestamp: string; action: string; modelCall: number }
   | {
       type: 'coding-agent.turn.started';
       timestamp: string;

@@ -8,6 +8,7 @@ import {
 import { randomUUID } from 'node:crypto';
 import {
   domOperationSchema,
+  modelCallProgressSchema,
   type ClarificationOption,
   type DomOperation,
   type SourceTurnResponse
@@ -25,6 +26,7 @@ import {
   type GeometryVerificationResult
 } from '../core/coding-agent-port';
 import { CONTROLLED_INTERACTION_INSTRUCTIONS } from '../source-editing/controlled-interaction-instructions';
+import { validateRequirementReview, type RequirementReview } from '../source-editing/requirement-review';
 
 const objectSchema = (
   properties: Record<string, unknown>,
@@ -42,6 +44,8 @@ const stringProperty = (description: string): Record<string, unknown> => ({
 });
 
 const clineSourceRules = [
+  '已提供 selectedSourceId 时先 inspect_element 获取准确节点及上下文，无需把 sourceId 当语义关键词搜索。结构查询用于寻找未知节点。',
+  'visualConstraints 必须完整覆盖原始请求及澄清中的文案、布局、初始状态、打开和关闭等交互要求。能力限制不能成为删除需求的理由。finish 前重新阅读原始请求和 conversation，填写 requirementReview，逐项关联实现证据；发现声明时漏掉的要求必须补做并重新声明完整意图，或调用 clarify 确认范围。implemented 只表示有源码实现证据，不代表真实视觉或交互测试通过，禁止把源码推断当浏览器验证。',
   '你是静态网页源码编辑 Agent。你只能使用本次会话显式提供的源码工具。',
   '页面只用于 UI 需求示意，不需要真实接口、脚本或业务提交。',
   '工作区包含 index.html、结构索引和样式文件。若 list_files 中存在 author.css 或 author-style-links.json，则当前使用原始规则模式：author.css 仅供读取和检索；author-style-links.json 仅记录可渲染、不可读取规则的外链，不能当作样式证据；视觉修改只能写入 author-overrides.css。snapshot.css 是 A 候选的冻结回退和布局事实，不得在该模式下修改。若两者都不存在，视觉修改写入 snapshot.css。',
@@ -100,6 +104,7 @@ const BUDGETED_READ_ACTIONS = new Set([
 ]);
 
 export interface ClineAgentInstance {
+  subscribe?(listener: (event: import('../../vendor/ui-agent-runtime/index.js').AgentRuntimeEvent) => void): () => void;
   run(input: string): Promise<AgentRunResult>;
   abort?(reason?: unknown): void;
 }
@@ -376,14 +381,14 @@ export class ClineCodingAgentAdapter implements CodingAgentPort {
       context: AgentToolContext,
       result?: string,
       error?: string,
-      countAsTool = true
+      countAsTool = true,
+      outcome?: 'blocked'
     ) => {
       const timestamp = new Date().toISOString();
       const step: CodingAgentStep = {
         timestamp,
         toolCallId: context.toolCallId,
-        outcome: error ? 'failed' : (/^\[(读取预算|重复读取已拦截|展开条件)\]/.test(result ?? '')
-          || (result?.startsWith('[运行预算]') && result.includes('停止继续读取'))) ? 'blocked' : 'succeeded',
+        outcome: error ? 'failed' : outcome ?? 'succeeded',
         ...(result !== undefined ? { resultChars: result.length, resultTruncated: result.length > 16_000 } : {}),
         modelCall: context.iteration,
         action,
@@ -392,6 +397,7 @@ export class ClineCodingAgentAdapter implements CodingAgentPort {
         ...(error ? { error } : {})
       };
       steps.push(step);
+      if (outcome === 'blocked') context.emitUpdate?.({ type: 'tool-outcome', outcome });
       checkpoint = {
         ...checkpoint,
         modelCalls: Math.max(checkpoint.modelCalls, context.iteration),
@@ -427,7 +433,7 @@ export class ClineCodingAgentAdapter implements CodingAgentPort {
       if (BUDGETED_READ_ACTIONS.has(action) && !['inspect_element', 'inspect_elements'].includes(action)
         && context.iteration >= finalizationStartsAt) {
         const message = `[运行预算] 当前第 ${context.iteration}/${this.maxIterations} 轮，已进入最后 ${FINALIZATION_WINDOW} 轮，停止继续读取。若修改已完成，请立即调用 validate_workspace 后 finish；若关键信息仍不足，请调用 clarify。`;
-        record(action, input, context, message);
+        record(action, input, context, message, undefined, true, 'blocked');
         return message;
       }
       const readKey = BUDGETED_READ_ACTIONS.has(action)
@@ -439,7 +445,7 @@ export class ClineCodingAgentAdapter implements CodingAgentPort {
       const actionLimit = MAX_READ_CALLS_PER_ACTION[action];
       if (readKey && completedReadResults.has(readKey)) {
         const message = '[重复读取已拦截] 当前源码版本的相同查询已经返回，请使用已有证据；修改源码后可重新检查。';
-        record(action, input, context, message);
+        record(action, input, context, message, undefined, true, 'blocked');
         return message;
       }
       if (actionLimit) {
@@ -447,7 +453,7 @@ export class ClineCodingAgentAdapter implements CodingAgentPort {
         readActionCounts.set(budgetKey, actionCount);
         if (actionCount > actionLimit) {
           const message = `[读取预算] ${action} 已调用 ${actionCount} 次，超过本轮上限 ${actionLimit} 次。请停止继续检索，使用已有上下文完成修改和校验；若信息不足则调用 clarify。`;
-          record(action, input, context, message);
+          record(action, input, context, message, undefined, true, 'blocked');
           return message;
         }
       }
@@ -682,7 +688,7 @@ export class ClineCodingAgentAdapter implements CodingAgentPort {
             // This is a workflow correction, not a completed read. Keeping it
             // out of the completed-read cache lets the required compact read
             // and the subsequent full read proceed normally.
-            record('inspect_element', input, context, message);
+            record('inspect_element', input, context, message, undefined, true, 'blocked');
             return Promise.resolve(message);
           }
           return execute(
@@ -1124,18 +1130,28 @@ export class ClineCodingAgentAdapter implements CodingAgentPort {
         summary: string;
         outcome?: 'changed' | 'already_satisfied';
         evidence?: string;
+        requirementReview?: RequirementReview;
       }, string>({
         name: 'finish',
         description: `${finishDescription}若当前副本无需改动，设置 outcome=already_satisfied，并提供源码证据。`,
         inputSchema: objectSchema({
           summary: stringProperty('面向用户的简洁修改说明。'),
+          requirementReview: objectSchema({
+            originalRequestReviewed: { type: 'boolean', const: true, description: '已重新核对原始请求及澄清，而非只检查声明列表。' },
+            missingRequirements: { type: 'array', items: stringProperty('原始请求中未覆盖或尚未实现的要求；存在任何缺项禁止提交。') },
+            checks: { type: 'array', minItems: 1, items: objectSchema({
+              constraintIndex: { type: 'integer', minimum: 1 },
+              status: { type: 'string', enum: ['implemented', 'unsupported', 'incomplete'] },
+              evidence: stringProperty('该约束的具体实现证据，例如节点、属性、样式及工具结果；不得伪造渲染结论。')
+            }, ['constraintIndex', 'status', 'evidence']) }
+          }, ['originalRequestReviewed', 'missingRequirements', 'checks']),
           outcome: {
             type: 'string',
             enum: ['changed', 'already_satisfied'],
             description: '本轮是否产生了源码修改；默认 changed。'
           },
           evidence: stringProperty('仅 outcome=already_satisfied 时填写：说明已读取和验证的当前源码证据。')
-        }, ['summary']),
+        }, ['summary', 'requirementReview']),
         lifecycle: { completesRun: true },
         execute: async (input, context) => {
           try {
@@ -1144,6 +1160,7 @@ export class ClineCodingAgentAdapter implements CodingAgentPort {
               throw new Error('本轮已进入等待用户澄清状态，禁止提交；请等待用户回复后开启新一轮执行');
             }
             requireIntentDeclared();
+            validateRequirementReview(input.requirementReview, declaredIntent?.constraints.length ?? 0);
             if (introducedFixedPosition && declaredIntent?.layoutScope !== 'global') {
               throw new Error('当前已确认意图不是 global 布局范围，本轮却新增了 position:fixed；请调整到已确认容器内');
             }
@@ -1212,6 +1229,7 @@ export class ClineCodingAgentAdapter implements CodingAgentPort {
     ];
 
     let response: SourceTurnResponse;
+    let unsubscribe: (() => void) | undefined;
     try {
       throwIfCancelled();
       const files = await workspace.listFiles();
@@ -1224,6 +1242,18 @@ export class ClineCodingAgentAdapter implements CodingAgentPort {
         systemPrompt: `${modeRules}\n单轮最多 ${this.maxIterations} 次模型决策；从第 ${Math.max(1, this.maxIterations - FINALIZATION_WINDOW + 1)} 轮起必须停止扩展读取，只能完成必要修改、校验并 finish，或 clarify。`,
         tools,
         maxIterations: this.maxIterations
+      });
+      unsubscribe = activeAgent.subscribe?.(event => {
+        const timestamp = new Date().toISOString();
+        if (event.type === 'model-call-updated' && 'call' in event) {
+          const call = modelCallProgressSchema.safeParse(event.call);
+          if (call.success) safeEmit(observe, { type: 'coding-agent.model.updated', timestamp, call: call.data });
+        }
+        if (event.type === 'tool-started' && 'toolCall' in event) {
+          const tool = event.toolCall as { toolName?: string } | undefined;
+          if (tool?.toolName) safeEmit(observe, { type: 'coding-agent.tool.started', timestamp,
+            action: tool.toolName, modelCall: Number(event.iteration) || 1 });
+        }
       });
       if (signal?.aborted) abortActiveAgent();
       const result = await activeAgent.run(JSON.stringify({
@@ -1283,6 +1313,7 @@ export class ClineCodingAgentAdapter implements CodingAgentPort {
         : failedResponse(error);
     }
 
+    unsubscribe?.();
     signal?.removeEventListener('abort', abortActiveAgent);
     activeAgent = undefined;
 

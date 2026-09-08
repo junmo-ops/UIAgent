@@ -29,6 +29,22 @@ function checkpoint(): CodingAgentCheckpoint {
 }
 
 describe('SourceTurnProgressStore', () => {
+  it('tracks model waiting, tool starts and per-call details without replacing cancellation', () => {
+    const store = new SourceTurnProgressStore();
+    store.start(workspaceId, request.turnId);
+    const timestamp = new Date().toISOString();
+    const call = { modelCall: 1, startedAt: timestamp, status: 'running' as const };
+    store.observe(workspaceId, request.turnId, { type: 'coding-agent.model.updated', timestamp, call });
+    expect(store.get(workspaceId, request.turnId)?.message).toContain('规划下一步');
+    store.observe(workspaceId, request.turnId, { type: 'coding-agent.tool.started', timestamp, action: 'insert_element', modelCall: 1 });
+    expect(store.get(workspaceId, request.turnId)?.phase).toBe('editing');
+    store.observe(workspaceId, request.turnId, { type: 'coding-agent.model.updated', timestamp, call: { ...call, reasoning: 'provider text' } });
+    store.requestCancellation(workspaceId, request.turnId);
+    store.observe(workspaceId, request.turnId, { type: 'coding-agent.model.updated', timestamp,
+      call: { ...call, status: 'failed', durationMs: 100 } });
+    expect(store.get(workspaceId, request.turnId)).toMatchObject({ status: 'cancelling',
+      modelDetails: [{ status: 'failed', durationMs: 100, reasoning: 'provider text' }] });
+  });
   it('projects agent tool events into user-safe progress summaries', () => {
     const store = new SourceTurnProgressStore();
     store.start(workspaceId, request.turnId);

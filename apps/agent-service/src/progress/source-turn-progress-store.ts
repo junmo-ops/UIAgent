@@ -2,6 +2,7 @@ import type { CodingAgentEvent, CodingAgentStep } from '@ui-agent/agent-runtime'
 import type { SourceTurnProgress, SourceTurnResponse } from '@ui-agent/contracts';
 
 function phaseForAction(action: string): SourceTurnProgress['phase'] {
+  if (action === 'query_workspace_structure' || action === 'query_style_symbols') return 'locating';
   if (action === 'list_files' || action === 'search_text' || action === 'search') return 'locating';
   if (
     action === 'read_file' || action === 'read_style_rule' || action === 'read_style_rules'
@@ -43,6 +44,9 @@ function phaseForAction(action: string): SourceTurnProgress['phase'] {
 
 function labelForAction(action: string): string {
   const labels: Record<string, string> = {
+    query_workspace_structure: '定位相关页面区域',
+    query_style_symbols: '查找可复用样式',
+    declare_intent: '确认修改范围和方案',
     list_files: '查看源码文件',
     search_text: '搜索页面结构',
     search: '搜索页面结构',
@@ -132,21 +136,43 @@ export class SourceTurnProgressStore {
 
   observe(workspaceId: string, turnId: string, event: CodingAgentEvent): void {
     const current = this.get(workspaceId, turnId) ?? this.start(workspaceId, turnId);
+    if (event.type === 'coding-agent.model.updated') {
+      const previous = current.modelDetails?.find(call => call.modelCall === event.call.modelCall);
+      const call = { ...previous, ...event.call };
+      this.values.set(this.key(workspaceId, turnId), {
+        ...current,
+        ...(current.status === 'running' && !previous && call.status === 'running'
+          ? { phase: 'analyzing' as const, message: '正在分析当前页面并规划下一步…' } : {}),
+        modelCalls: Math.max(current.modelCalls, call.modelCall),
+        modelDetails: [...(current.modelDetails ?? []).filter(item => item.modelCall !== call.modelCall), call]
+          .sort((a, b) => a.modelCall - b.modelCall).slice(-60),
+        updatedAt: event.timestamp
+      });
+      return;
+    }
+    if (event.type === 'coding-agent.tool.started') {
+      if (current.status !== 'running') return;
+      this.values.set(this.key(workspaceId, turnId), { ...current,
+        phase: phaseForAction(event.action), message: `${labelForAction(event.action)}…`,
+        modelCalls: Math.max(current.modelCalls, event.modelCall), updatedAt: event.timestamp });
+      return;
+    }
     if (event.type === 'coding-agent.step.completed') {
       const label = labelForAction(event.step.action);
       const failed = Boolean(event.step.error);
+      const blocked = event.step.outcome === 'blocked';
       const activity: SourceTurnProgress['activities'][number] = {
         id: `${event.timestamp}-${current.activities.length}`,
         timestamp: event.timestamp,
         action: event.step.action,
         label,
         detail: detailForStep(event.step),
-        status: failed ? 'failed' : 'completed'
+        status: failed ? 'failed' : blocked ? 'blocked' : 'completed'
       };
       this.values.set(this.key(workspaceId, turnId), {
         ...current,
         phase: phaseForAction(event.step.action),
-        message: failed ? `${label}遇到问题，正在调整策略…` : `${label}…`,
+        message: blocked ? `${label}被拦截，正在调整策略…` : failed ? `${label}遇到问题，正在调整策略…` : `${label}…`,
         modelCalls: Math.max(current.modelCalls, event.step.modelCall),
         toolCalls: current.toolCalls + (
           event.step.action === 'finish' || event.step.action === 'clarify' ? 0 : 1

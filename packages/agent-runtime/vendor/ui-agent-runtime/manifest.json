@@ -29,15 +29,15 @@
   },
   "files": {
     "index.js": {
-      "sha256": "c6ace9fc5bd089c78faea12363ba579889c346d24192661f3d2b4c2c7c70ca78"
+      "sha256": "13489cf385e5aa8cd12258be88bba84e622cea1cb99b1ffdb3abe26b9954154e"
     },
     "index.d.ts": {
-      "sha256": "eae7aac06d3883b984a4b54c56d49bca32c1c73a1935b5da369d745b9115b810"
+      "sha256": "6889ff1293055c5f97234a30af2a2d8486fa3aed4040ac2f3c2337210af2c660"
     },
     "UPSTREAM_NOTICE.md": {
       "sha256": "82f6a8c67daca0296b144f0e7f1ca72c7d9429195524917b1cde6fb012fb866a"
     }
   },
   "checksumNote": "manifest.json is excluded to avoid a self-referential checksum.",
-  "localRevision": "2026-09-08-tool-recovery-v5"
+  "localRevision": "2026-09-08-requirement-review-v7"
 }

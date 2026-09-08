@@ -18,6 +18,13 @@ function tokens(value: string | null, label: string, max = 20): string[] {
 
 export function validateControlledInteractions(html: string): void {
   const { document } = parseHTML(html);
+  for (const control of document.querySelectorAll('[data-ui-agent-dismiss]')) {
+    const modes = tokens(control.getAttribute('data-ui-agent-dismiss'), 'data-ui-agent-dismiss', 2);
+    if (modes.some(mode => mode !== 'outside' && mode !== 'escape') ||
+      !['toggle', 'show'].includes(control.getAttribute(ACTION_ATTRIBUTE) ?? '')) {
+      throw new Error('data-ui-agent-dismiss 仅支持 toggle/show 触发器上的 outside、escape');
+    }
+  }
   const sourceIds = new Set(
     [...document.querySelectorAll('[data-ui-source-id]')]
       .map(element => element.getAttribute('data-ui-source-id'))

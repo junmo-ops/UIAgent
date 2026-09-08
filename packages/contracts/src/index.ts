@@ -434,6 +434,18 @@ export const assistantStreamEventSchema = z.discriminatedUnion('type', [
 ]);
 export type AssistantStreamEvent = z.infer<typeof assistantStreamEventSchema>;
 
+export const modelCallProgressSchema = z.object({
+  modelCall: z.number().int().positive(),
+  startedAt: z.string(),
+  status: z.enum(['running', 'completed', 'failed']),
+  durationMs: z.number().nonnegative().optional(),
+  usage: z.record(z.string(), z.number()).optional(),
+  reasoning: z.string().max(12000).optional(),
+  reasoningTruncated: z.boolean().optional(),
+  tools: z.array(z.object({ name: z.string(), status: z.string(), durationMs: z.number().nonnegative().optional() })).optional()
+});
+export type ModelCallProgress = z.infer<typeof modelCallProgressSchema>;
+
 export const sourceTurnProgressSchema = z.object({
   workspaceId: z.string().uuid(),
   turnId: z.string().min(1),
@@ -443,13 +455,14 @@ export const sourceTurnProgressSchema = z.object({
   modelCalls: z.number().int().nonnegative(),
   toolCalls: z.number().int().nonnegative(),
   updatedAt: z.string(),
+  modelDetails: z.array(modelCallProgressSchema).max(60).optional(),
   activities: z.array(z.object({
     id: z.string(),
     timestamp: z.string(),
     action: z.string(),
     label: z.string(),
     detail: z.string().optional(),
-    status: z.enum(['completed', 'failed'])
+    status: z.enum(['completed', 'failed', 'blocked'])
   })).max(12),
   result: sourceTurnResponseSchema.optional()
 });

@@ -62,6 +62,8 @@ export interface AgentRunDiagnostics {
     inputMessageCount: number;
     availableTools?: string[];
     outputTextChars: number;
+    reasoning?: string;
+    reasoningTruncated?: boolean;
     firstOutputMs?: number;
     durationMs?: number;
     finishReason?: string;

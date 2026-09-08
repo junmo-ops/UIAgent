@@ -5,6 +5,7 @@ const VALUE_ATTRIBUTE = 'data-ui-agent-state-value';
 const WHEN_ATTRIBUTE = 'data-ui-agent-state-when';
 const ACTIVE_CLASS_ATTRIBUTE = 'data-ui-agent-active-class';
 const CHECKED_ATTRIBUTE = 'aria-checked';
+const DISMISS_ATTRIBUTE = 'data-ui-agent-dismiss';
 
 type ControlledAction = 'toggle' | 'show' | 'hide' | 'set-state' | 'toggle-checkbox' | 'set-radio';
 
@@ -18,12 +19,19 @@ function safeToken(value: string | null, maxLength = 100): string | undefined {
 export class ControlledInteractionRuntime {
   private readonly click = (event: MouseEvent) => {
     if (!(event.target instanceof Element)) return;
+    this.dismissOutside(event.target);
     const control = event.target.closest<HTMLElement>(`[${ACTION_ATTRIBUTE}]`);
     if (!control || !this.activate(control)) return;
     event.preventDefault();
   };
 
   private readonly keydown = (event: KeyboardEvent) => {
+    if (event.key === 'Escape') {
+      const control = [...this.openLayers].reverse().find(item => item.isConnected &&
+        this.targets(item).some(panel => !panel.hidden) && this.dismissModes(item).includes('escape'));
+      if (control) { this.closeLayer(control); control.focus(); event.preventDefault(); }
+      return;
+    }
     if (event.key !== ' ' && event.key !== 'Enter') return;
     if (!(event.target instanceof HTMLElement)) return;
     const control = event.target.closest<HTMLElement>(`[${ACTION_ATTRIBUTE}]`);
@@ -32,6 +40,34 @@ export class ControlledInteractionRuntime {
   };
 
   constructor(private readonly document: Document) {}
+  private readonly openLayers = new Set<HTMLElement>();
+
+  private dismissModes(control: HTMLElement): string[] {
+    return (control.getAttribute(DISMISS_ATTRIBUTE) ?? '').split(/\s+/);
+  }
+
+  private closeLayer(control: HTMLElement): void {
+    const targets = this.targets(control);
+    for (const target of targets) this.setVisible(target, false);
+    for (const trigger of this.document.querySelectorAll<HTMLElement>(`[${TARGETS_ATTRIBUTE}]`)) {
+      const triggerTargets = this.targets(trigger);
+      if (triggerTargets.some(target => targets.includes(target))) {
+        trigger.setAttribute('aria-expanded', String(triggerTargets.some(target => !target.hidden)));
+      }
+    }
+    this.openLayers.delete(control);
+  }
+
+  private dismissOutside(target: Element): void {
+    for (const control of [...this.openLayers]) {
+      if (!control.isConnected || !this.targets(control).some(panel => !panel.hidden)) {
+        this.openLayers.delete(control);
+        continue;
+      }
+      if (this.dismissModes(control).includes('outside') && !control.contains(target)
+        && !this.targets(control).some(panel => panel.contains(target))) this.closeLayer(control);
+    }
+  }
 
   mount(): void {
     this.document.addEventListener('click', this.click);
@@ -41,6 +77,7 @@ export class ControlledInteractionRuntime {
   unmount(): void {
     this.document.removeEventListener('click', this.click);
     this.document.removeEventListener('keydown', this.keydown);
+    this.openLayers.clear();
   }
 
   activate(control: HTMLElement): boolean {
@@ -54,6 +91,10 @@ export class ControlledInteractionRuntime {
     const makeVisible = action === 'show' || (action === 'toggle' && targets.some(target => target.hidden));
     for (const target of targets) this.setVisible(target, makeVisible);
     control.setAttribute('aria-expanded', String(makeVisible));
+    if (makeVisible && control.hasAttribute(DISMISS_ATTRIBUTE)) {
+      this.openLayers.delete(control);
+      this.openLayers.add(control);
+    } else this.openLayers.delete(control);
     return true;
   }
 

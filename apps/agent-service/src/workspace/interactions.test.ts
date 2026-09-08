@@ -2,6 +2,12 @@ import { describe, expect, it } from 'vitest';
 import { validateControlledInteractions } from './interactions';
 
 describe('validateControlledInteractions', () => {
+  it('validates dismiss modes and referenced targets', () => {
+    const html = '<button data-ui-agent-action="toggle" data-ui-agent-targets="panel" data-ui-agent-dismiss="outside escape"></button><div data-ui-source-id="panel" hidden></div>';
+    expect(() => validateControlledInteractions(`<html><body>${html}</body></html>`)).not.toThrow();
+    expect(() => validateControlledInteractions(html.replace('outside escape', 'arbitrary'))).toThrow('data-ui-agent-dismiss');
+    expect(() => validateControlledInteractions(html.replace('action="toggle"', 'action="hide"'))).toThrow('data-ui-agent-dismiss');
+  });
   it('accepts safe visibility and state declarations', () => {
     expect(() => validateControlledInteractions(`<!doctype html><html><body>
       <button data-ui-source-id="source-1" data-ui-agent-action="toggle" data-ui-agent-targets="source-2"></button>

@@ -1,0 +1,13 @@
+.agent-debug-details {
+  margin-top: 8px;
+  padding: 10px;
+  border: 1px solid #e5e7eb;
+  border-radius: 8px;
+  font-size: 12px;
+  line-height: 1.6;
+  overflow-wrap: anywhere;
+}
+.agent-debug-details summary { cursor: pointer; }
+.agent-debug-details summary:focus-visible { outline: 2px solid #1677ff; outline-offset: 2px; }
+.agent-debug-details details { margin-top: 8px; }
+.agent-debug-details p { margin: 6px 0; }
