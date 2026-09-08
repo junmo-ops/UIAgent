@@ -4,6 +4,35 @@ import { createOpenAICompatible } from '@ai-sdk/openai-compatible';
 import { jsonSchema, streamText, stepCountIs } from 'ai';
 
 const asError = value => value instanceof Error ? value : new Error(String(value));
+const sanitizeDiagnosticText = value => String(value ?? '')
+  .replace(/Bearer\s+[A-Za-z0-9._~+/=-]+/gi, 'Bearer [REDACTED]')
+  .replace(/((?:api[-_]?key|token|authorization|secret)["']?\s*[:=]\s*["']?)[^"'\s,}]+/gi, '$1[REDACTED]')
+  .replace(/\beyJ[A-Za-z0-9_-]{20,}\.[A-Za-z0-9_-]{10,}(?:\.[A-Za-z0-9_-]{10,})?\b/g, '[REDACTED_TOKEN]')
+  .replace(/\s+/g, ' ').trim().slice(0, 600);
+const diagnosticResponseSummary = body => {
+  if (typeof body !== 'string' || !body.trim()) return undefined;
+  try {
+    const parsed = JSON.parse(body);
+    const source = parsed?.error ?? parsed;
+    if (typeof source === 'string') return sanitizeDiagnosticText(source);
+    if (source && typeof source === 'object') {
+      const selected = {};
+      for (const key of ['code', 'type', 'message', 'msg', 'request_id', 'requestId']) {
+        if (['string', 'number'].includes(typeof source[key])) selected[key] = sanitizeDiagnosticText(source[key]);
+      }
+      if (Object.keys(selected).length) return JSON.stringify(selected);
+    }
+  } catch { /* Non-JSON responses are summarized below. */ }
+  return sanitizeDiagnosticText(body.replace(/<[^>]+>/g, ' '));
+};
+const diagnosticRequestId = headers => {
+  if (!headers) return undefined;
+  const get = name => typeof headers.get === 'function' ? headers.get(name) : headers[name] ?? headers[name.toLowerCase()];
+  for (const name of ['x-request-id', 'request-id', 'x-trace-id', 'trace-id']) {
+    const value = get(name);
+    if (value) return sanitizeDiagnosticText(value);
+  }
+};
 export function createTool(config) {
   if (!/^[a-z][a-z0-9_]*$/.test(config.name)) throw new Error('Invalid tool name: ' + config.name);
   return { ...config, timeoutMs: config.timeoutMs ?? 30000, retryable: config.retryable ?? true, maxRetries: config.maxRetries ?? 3 };
@@ -30,20 +59,30 @@ export class Agent {
     let emptyContinuations = 0;
     const usage = {};
     const runtimeStarted = Date.now();
-    const diagnostics = { version: 1, runtimeRevision: '2026-09-08-lifecycle-log-v1',
+    const diagnostics = { version: 1, runtimeRevision: '2026-09-08-tool-recovery-v5',
       countingBasis: 'streamText invocations; SDK internal network retries are not counted',
       maxIterations: this.config.maxIterations ?? 12, requiredCompletionTool: this.config.completionPolicy?.requireCompletionTool === true,
       calls: [], continuationCount: 0 };
     let currentCall;
     const errorInfo = error => {
       const value = asError(error);
-      // Deliberately exclude provider response bodies, request headers and URLs.
-      return { name: value.name, ...(Number.isInteger(value.statusCode) ? { statusCode: value.statusCode } : {}) };
+      const requestId = diagnosticRequestId(value.responseHeaders);
+      const responseSummary = diagnosticResponseSummary(value.responseBody);
+      const message = sanitizeDiagnosticText(value.message);
+      // Only allowlisted, bounded response fields are retained. Request bodies,
+      // URLs, credentials and arbitrary headers are deliberately excluded.
+      return { name: value.name,
+        ...(Number.isInteger(value.statusCode) ? { statusCode: value.statusCode } : {}),
+        ...(typeof value.code === 'string' ? { code: sanitizeDiagnosticText(value.code) } : {}),
+        ...(message ? { message } : {}), ...(requestId ? { requestId } : {}),
+        ...(responseSummary ? { responseSummary } : {}) };
     };
     const required = this.config.completionPolicy?.requireCompletionTool === true;
     // Serialize tool execution; successful completion prevents later mutations.
     let queue = Promise.resolve();
-    const tools = Object.fromEntries((this.config.tools ?? []).map(tool => [tool.name, {
+    const runtimeTools = () => Object.fromEntries((this.config.tools ?? [])
+      .filter(tool => tool.isAvailable?.({ iteration: iterations }) !== false)
+      .map(tool => [tool.name, {
       description: tool.description,
       inputSchema: jsonSchema(tool.inputSchema),
       execute: (args, call) => {
@@ -84,10 +123,11 @@ export class Agent {
         if (controller.signal.aborted) throw new Error('Run aborted');
         iterations += 1;
         const callStarted = Date.now();
+        const tools = runtimeTools();
         currentCall = { modelCall: iterations, startedAt: new Date(callStarted).toISOString(),
-          status: 'running', inputMessageCount: messages.length, outputTextChars: 0, tools: [] };
+          status: 'running', inputMessageCount: messages.length, availableTools: Object.keys(tools), outputTextChars: 0, tools: [] };
         diagnostics.calls.push(currentCall);
-        let calls = 0, text = '';
+        let calls = 0, inputErrors = 0, text = '';
         const stream = streamText({ model: provider.chatModel(this.config.modelId),
           system: this.config.systemPrompt, messages, tools, stopWhen: stepCountIs(1), abortSignal: controller.signal });
         for await (const event of stream.fullStream) {
@@ -102,7 +142,22 @@ export class Agent {
             currentCall.outputTextChars += delta.length;
             this.emit({ type: 'assistant-text-delta', iteration: iterations, text: delta, accumulatedText: outputText });
           }
-          if (event.type === 'tool-call') { calls++; this.emit({ type: 'tool-started', iteration: iterations, toolCall: event }); }
+          if (event.type === 'tool-call') {
+            calls++;
+            (currentCall.toolCalls ??= []).push({
+              ...(event.toolName ? { name: sanitizeDiagnosticText(event.toolName) } : {}),
+              ...(event.toolCallId ? { toolCallId: sanitizeDiagnosticText(event.toolCallId) } : {})
+            });
+            this.emit({ type: 'tool-started', iteration: iterations, toolCall: event });
+          }
+          if (event.type === 'tool-input-error') {
+            inputErrors++;
+            (currentCall.toolInputErrors ??= []).push({
+              ...(event.toolName ? { name: sanitizeDiagnosticText(event.toolName) } : {}),
+              ...(event.toolCallId ? { toolCallId: sanitizeDiagnosticText(event.toolCallId) } : {}),
+              ...(event.errorText ? { message: sanitizeDiagnosticText(event.errorText) } : {})
+            });
+          }
           if (event.type === 'tool-result') this.emit({ type: 'tool-finished', iteration: iterations, toolCall: event });
         }
         await queue;
@@ -114,20 +169,30 @@ export class Agent {
         const stepUsage = await stream.usage;
         currentCall.usage = Object.fromEntries(Object.entries(stepUsage ?? {}).filter(([, value]) => typeof value === 'number'));
         for (const [key, value] of Object.entries(stepUsage ?? {})) if (typeof value === 'number') usage[key] = (usage[key] ?? 0) + value;
+        currentCall.toolCallCount = calls;
+        currentCall.toolInputErrorCount = inputErrors;
+        currentCall.executedToolCallCount = currentCall.tools.length;
         if (controller.signal.aborted) throw new Error('Run aborted');
         if (completed) {
           if (!outputText && typeof completionOutput === 'string') outputText = completionOutput;
           break;
         }
         if (['error', 'content-filter', 'length'].includes(finishReason)) throw new Error('Model stopped: ' + finishReason);
-        if (!calls) {
+        if (!currentCall.executedToolCallCount) {
+          const attemptedToolWithoutExecution = calls + inputErrors > 0;
           if (!required) {
-            if (!text.trim()) throw new Error('Model returned no text or tool calls (finishReason=' + finishReason + ')');
-            completed = true; break;
+            if (!attemptedToolWithoutExecution) {
+              if (!text.trim()) throw new Error('Model returned no text or tool calls (finishReason=' + finishReason + ')');
+              completed = true; break;
+            }
           }
           if (++emptyContinuations > 2) throw new Error('Agent stopped without successful completion tool (finishReason=' + finishReason + (lastToolError ? '; lastToolError=' + lastToolError : '') + ')');
-          messages.push({ role: 'user', content: '任务尚未成功提交。请结合以上原始需求、工具结果和错误继续完成剩余工作。不要假设已修改或已验证；完成必要校验后调用完成工具，存在需求歧义时调用澄清工具。' });
-          currentCall.continuationReason = text.trim() ? 'text_without_completion' : 'empty_response';
+          messages.push({ role: 'user', content: attemptedToolWithoutExecution
+            ? '刚才尝试调用工具但没有执行成功。请检查工具名称和参数是否符合当前可用工具的 schema；不要假设任何源码已修改。修正后继续执行，完成必要校验后调用完成工具；存在需求歧义时调用澄清工具。'
+            : '任务尚未成功提交。请结合以上原始需求、工具结果和错误继续完成剩余工作。不要假设已修改或已验证；完成必要校验后调用完成工具，存在需求歧义时调用澄清工具。' });
+          currentCall.continuationReason = attemptedToolWithoutExecution
+            ? 'tool_call_not_executed'
+            : text.trim() ? 'text_without_completion' : 'empty_response';
           diagnostics.continuationCount++;
         } else emptyContinuations = 0;
       }

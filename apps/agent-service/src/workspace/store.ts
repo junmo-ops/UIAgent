@@ -48,6 +48,8 @@ import { diagnoseSnapshotPackage, type SnapshotDiagnostics } from './snapshot-di
 const WORKSPACE_FILES = ['index.html', 'snapshot.css', 'author-overrides.css', 'outline.json', 'source-map.json'] as const;
 type WorkspaceFile = typeof WORKSPACE_FILES[number];
 type WorkspaceFiles = Record<WorkspaceFile, string>;
+type CapturedLayoutIndex = NonNullable<StaticSnapshot['layoutIndex']>;
+const LAYOUT_INDEX_FILE = 'layout-index.json';
 
 interface CandidateManifest extends WorkspaceCandidate {
   workspaceId: string;
@@ -639,12 +641,12 @@ function decodeBasicEntities(value: string): string {
     .replaceAll('&amp;', '&');
 }
 
-function compactElementSource(outerHtml: string): string {
+function compactElementSource(outerHtml: string, maxHtmlChars = 4_000): string {
   const compactHtml = outerHtml
     .replace(/\sstyle="[^"]*"/gi, '')
     .replace(/\s+/g, ' ')
     .trim()
-    .slice(0, 12_000);
+    .slice(0, maxHtmlChars);
   const rawTextSegments = [...outerHtml.matchAll(/>([^<]+)</g)]
     .map(match => match[1]!.trim())
     .filter(Boolean)
@@ -665,24 +667,55 @@ function compactElementSource(outerHtml: string): string {
 }
 
 const LAYOUT_PROPERTIES = CAPTURED_LAYOUT_PROPERTIES;
+const COMPACT_TARGET_LAYOUT_PROPERTIES = new Set([
+  'display', 'position', 'width', 'height', 'min-width', 'min-height', 'max-width', 'max-height',
+  'overflow', 'overflow-x', 'overflow-y', 'flex-direction', 'flex-wrap', 'flex-grow', 'flex-shrink',
+  'align-items', 'justify-content', 'gap', 'grid-template-columns', 'grid-auto-flow'
+]);
+const COMPACT_CONTEXT_LAYOUT_PROPERTIES = new Set([
+  'display', 'position', 'width', 'height', 'overflow', 'flex-direction', 'flex-wrap',
+  'align-items', 'justify-content', 'gap', 'grid-template-columns'
+]);
 
-function sourceLayoutFacts(html: string, css: string, sourceId: string): Record<string, unknown> {
+function extractCapturedLayoutIndex(html: string): { html: string; layoutIndex: CapturedLayoutIndex } {
+  const layoutIndex: CapturedLayoutIndex = {};
+  const cleaned = html.replace(/<[^>]+>/g, openingTag => {
+    if (/^<\//.test(openingTag)) return openingTag;
+    const sourceId = /\bdata-ui-source-id\s*=\s*["']([^"']+)["']/i.exec(openingTag)?.[1];
+    if (!sourceId) return openingTag;
+    const rectValues = /\bdata-ui-agent-source-rect\s*=\s*["']([^"']+)["']/i.exec(openingTag)?.[1]
+      ?.split(',').map(Number);
+    const captured = /\bdata-ui-agent-captured-layout\s*=\s*["']([^"']+)["']/i.exec(openingTag)?.[1];
+    const computedLayout: Record<string, string> = {};
+    if (captured) {
+      try {
+        const facts = JSON.parse(decodeURIComponent(captured));
+        for (const property of LAYOUT_PROPERTIES) {
+          if (typeof facts?.[property] === 'string') computedLayout[property] = facts[property];
+        }
+      } catch { /* Ignore malformed capture metadata. */ }
+    }
+    const capturedRect = rectValues?.length === 4 && rectValues.every(Number.isFinite)
+      ? { x: rectValues[0]!, y: rectValues[1]!, width: rectValues[2]!, height: rectValues[3]! }
+      : null;
+    if (capturedRect || Object.keys(computedLayout).length) layoutIndex[sourceId] = { capturedRect, computedLayout };
+    return openingTag.replace(/\sdata-ui-agent-(?:source-rect|captured-layout)\s*=\s*(["'])[^"']*\1/gi, '');
+  });
+  return { html: cleaned, layoutIndex };
+}
+
+function sourceLayoutFacts(
+  html: string,
+  css: string,
+  layoutIndex: CapturedLayoutIndex,
+  sourceId: string,
+  detail: 'target' | 'context' | 'full' = 'context'
+): Record<string, unknown> {
   const range = sourceElementRange(html, sourceId);
   const openingTag = html.slice(range.start, findTagEnd(html, range.start) + 1);
-  const rectValues = /\bdata-ui-agent-source-rect\s*=\s*["']([^"']+)["']/i.exec(openingTag)?.[1]
-    ?.split(',')
-    .map(Number);
   const classNames = /\bclass\s*=\s*["']([^"']+)["']/i.exec(openingTag)?.[1]?.split(/\s+/) ?? [];
-  const declarations = new Map<string, string>();
-  const captured = /\bdata-ui-agent-captured-layout\s*=\s*["']([^"']+)["']/i.exec(openingTag)?.[1];
-  if (captured) {
-    try {
-      const facts = JSON.parse(decodeURIComponent(captured));
-      for (const property of LAYOUT_PROPERTIES) {
-        if (typeof facts?.[property] === 'string') declarations.set(property, facts[property]);
-      }
-    } catch { /* Older or malformed captures have no trustworthy layout facts. */ }
-  }
+  const capturedFact = layoutIndex[sourceId];
+  const declarations = new Map(Object.entries(capturedFact?.computedLayout ?? {}));
   for (const className of classNames.filter(value => value.startsWith('ui-snapshot-style-'))) {
     for (const rule of cssRulesForClass(css, className)) {
       const body = rule.slice(rule.indexOf('{') + 1, rule.lastIndexOf('}'));
@@ -695,15 +728,17 @@ function sourceLayoutFacts(html: string, css: string, sourceId: string): Record<
       }
     }
   }
+  const allowedProperties = detail === 'full'
+    ? undefined
+    : detail === 'target' ? COMPACT_TARGET_LAYOUT_PROPERTIES : COMPACT_CONTEXT_LAYOUT_PROPERTIES;
+  const computedLayout = Object.fromEntries([...declarations].filter(([property]) => (
+    !allowedProperties || allowedProperties.has(property)
+  )));
   return {
     sourceId,
     tag: range.tag,
-    ...(rectValues?.length === 4 && rectValues.every(Number.isFinite) ? {
-      capturedRect: {
-        x: rectValues[0], y: rectValues[1], width: rectValues[2], height: rectValues[3]
-      }
-    } : { capturedRect: null }),
-    computedLayout: Object.fromEntries(declarations),
+    capturedRect: capturedFact?.capturedRect ?? null,
+    computedLayout,
     inlineStyle: decodeBasicEntities(/\sstyle\s*=\s*(?:"([^"]*)"|'([^']*)')/i.exec(openingTag)?.slice(1).find(value => value !== undefined) ?? ''),
     cascadeNote: 'inlineStyle 是当前源码行内声明（含自定义属性），普通样式表选择器再复杂也不能覆盖同一元素的普通行内声明；computedLayout 是捕获值，不是修改后的生效样式。',
     layoutEvidence: declarations.size ? 'capture-time; not current rendered layout' : 'unavailable; inspect author CSS or recapture with current extension'
@@ -746,6 +781,23 @@ function cssRulesForClass(content: string, className: string): string[] {
   return matches;
 }
 
+function cssSnippetsForSymbol(content: string, symbol: string, limit = 6): string[] {
+  const snippets: string[] = [];
+  let offset = 0;
+  while (snippets.length < limit) {
+    const index = content.indexOf(symbol, offset);
+    if (index < 0) break;
+    const previousBoundary = Math.max(content.lastIndexOf('}', index - 1), content.lastIndexOf(';', index - 1));
+    const nextBoundaryCandidates = [content.indexOf(';', index), content.indexOf('}', index)].filter(value => value >= 0);
+    const nextBoundary = nextBoundaryCandidates.length ? Math.min(...nextBoundaryCandidates) + 1 : Math.min(content.length, index + 500);
+    const start = Math.max(previousBoundary + 1, index - 300);
+    const snippet = content.slice(start, Math.min(nextBoundary, start + 1_000)).trim();
+    if (snippet && !snippets.includes(snippet)) snippets.push(snippet);
+    offset = index + symbol.length;
+  }
+  return snippets;
+}
+
 export class SourceWorkspaceStore {
   private readonly root: string;
   private readonly identityIsolation: boolean;
@@ -785,17 +837,21 @@ export class SourceWorkspaceStore {
     const directory = this.workspacePath(workspaceId);
     const initialRevision = resolve(directory, 'revisions', '000');
     mkdirSync(initialRevision, { recursive: true, mode: 0o700 });
+    const extractedLayout = extractCapturedLayoutIndex(compiled.html);
+    const layoutIndex = { ...extractedLayout.layoutIndex, ...(snapshot.layoutIndex ?? {}) };
+    const indexes = refreshWorkspaceIndexes(extractedLayout.html);
     const files: WorkspaceFiles = {
-      'index.html': compiled.html,
+      'index.html': extractedLayout.html,
       'snapshot.css': this.frozenStyleVariantEnabled ? compiled.css : '',
       // B keeps captured author rules immutable. User/agent visual edits live
       // in this versioned layer so they can be undone without mutating capture.
       'author-overrides.css': snapshot.authorOverrides ?? '',
-      'outline.json': compiled.outline,
-      'source-map.json': compiled.sourceMap
+      'outline.json': indexes.outline,
+      'source-map.json': indexes.sourceMap
     };
     this.writeWorkspaceFiles(directory, files);
     this.writeWorkspaceFiles(initialRevision, files);
+    this.atomicWrite(resolve(directory, LAYOUT_INDEX_FILE), JSON.stringify(layoutIndex));
     if (snapshot.authorStyles) {
       this.atomicWrite(resolve(directory, 'author.css'), snapshot.authorStyles.cssText);
       this.atomicWrite(resolve(directory, 'author-resources.json'), JSON.stringify(snapshot.authorStyles.resources ?? []));
@@ -936,42 +992,19 @@ export class SourceWorkspaceStore {
     return css;
   }
 
-  /**
-   * Serves every recorded author-CSS resource from the workspace origin. A web
-   * font loaded by a local preview otherwise needs the remote host to opt into
-   * CORS, which is not true for many production asset CDNs.
-   */
-  authorCssForPreview(workspaceId: string, assetQuery = ''): string | undefined {
+  /** Captured CSS already contains absolute resource URLs; let the browser load them. */
+  authorCssForPreview(workspaceId: string, _assetQuery = ''): string | undefined {
     const css = this.authorCss(workspaceId);
     if (!css) return undefined;
-    return this.localizeAuthorCssResources(css, workspaceId, assetQuery);
+    return css;
   }
 
-  authorStyleSheetCssForPreview(workspaceId: string, index: number, assetQuery = ''): string | undefined {
+  authorStyleSheetCssForPreview(workspaceId: string, index: number, _assetQuery = ''): string | undefined {
     if (!Number.isSafeInteger(index) || index < 0) return undefined;
     const sheet = this.authorStyleSheets(workspaceId)[index];
     if (!sheet || sheet.renderOnly || sheet.cssText === undefined) return undefined;
     validateAuthorCss(sheet.cssText, this.authorStyleResources(workspaceId));
-    return this.localizeAuthorCssResources(sheet.cssText, workspaceId, assetQuery, '../assets/');
-  }
-
-  private localizeAuthorCssResources(
-    css: string,
-    workspaceId: string,
-    assetQuery: string,
-    resourcePrefix = 'assets/'
-  ): string {
-    const resources = this.authorStyleResources(workspaceId);
-    const indexes = new Map(resources.map((resource, index) => [resource.url, index]));
-    const imports = new Set(cssImportSources(css));
-    return css.replace(/\burl\s*\(\s*(?:"([^"]*)"|'([^']*)'|([^)]*))\s*\)/gi, (token, doubleQuoted, singleQuoted, bare) => {
-      const target = (doubleQuoted ?? singleQuoted ?? bare ?? '').trim();
-      // Older captures can still list an import URL as a resource. Preserve
-      // its original base URL so relative URLs inside that stylesheet work.
-      if (imports.has(target)) return token;
-      const index = indexes.get(target);
-      return index === undefined ? token : `url("${resourcePrefix}${index}${assetQuery}")`;
-    });
+    return sheet.cssText;
   }
 
   authorStyleResource(workspaceId: string, index: number): AuthorStyleResource | undefined {
@@ -993,18 +1026,21 @@ export class SourceWorkspaceStore {
     if (failures.size === 0) this.resourceLoadFailures.delete(workspaceId);
   }
 
-  private localizeSnapshotResources(html: string, resources: AuthorStyleResource[], workspaceAssetPath = '', assetQuery = ''): string {
-    const indexes = new Map(resources.map((resource, index) => [resource.url, index]));
+  private localizeSnapshotResources(html: string, resources: AuthorStyleResource[]): string {
+    const urls = new Set(resources.map(resource => resource.url));
+    // Escape both HTML attributes and CSS URL delimiters. Never append the
+    // workspace preview token to a remote URL.
+    const externalUrl = (url: string) => escapeHtmlAttribute(url.replace(/["'<>\s\\()]/g, char => encodeURIComponent(char).replace(/['()]/g, value => `%${value.charCodeAt(0).toString(16)}`)));
     html = html.replace(/#ui-agent-resource-([a-z0-9%_.~-]+)/gi, (marker, encoded) => {
       try {
-        const index = indexes.get(decodeURIComponent(encoded));
-        return index === undefined ? marker : `${workspaceAssetPath}assets/${index}${assetQuery}`;
+        const url = decodeURIComponent(encoded);
+        return urls.has(url) ? externalUrl(url) : marker;
       } catch { return marker; }
     });
     return html.replace(/\sdata-ui-agent-resource-url="([^"]*)"/gi, (attribute, encodedUrl) => {
       try {
-        const index = indexes.get(decodeURIComponent(encodedUrl));
-        return index === undefined ? attribute : ` src="${workspaceAssetPath}assets/${index}${assetQuery}"`;
+        const url = decodeURIComponent(encodedUrl);
+        return urls.has(url) ? ` src="${externalUrl(url)}"` : attribute;
       } catch {
         return attribute;
       }
@@ -1133,7 +1169,7 @@ export class SourceWorkspaceStore {
       title: manifest.title,
       sourceUrl: manifest.sourceUrl,
       capturedAt: manifest.createdAt,
-      html: withStyles,
+      html: extractCapturedLayoutIndex(withStyles).html,
       nodeCount: Math.max(1, nodeCount),
       selectedSourceId: manifest.selectedSourceId,
       ...(manifest.snapshotMetrics ? { metrics: manifest.snapshotMetrics } : {}),
@@ -1151,6 +1187,7 @@ export class SourceWorkspaceStore {
         authorStyleSources: authorCapture?.sources ?? authorResources.map(resource => resource.sourceUrl).filter((value, index, values) => values.indexOf(value) === index)
       } : {}),
       ...(authorOverrides ? { authorOverrides } : {}),
+      layoutIndex: this.capturedLayoutIndex(workspaceId, html),
       viewport: manifest.viewport ?? { width: 1440, height: 900 }
     };
   }
@@ -1599,7 +1636,7 @@ export class SourceWorkspaceStore {
           : ''}${unreadableStyleSources.map(source => `\n<link rel="stylesheet" href="${escapeHtmlAttribute(source)}" data-ui-agent-render-only-stylesheet>`).join('')}`;
       style = `${orderedStyleLinks}\n<link rel="stylesheet" href="${candidateAssetPath}author-overrides.css${assetQuery}" data-ui-agent-author-overrides>`;
     }
-    const localizedHtml = this.localizeSnapshotResources(html, authorResources, workspaceAssetPath, assetQuery);
+    const localizedHtml = this.localizeSnapshotResources(html, authorResources);
     return /<\/head>/i.test(localizedHtml)
       ? localizedHtml.replace(/<\/head>/i, `${style}\n</head>`)
       : localizedHtml.replace(/<body\b/i, `${style}\n<body`);
@@ -1750,14 +1787,15 @@ export class SourceWorkspaceStore {
       if (path === 'author.css' && this.authorCss(workspaceId)) return this.authorCss(workspaceId)!;
       if (path === 'author-style-links.json' && authorRuleMode) return JSON.stringify(this.unreadableAuthorStyleSources(workspaceId), null, 2);
       this.assertReadablePath(path);
-      return working[path as WorkspaceFile];
+      const content = working[path as WorkspaceFile];
+      return path === 'index.html' ? extractCapturedLayoutIndex(content).html : content;
     };
 
     let toolset!: CodingWorkspaceTools;
     toolset = {
       submissionMode: candidate ? 'candidate' : 'direct',
       listFiles: async () => [
-        ...WORKSPACE_FILES.map(path => ({ path, chars: working[path].length })),
+        ...WORKSPACE_FILES.map(path => ({ path, chars: readableContent(path).length })),
         ...(this.authorCss(workspaceId) ? [{ path: 'author.css', chars: this.authorCss(workspaceId)!.length }] : []),
         ...(this.unreadableAuthorStyleSources(workspaceId).length
           ? [{ path: 'author-style-links.json', chars: JSON.stringify(this.unreadableAuthorStyleSources(workspaceId)).length }]
@@ -1835,8 +1873,9 @@ export class SourceWorkspaceStore {
           .join('\n')
           .slice(0, 16_000);
       },
-      inspectElement: async sourceId => {
+      inspectElement: async (sourceId, options = {}) => {
         const html = working['index.html'];
+        const full = options.detail === 'full';
         const range = sourceElementRange(html, sourceId);
         const ancestry = sourceElementAncestry(html, sourceId);
         const outline = JSON.parse(working['outline.json']) as {
@@ -1853,26 +1892,58 @@ export class SourceWorkspaceStore {
         const siblingIds = (parent?.childrenSourceIds ?? [])
           .filter(candidate => candidate !== sourceId)
           .slice(0, 12);
+        const layoutIndex = this.capturedLayoutIndex(workspaceId, html);
         const layoutContext = {
-          target: sourceLayoutFacts(html, working['snapshot.css'], sourceId),
-          children: (node?.childrenSourceIds ?? []).slice(0, 8).map(child => sourceLayoutFacts(html, working['snapshot.css'], child)),
+          target: sourceLayoutFacts(html, working['snapshot.css'], layoutIndex, sourceId, full ? 'full' : 'target'),
+          children: (node?.childrenSourceIds ?? []).slice(0, full ? 8 : 6).map(child => sourceLayoutFacts(html, working['snapshot.css'], layoutIndex, child, full ? 'full' : 'context')),
           ancestors: ancestry
             .slice(0, -1)
-            .slice(-6)
+            .slice(full ? -6 : -4)
             .reverse()
-            .map(item => sourceLayoutFacts(html, working['snapshot.css'], item.sourceId)),
-          siblings: siblingIds.map(candidate => sourceLayoutFacts(
+            .map(item => sourceLayoutFacts(html, working['snapshot.css'], layoutIndex, item.sourceId, full ? 'full' : 'context')),
+          siblings: siblingIds.slice(0, full ? 12 : 6).map(candidate => sourceLayoutFacts(
             html,
             working['snapshot.css'],
-            candidate
+            layoutIndex,
+            candidate,
+            full ? 'full' : 'context'
           ))
         };
         return [
           `元素 ${sourceId}：tag=${range.tag}，字符 ${range.start}-${range.end}`,
           `结构路径: ${ancestry.map(item => `${item.sourceId}<${item.tag}>`).join(' > ')}`,
           `布局上下文: ${JSON.stringify(layoutContext)}`,
-          compactElementSource(html.slice(range.start, range.end))
+          compactElementSource(html.slice(range.start, range.end), full ? 12_000 : 4_000)
         ].join('\n');
+      },
+      queryStyleSymbols: async symbols => {
+        const sources: Array<{ path: string; content: string }> = authorRuleMode
+          ? [
+              { path: 'author.css', content: this.authorCss(workspaceId) ?? '' },
+              { path: 'author-overrides.css', content: working['author-overrides.css'] }
+            ]
+          : [{ path: 'snapshot.css', content: working['snapshot.css'] }];
+        const sections = symbols.map(rawSymbol => {
+          const symbol = rawSymbol.trim();
+          if (!/^(?:\.?[a-zA-Z_][\w-]{0,119}|--[a-zA-Z_][\w-]{0,117})$/.test(symbol)) {
+            throw new Error(`样式符号格式无效：${rawSymbol}`);
+          }
+          const variable = symbol.startsWith('--');
+          const className = symbol.replace(/^\./, '');
+          const matches = sources.flatMap(source => {
+            const values = variable
+              ? cssSnippetsForSymbol(source.content, symbol)
+              : cssRulesForClass(source.content, className).slice(0, 6);
+            return values.map(value => `${source.path}: ${value}`);
+          });
+          return matches.length
+            ? `${symbol}：\n${matches.join('\n')}`
+            : `${symbol}：未找到可读取的样式定义或引用`;
+        });
+        const result = sections.join('\n\n---\n\n');
+        return result.length <= 12_000
+          ? result
+          : `[样式查询已按总预算截断] 原始 ${result.length} 字符，仅返回前 12000 字符。\n\n${result.slice(0, 12_000)}`;
       },
       readStyleRule: async rawClassName => {
         const className = rawClassName.replace(/^\./, '');
@@ -1884,12 +1955,8 @@ export class SourceWorkspaceStore {
         // positioning without treating immutable author.css as editable.
         const stylePath = authorRuleMode ? 'author-overrides.css' : 'snapshot.css';
         const rules = cssRulesForClass(working[stylePath], className);
-        if (rules.length !== 1) {
-          throw new Error(rules.length === 0
-            ? `${stylePath} 中不存在 .${className} 规则`
-            : `${stylePath} 中 .${className} 命中 ${rules.length} 条规则，请改用更具体的样式类`);
-        }
-        return `${stylePath} 中 .${className} 的完整规则：\n${rules[0]!.slice(0, 16_000)}`;
+        if (!rules.length) throw new Error(`${stylePath} 中不存在 .${className} 规则`);
+        return `${stylePath} 中 .${className} 命中的 ${rules.length} 条规则（含组合选择器和伪类状态）：\n${rules.join('\n').slice(0, 16_000)}`;
       },
       replaceText: async (path, search, replacement) => {
         this.assertEditablePath(path, editableStylePath);
@@ -2354,6 +2421,17 @@ export class SourceWorkspaceStore {
       'outline.json': this.readOptionalFile(resolve(directory, 'outline.json')) ?? generated.outline,
       'source-map.json': this.readOptionalFile(resolve(directory, 'source-map.json')) ?? generated.sourceMap
     };
+  }
+
+  private capturedLayoutIndex(workspaceId: string, html: string): CapturedLayoutIndex {
+    const stored = this.readOptionalFile(resolve(this.workspacePath(workspaceId), LAYOUT_INDEX_FILE));
+    if (stored) {
+      try {
+        const parsed = staticSnapshotSchema.shape.layoutIndex.safeParse(JSON.parse(stored));
+        if (parsed.success) return parsed.data ?? {};
+      } catch { /* Fall through to legacy inline metadata. */ }
+    }
+    return extractCapturedLayoutIndex(html).layoutIndex;
   }
 
   private writeWorkspaceFiles(directory: string, files: WorkspaceFiles, atomic = false): void {

@@ -3,6 +3,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
 import { PROTOCOL_VERSION, type SourceTurnRequest } from '@ui-agent/contracts';
+import { parseHTML } from 'linkedom';
 import { SourceWorkspaceStore } from './store';
 
 const roots: string[] = [];
@@ -39,6 +40,33 @@ function turnRequest(
 }
 
 describe('SourceWorkspaceStore', () => {
+  it('restores old resource markers to original URLs and keeps CSS resources direct', () => {
+    const store = createStore();
+    const url = 'https://assets.example/icon.svg?a=1&b=2#paint';
+    const font = 'https://fonts.example/font.woff2';
+    const cssText = `.icon{background:url("${url}")} @font-face{font-family:test;src:url("${font}")}`;
+    const workspace = store.create({
+      ...snapshot,
+      html: `<!doctype html><html><body><img data-ui-source-id="source-0" data-ui-agent-resource-url="${encodeURIComponent(url)}"><div data-ui-source-id="source-1" style="background:url('#ui-agent-resource-${encodeURIComponent(url)}')"></div></body></html>`,
+      authorStyles: {
+        cssText, readableSheets: 1, unreadableSheets: 0, missing: [],
+        sheets: [{ sourceUrl: 'https://assets.example/main.css', cssText, renderOnly: false }],
+        resources: [{ url, sourceUrl: snapshot.sourceUrl, kind: 'image' }, { url: font, sourceUrl: snapshot.sourceUrl, kind: 'font' }]
+      }
+    });
+    const preview = store.previewHtml(workspace.workspaceId, 'B', '?preview_token=private-test-token')!;
+    const { document } = parseHTML(preview);
+    expect(document.querySelector('img')?.getAttribute('src')).toBe(url);
+    expect(document.querySelector('[data-ui-source-id="source-1"]')?.getAttribute('style')).toContain(url);
+    expect(preview).not.toContain('assets/0');
+    expect(preview).not.toContain('#ui-agent-resource-');
+    expect(document.querySelector('img')?.getAttribute('src')).not.toContain('private-test-token');
+    expect(store.authorCssForPreview(workspace.workspaceId)).toBe(cssText);
+    expect(store.authorStyleSheetCssForPreview(workspace.workspaceId, 0)).toBe(cssText);
+    // No migration/rewrite of saved source or revisions is needed.
+    expect(store.html(workspace.workspaceId)).toContain('data-ui-agent-resource-url');
+  });
+
   afterEach(() => {
     for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true });
   });
@@ -72,7 +100,7 @@ describe('SourceWorkspaceStore', () => {
     expect(store.get(workspace.workspaceId)).toMatchObject({ revision: 1, canUndo: true, canRedo: false });
   });
 
-  it('reads capture-time layout facts and removes them from newly inserted elements', async () => {
+  it('stores capture-time layout facts outside Agent-readable HTML and preserves them on export', async () => {
     const store = createStore();
     const layout = encodeURIComponent(JSON.stringify({ display: 'grid', gap: '12px', position: 'relative' }));
     const workspace = store.create({ ...snapshot, html: '<!doctype html><html><body><section data-ui-source-id="source-0" data-ui-agent-captured-layout="' + layout + '">content</section></body></html>' });
@@ -80,9 +108,67 @@ describe('SourceWorkspaceStore', () => {
     const inspection = await tools.inspectElement('source-0');
     expect(inspection).toContain('"display":"grid"');
     expect(inspection).toContain('capture-time; not current rendered layout');
+    expect(await tools.readFile('index.html')).not.toContain('data-ui-agent-captured-layout');
     await tools.insertElement('source-0', 'parentEnd', '<div data-ui-agent-captured-layout="' + layout + '">new</div>');
     const html = await tools.readFile('index.html');
-    expect(html.match(/data-ui-agent-captured-layout/g)).toHaveLength(1);
+    expect(html).not.toContain('data-ui-agent-captured-layout');
+    const exported = store.exportSnapshot(workspace.workspaceId)!;
+    expect(exported.layoutIndex?.['source-0']?.computedLayout)
+      .toMatchObject({ display: 'grid', gap: '12px', position: 'relative' });
+    const restored = store.create(exported);
+    expect(await store.tools(restored.workspaceId).inspectElement('source-0')).toContain('"gap":"12px"');
+  });
+
+  it('returns compact layout facts by default and expands them only when requested', async () => {
+    const store = createStore();
+    const layout = encodeURIComponent(JSON.stringify({
+      display: 'flex', gap: '12px', 'row-gap': '7px', 'column-gap': '9px',
+      width: '200px', height: '36px', 'grid-template-rows': '20px 20px'
+    }));
+    const workspace = store.create({
+      ...snapshot,
+      html: `<!doctype html><html><body><section data-ui-source-id="source-0" data-ui-agent-captured-layout="${layout}">content</section></body></html>`
+    });
+    const tools = store.tools(workspace.workspaceId);
+    const compact = await tools.inspectElement('source-0');
+    const full = await tools.inspectElement('source-0', { detail: 'full' });
+    expect(compact).toContain('"gap":"12px"');
+    expect(compact).not.toContain('"row-gap":"7px"');
+    expect(full).toContain('"row-gap":"7px"');
+    expect(full).toContain('"grid-template-rows":"20px 20px"');
+  });
+
+  it('reads base and pseudo-class rules for the same class without treating them as ambiguous', async () => {
+    const store = createStore();
+    const workspace = store.create({
+      ...snapshot,
+      authorStyles: { cssText: 'button{color:black}', readableSheets: 1, unreadableSheets: 0, missing: [] }
+    });
+    const tools = store.tools(workspace.workspaceId);
+    await tools.applyPatch('author-overrides.css', [{
+      kind: 'insert', position: 'end', text: '.search{position:relative}.search:hover{background:#eee}.search:focus-visible{outline:1px solid blue}'
+    }]);
+    const rules = await tools.readStyleRule('search');
+    expect(rules).toContain('命中的 3 条规则');
+    expect(rules).toContain('.search:hover');
+    expect(rules).toContain('.search:focus-visible');
+  });
+
+  it('queries only requested CSS classes and variables without reading the full stylesheet', async () => {
+    const store = createStore();
+    const workspace = store.create({
+      ...snapshot,
+      authorStyles: {
+        cssText: ':root{--panel-gap:12px}.search{color:#123}.search:hover{color:#456}.unrelated{padding:99px}',
+        readableSheets: 1,
+        unreadableSheets: 0,
+        missing: []
+      }
+    });
+    const result = await store.tools(workspace.workspaceId).queryStyleSymbols(['.search', '--panel-gap']);
+    expect(result).toContain('.search:hover');
+    expect(result).toContain('--panel-gap:12px');
+    expect(result).not.toContain('.unrelated');
   });
 
   it.each(['display:block', 'display:flex', 'display:grid', 'position:relative', 'overflow:auto'])('exposes current inline variable declarations and child paint context for %s', async layout => {

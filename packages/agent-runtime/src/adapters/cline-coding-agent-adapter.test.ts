@@ -72,6 +72,7 @@ function workspaceTools(commitResult = { revision: 2, changed: true }) {
     searchText: async query => html.includes(query) ? html : '没有找到',
     readFile: async () => html,
     inspectElement: async () => html,
+    queryStyleSymbols: async symbols => symbols.map(symbol => `${symbol}: 未找到`).join('\n'),
     readStyleRule: async className => `.${className}{width:160px}`,
     replaceText: async (_path, search, replace) => {
       html = html.replace(search, replace);
@@ -199,7 +200,7 @@ describe('ClineCodingAgentAdapter', () => {
     expect(workspace.state().html).toContain('查询');
   });
 
-  it('exposes only restricted source tools and completes through finish', async () => {
+  it('keeps source tools visible and rejects writes at execution time until intent is declared', async () => {
     const workspace = workspaceTools();
     let configuredTools: string[] = [];
     let configuredMaxIterations = 0;
@@ -211,13 +212,16 @@ describe('ClineCodingAgentAdapter', () => {
         run: async () => {
           configuredTools = config.tools.map(tool => tool.name);
           configuredMaxIterations = config.maxIterations;
+          const replaceTool = findTool<{ path: string; search: string; replace: string }>(config, 'replace_text');
+          expect(replaceTool.isAvailable).toBeUndefined();
+          expect(findTool<Record<string, never>>(config, 'list_files').isAvailable).toBeUndefined();
           await findTool<Record<string, never>>(config, 'list_files').execute({}, context(1));
           await findTool<{ sourceId: string }>(config, 'inspect_element').execute(
             { sourceId: 'source-0' },
             context(2)
           );
           await declareIntent(config, 3);
-          await findTool<{ path: string; search: string; replace: string }>(config, 'replace_text').execute(
+          await replaceTool.execute(
             { path: 'index.html', search: '查询', replace: '确定' },
             context(4)
           );
@@ -244,6 +248,7 @@ describe('ClineCodingAgentAdapter', () => {
       'read_file',
       'inspect_element',
       'inspect_elements',
+      'query_style_symbols',
       'read_style_rule',
       'read_style_rules',
       'replace_text',
@@ -294,6 +299,50 @@ describe('ClineCodingAgentAdapter', () => {
       rolledBack: false
     });
     expect(events.at(-1)?.type).toBe('coding-agent.turn.completed');
+  });
+
+  it('requires compact inspection before a source can be expanded and bounds batch inspection output', async () => {
+    const workspace = workspaceTools();
+    workspace.tools.inspectElement = async () => 'x'.repeat(5_000);
+    const adapter = new ClineCodingAgentAdapter({
+      baseUrl: 'https://example.test',
+      apiKey: 'test-key',
+      modelName: 'test-model',
+      factory: config => ({
+        run: async () => {
+          const inspect = findTool<{ sourceId: string; detail?: 'compact' | 'full' }>(config, 'inspect_element');
+          const firstFull = await inspect.execute({ sourceId: 'source-0', detail: 'full' }, context(1));
+          expect(firstFull).toContain('[展开条件]');
+          expect(await inspect.execute({ sourceId: 'source-0' }, context(2))).toHaveLength(5_000);
+          expect(await inspect.execute({ sourceId: 'source-0', detail: 'full' }, context(3))).toHaveLength(5_000);
+
+          const batch = await findTool<{ sourceIds: string[] }>(config, 'inspect_elements').execute({
+            sourceIds: ['source-1', 'source-2', 'source-3']
+          }, context(4));
+          expect(batch).toContain('[批量检查已按总预算截断]');
+          expect(batch.length).toBeLessThan(13_000);
+          await declareIntent(config, 5);
+          await findTool<{
+            summary: string;
+            outcome: 'already_satisfied';
+            evidence: string;
+          }>(config, 'finish').execute({
+            summary: '测试完成',
+            outcome: 'already_satisfied',
+            evidence: '已对紧凑、展开和批量读取预算进行源码工具验证。'
+          }, context(6));
+          return result(6);
+        }
+      })
+    });
+
+    const run = await adapter.run({
+      workspaceId: '11111111-1111-4111-8111-111111111111',
+      request,
+      conversation: []
+    }, workspace.tools);
+    if (run.response.kind === 'failed') throw new Error(run.response.message);
+    expect(run).toMatchObject({ response: { kind: 'completed' } });
   });
 
   it('completes normally when verified source already satisfies the request', async () => {
@@ -384,6 +433,19 @@ describe('ClineCodingAgentAdapter', () => {
     });
     expect(run.checkpoint.status).toBe('failed');
     expect(workspace.state().rolledBack).toBe(true);
+  });
+
+  it('returns a useful message when a provider HTTP error has an empty message', async () => {
+    const workspace = workspaceTools();
+    const error = Object.assign(new Error(''), { statusCode: 433 });
+    const adapter = new ClineCodingAgentAdapter({
+      baseUrl: 'https://example.test', apiKey: 'test-key', modelName: 'test-model',
+      factory: () => ({ run: async () => ({ ...result(1, 'failed'), error }) })
+    });
+    const run = await adapter.run({
+      workspaceId: '11111111-1111-4111-8111-111111111111', request, conversation: []
+    }, workspace.tools);
+    expect(run.response).toMatchObject({ kind: 'failed', message: '模型服务请求失败（HTTP 433）' });
   });
 
   it('bridges an end-of-file patch for generated CSS', async () => {

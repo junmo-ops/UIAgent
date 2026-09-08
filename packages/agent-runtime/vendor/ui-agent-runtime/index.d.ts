@@ -22,6 +22,8 @@ export interface AgentTool<TInput = unknown, TOutput = unknown> {
   description: string;
   inputSchema: Record<string, unknown>;
   lifecycle?: { completesRun?: boolean };
+  /** Evaluated before every model call so tools can follow a generic workflow phase. */
+  isAvailable?: (context: { iteration: number }) => boolean;
   timeoutMs?: number;
   retryable?: boolean;
   maxRetries?: number;
@@ -52,21 +54,31 @@ export interface AgentRunDiagnostics {
   durationMs: number;
   status: string;
   finishReason?: string;
-  error?: { name: string; statusCode?: number };
+  error?: AgentErrorDiagnostic;
   calls: Array<{
     modelCall: number;
     startedAt: string;
     status: string;
     inputMessageCount: number;
+    availableTools?: string[];
     outputTextChars: number;
     firstOutputMs?: number;
     durationMs?: number;
     finishReason?: string;
     continuationReason?: string;
     usage?: Record<string, number>;
-    error?: { name: string; statusCode?: number };
-    tools: Array<{ name: string; toolCallId?: string; status: string; durationMs?: number; error?: { name: string; statusCode?: number } }>;
+    error?: AgentErrorDiagnostic;
+    tools: Array<{ name: string; toolCallId?: string; status: string; durationMs?: number; error?: AgentErrorDiagnostic }>;
   }>;
+}
+
+export interface AgentErrorDiagnostic {
+  name: string;
+  statusCode?: number;
+  code?: string;
+  message?: string;
+  requestId?: string;
+  responseSummary?: string;
 }
 
 export type AgentRuntimeEvent =

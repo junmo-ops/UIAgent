@@ -73,6 +73,13 @@ export const staticSnapshotSchema = z.object({
   authorStyleSources: z.array(z.string().url()).max(500).optional(),
   /** Versioned B-mode visual changes carried by an exported workspace. */
   authorOverrides: z.string().max(10_000_000).optional(),
+  /** Capture-time geometry/style facts, indexed separately so Agent source reads stay compact. */
+  layoutIndex: z.record(z.string().min(1).max(100), z.object({
+    capturedRect: z.object({
+      x: z.number(), y: z.number(), width: z.number(), height: z.number()
+    }).nullable().optional(),
+    computedLayout: z.record(z.string(), z.string()).default({})
+  })).optional(),
   viewport: z.object({
     width: z.number().int().positive(),
     height: z.number().int().positive()

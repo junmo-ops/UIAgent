@@ -20,3 +20,17 @@ bounded model-step loop. Continuations retain response messages and tool
 results within a run. Completion tools, sequential tool execution, stream
 errors, cancellation, and model-request counts are handled explicitly.
 This is a local implementation change, not an upstream Cline SDK update.
+
+2026-09-08: Provider failures now retain only bounded, sanitized error fields,
+an allowlisted request identifier and an allowlisted response summary. Request
+bodies, URLs, credentials and arbitrary response headers remain excluded.
+
+2026-09-08: Tool availability is now reevaluated before every model request.
+UIAgent uses this generic phase mechanism to expose mutation and completion
+tools only after structured intent has been declared.
+
+2026-09-08: The local runtime now records the per-call available-tool set so
+long runs can be diagnosed by phase. UIAgent's adapter limits pre-intent
+research, requires a compact element inspection before an expanded one, and
+caps batch inspection and style-symbol queries. These are local orchestration
+and context-budget changes, not an upstream Cline SDK update.

@@ -30,7 +30,8 @@ export interface CodingWorkspaceTools {
   queryWorkspaceStructure(query: string, options?: { selectedSourceId?: string; limit?: number }): Promise<string>;
   searchText(query: string, path?: string): Promise<string>;
   readFile(path: string, startLine?: number, endLine?: number, startChar?: number, endChar?: number): Promise<string>;
-  inspectElement(sourceId: string): Promise<string>;
+  inspectElement(sourceId: string, options?: { detail?: 'compact' | 'full' }): Promise<string>;
+  queryStyleSymbols(symbols: string[]): Promise<string>;
   readStyleRule(className: string): Promise<string>;
   replaceText(path: string, search: string, replace: string): Promise<string>;
   applyPatch(

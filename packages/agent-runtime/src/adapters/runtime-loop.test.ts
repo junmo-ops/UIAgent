@@ -27,6 +27,24 @@ describe('runtime task lifecycle', () => {
     expect(result.diagnostics?.calls[0]?.durationMs).toBeGreaterThanOrEqual(0);
     expect(mocks.stream).toHaveBeenCalledTimes(1);
   });
+  it('records bounded provider error details without credentials or arbitrary headers', async () => {
+    const error = Object.assign(new Error(''), {
+      name: 'AI_APICallError', statusCode: 433, code: 'provider_rejected',
+      responseHeaders: { 'x-request-id': 'request-123', authorization: 'Bearer should-not-leak' },
+      responseBody: JSON.stringify({ error: { code: 'invalid_request', message: 'token=super-secret invalid input' }, debug: 'hidden' }),
+      requestBodyValues: { apiKey: 'should-not-leak' }
+    });
+    mocks.stream.mockImplementation(() => step([{ type: 'error', error }]));
+    const result = await agent().run('edit');
+    expect(result.diagnostics?.error).toMatchObject({
+      name: 'AI_APICallError', statusCode: 433, code: 'provider_rejected', requestId: 'request-123'
+    });
+    const serialized = JSON.stringify(result.diagnostics);
+    expect(serialized).toContain('invalid_request');
+    expect(serialized).not.toContain('super-secret');
+    expect(serialized).not.toContain('should-not-leak');
+    expect(serialized).not.toContain('authorization');
+  });
   it('retains original request and tool history when resuming after plain text', async () => {
     const history = { role: 'assistant', content: 'still working' };
     mocks.stream.mockImplementationOnce(() => step([{ type: 'text-delta', text: 'still working' }], [history]));
@@ -44,6 +62,35 @@ describe('runtime task lifecycle', () => {
     expect(result.diagnostics?.continuationCount).toBe(1);
     expect(result.diagnostics?.calls[0]?.continuationReason).toBe('text_without_completion');
     expect(result.diagnostics?.completionTool).toBe('finish');
+  });
+  it('reevaluates phased tool availability before every model call', async () => {
+    let declared = false;
+    const declare = createTool({
+      name: 'declare', description: '', inputSchema: {}, execute: () => { declared = true; return 'declared'; }
+    });
+    const guarded = createTool({
+      name: 'guarded_finish', description: '', inputSchema: {}, isAvailable: () => declared,
+      lifecycle: { completesRun: true }, execute: () => 'done'
+    });
+    mocks.stream.mockImplementationOnce((options: any) => {
+      expect(Object.keys(options.tools)).toEqual(['declare']);
+      return { ...step([]), fullStream: (async function* () {
+        yield { type: 'tool-call' };
+        await options.tools.declare.execute({});
+      })() };
+    });
+    mocks.stream.mockImplementationOnce((options: any) => {
+      expect(Object.keys(options.tools)).toEqual(['declare', 'guarded_finish']);
+      return { ...step([]), fullStream: (async function* () {
+        yield { type: 'tool-call' };
+        await options.tools.guarded_finish.execute({});
+      })() };
+    });
+    const result = await agent([declare, guarded]).run('edit');
+    expect(result.status).toBe('completed');
+    expect(result.diagnostics?.calls.map(call => call.availableTools)).toEqual([
+      ['declare'], ['declare', 'guarded_finish']
+    ]);
   });
   it('does not complete on a rejected finish and preserves its error for continuation', async () => {
     const execute = vi.fn().mockRejectedValueOnce(new Error('missing panel')).mockResolvedValueOnce('done');

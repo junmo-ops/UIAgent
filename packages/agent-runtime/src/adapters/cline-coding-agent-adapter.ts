@@ -49,8 +49,8 @@ const clineSourceRules = [
   'index.html 保存页面结构。原始规则模式中，结构与文案修改 index.html、视觉修改 author-overrides.css；冻结模式中视觉修改 snapshot.css。outline.json 与 source-map.json 由系统维护，只能读取，不能修改。',
   'replace_text 的 search 必须来自刚刚读取的源码，且应足够唯一；不要猜测源码。',
   '需要在文件开头、末尾或明确锚点旁插入内容时使用 apply_patch，不要为了追加内容反复寻找唯一的文件尾字符串。',
-  'inspect_element 会返回目标、祖先和兄弟节点的布局上下文（捕获时矩形与关键计算样式）、domText 和 styleClasses。必须用布局上下文理解视觉关系；domText 只证明文字存在于源码，不能证明渲染后可见。原始规则模式需要了解规则时，先 search_text/read_file 定位只读 author.css；冻结模式用 read_style_rule，不要连续切片读取 snapshot.css。',
-  '需要检查多个元素或样式时，优先使用 inspect_elements 和 read_style_rules 批量读取，避免逐个调用消耗迭代次数。',
+  'inspect_element 会返回目标、祖先和兄弟节点的布局上下文（捕获时矩形与关键计算样式）、domText 和 styleClasses。必须先使用 compact；只有 compact 明确不足时才能对同一 sourceId 使用 full。domText 只证明文字存在于源码，不能证明渲染后可见。了解 class 或 CSS 变量时优先使用 query_style_symbols，不要反复全文搜索或切片读取大 CSS。',
+  '需要检查多个元素时可使用 inspect_elements；该工具有整体输出预算，结果不足时只补查真正必要的单个元素。需要检查多个 class 或 CSS 变量时优先使用 query_style_symbols。',
   '修改视觉属性前检查 inspect 返回的 inlineStyle、目标及子元素的实际绘制规则和 CSS 变量引用。普通行内声明优先于任意普通样式表选择器；增加 class 数量或把规则放到文件末尾不能覆盖它。原始规则模式仍只写 author-overrides.css：需要覆盖普通行内声明时，可以对已确认目标的具体属性或自定义属性使用局部 !important；不要全局加 !important。行内本身为 !important 时不能宣称普通覆盖层已生效。背景可能由子元素或伪元素绘制，不能假设一定在容器自身。',
   '颜色、背景、边框等样式需求必须把可测量的样式目标列入 renderConstraintIndexes，并将实际绘制元素加入 verificationSourceIds。浏览器观察包含 backgroundColor、backgroundImage、color、borderColor、borderRadius、boxShadow；只有最终计算样式证据才能证明覆盖生效，捕获布局和 CSS 字符串不能证明。未采集的状态或伪元素不得宣称验证通过。',
   '先用一次结构化查询取得候选元素，再一次批量 inspect 取得目标、父级和同级上下文；不得为同一语义目标连续搜索不同关键词来猜测层级。相同参数的读取或空间校验不会产生新证据，禁止重复调用。',
@@ -68,7 +68,7 @@ const clineSourceRules = [
   '新增元素后必须调用 validate_spatial_scope，说明实际容器和新增顶层 sourceId；无法确定参照容器时调用 clarify，不得自行猜测全局位置。',
   '执行前判断需求是否存在会显著影响最终视觉结果的歧义。若存在两个或以上合理方案，不得自行选择，必须 clarify；位置、范围、布局方式、参考样式或新增内容不明确都属于常见歧义。',
   '澄清前可以读取必要的局部结构和父容器布局，但不要修改源码。问题只询问无法从源码确定的关键信息，并尽量提供 2-4 个互斥、具体的选项；低风险且结果唯一的局部修改不要反问。',
-  '任何源码写入前必须先调用 declare_intent，明确目标、相关 sourceId、验证所需 sourceId、视觉约束和歧义判断。verificationSourceIds 必须列出目标、容器以及每个用于判断存在、删除、裁切、溢出、对齐或重排的元素；这些元素才会在真实浏览器中被测量。renderConstraintIndexes 只列出可以由当前浏览器几何直接证明的约束序号；“其他元素未受影响”这类需要修改前基线的约束应保留为修改范围，不作为当前渲染发布门槛。仍有多个合理结果时不要调用 declare_intent，直接 clarify。',
+  '任何源码写入前必须先调用 declare_intent，明确目标、现有相关 sourceId、验证所需 sourceId、视觉约束和歧义判断。不得搜索、推算或预填尚未创建的 sourceId；系统会在创建后自动把新节点加入验证范围。renderConstraintIndexes 只列出可以由当前浏览器几何直接证明的约束序号；“其他元素未受影响”这类需要修改前基线的约束应保留为修改范围，不作为当前渲染发布门槛。仍有多个合理结果时不要调用 declare_intent，直接 clarify。',
   '如果请求包含 replyToClarificationId，应把当前 instruction 理解为用户对上一条澄清问题的回答，并结合 conversation 继续原需求，不要重复询问已经回答的信息。',
   '优先复用已有结构和 class；新增同类组件时复制相邻源码结构，再修改必要内容。',
   '不得添加 script、事件属性、远程资源、接口请求、表单 action 或 javascript: URL。',
@@ -80,6 +80,8 @@ const clineSourceRules = [
 ].join('\n');
 
 const DEFAULT_MAX_ITERATIONS = 45;
+const MAX_BATCH_INSPECTION_CHARS = 12_000;
+const MAX_BATCH_ELEMENT_CHARS = 4_000;
 const FINALIZATION_WINDOW = 3;
 const MAX_IDENTICAL_TOOL_FAILURES = 3;
 const MAX_READ_CALLS_PER_ACTION: Readonly<Record<string, number>> = {
@@ -87,13 +89,14 @@ const MAX_READ_CALLS_PER_ACTION: Readonly<Record<string, number>> = {
   search_text: 4,
   inspect_element: 3,
   inspect_elements: 3,
+  query_style_symbols: 3,
   read_style_rule: 2,
   read_style_rules: 2,
   read_file: 3
 };
 const BUDGETED_READ_ACTIONS = new Set([
   'list_files', 'query_workspace_structure', 'search_text', 'read_file', 'inspect_element', 'inspect_elements',
-  'read_style_rule', 'read_style_rules'
+  'query_style_symbols', 'read_style_rule', 'read_style_rules'
 ]);
 
 export interface ClineAgentInstance {
@@ -165,10 +168,18 @@ function safeEmit(observe: CodingAgentObserver | undefined, event: Parameters<Co
 }
 
 function failedResponse(error: unknown): SourceTurnResponse {
+  const value = error as Error & { statusCode?: number; code?: string };
+  const message = error instanceof Error && error.message.trim()
+    ? error.message
+    : Number.isInteger(value?.statusCode)
+      ? `模型服务请求失败（HTTP ${value.statusCode}）`
+      : typeof value?.code === 'string' && value.code
+        ? `源码 Agent 执行失败（${value.code}）`
+        : 'Cline 源码 Agent 执行失败';
   return {
     kind: 'failed',
     code: 'CLINE_AGENT_ERROR',
-    message: error instanceof Error ? error.message : 'Cline 源码 Agent 执行失败'
+    message
   };
 }
 
@@ -317,6 +328,7 @@ export class ClineCodingAgentAdapter implements CodingAgentPort {
     let introducedFixedPosition = false;
     let intentDeclared = false;
     let declaredIntent: import('@ui-agent/contracts').WorkspaceIntent | undefined;
+    const compactInspectedSourceIds = new Set<string>();
     const changedPositioningClassNames = new Set<string>();
     const repeatedFailures = new Map<string, number>();
     const readActionCounts = new Map<string, number>();
@@ -370,7 +382,7 @@ export class ClineCodingAgentAdapter implements CodingAgentPort {
       const step: CodingAgentStep = {
         timestamp,
         toolCallId: context.toolCallId,
-        outcome: error ? 'failed' : (/^\[(读取预算|重复读取已拦截)\]/.test(result ?? '')
+        outcome: error ? 'failed' : (/^\[(读取预算|重复读取已拦截|展开条件)\]/.test(result ?? '')
           || (result?.startsWith('[运行预算]') && result.includes('停止继续读取'))) ? 'blocked' : 'succeeded',
         ...(result !== undefined ? { resultChars: result.length, resultTruncated: result.length > 16_000 } : {}),
         modelCall: context.iteration,
@@ -470,12 +482,19 @@ export class ClineCodingAgentAdapter implements CodingAgentPort {
       }
     };
 
+    const registerNewSourceId = (sourceId: string) => {
+      newSourceIds.add(sourceId);
+      if (declaredIntent && !declaredIntent.sourceIds.includes(sourceId)) {
+        declaredIntent = { ...declaredIntent, sourceIds: [...declaredIntent.sourceIds, sourceId] };
+      }
+    };
+
     const trackNewSourceIds = (before: string, after: string) => {
       const existing = sourceIdsIn(before);
       let changed = false;
       for (const sourceId of sourceIdsIn(after)) {
         if (existing.has(sourceId)) continue;
-        newSourceIds.add(sourceId);
+        registerNewSourceId(sourceId);
         changed = true;
       }
       if (changed) spatialScopeValidated = false;
@@ -498,7 +517,7 @@ export class ClineCodingAgentAdapter implements CodingAgentPort {
         for (const sourceId of match[1]!.match(/source-\d+/g) ?? []) created.add(sourceId);
       }
       if (!created.size) return;
-      for (const sourceId of created) newSourceIds.add(sourceId);
+      for (const sourceId of created) registerNewSourceId(sourceId);
       spatialScopeValidated = false;
     };
 
@@ -649,18 +668,34 @@ export class ClineCodingAgentAdapter implements CodingAgentPort {
           )
         )
       }),
-      createTool<{ sourceId: string }, string>({
+      createTool<{ sourceId: string; detail?: 'compact' | 'full' }, string>({
         name: 'inspect_element',
-        description: '按 data-ui-source-id 读取页面元素的局部源码、文字和样式线索。',
+        description: '按 data-ui-source-id 读取页面元素的局部源码、文字和样式线索。默认 compact；只有精简结果不足以判断时才使用 full。',
         inputSchema: objectSchema({
-          sourceId: stringProperty('元素的 data-ui-source-id。')
+          sourceId: stringProperty('元素的 data-ui-source-id。'),
+          detail: { type: 'string', enum: ['compact', 'full'] }
         }, ['sourceId']),
-        execute: (input, context) => execute(
-          'inspect_element',
-          input,
-          context,
-          () => workspace.inspectElement(input.sourceId)
-        )
+        execute: (input, context) => {
+          const detail = input.detail ?? 'compact';
+          if (detail === 'full' && !compactInspectedSourceIds.has(input.sourceId)) {
+            const message = `[展开条件] 必须先对 ${input.sourceId} 执行 compact 检查；只有精简结果缺少完成当前判断所需的信息时，才能请求 full。`;
+            // This is a workflow correction, not a completed read. Keeping it
+            // out of the completed-read cache lets the required compact read
+            // and the subsequent full read proceed normally.
+            record('inspect_element', input, context, message);
+            return Promise.resolve(message);
+          }
+          return execute(
+            'inspect_element',
+            input,
+            context,
+            async () => {
+              const result = await workspace.inspectElement(input.sourceId, { detail });
+              if (detail === 'compact') compactInspectedSourceIds.add(input.sourceId);
+              return result;
+            }
+          );
+        }
       }),
       createTool<{ sourceIds: string[] }, string>({
         name: 'inspect_elements',
@@ -677,9 +712,30 @@ export class ClineCodingAgentAdapter implements CodingAgentPort {
           'inspect_elements',
           input,
           context,
-          async () => (await Promise.all(input.sourceIds.map(
-            sourceId => workspace.inspectElement(sourceId)
-          ))).join('\n\n---\n\n')
+          async () => {
+            const sections = await Promise.all(input.sourceIds.map(async sourceId => {
+              const result = await workspace.inspectElement(sourceId, { detail: 'compact' });
+              compactInspectedSourceIds.add(sourceId);
+              return `元素 ${sourceId}\n${result.slice(0, MAX_BATCH_ELEMENT_CHARS)}`;
+            }));
+            const combined = sections.join('\n\n---\n\n');
+            return combined.length <= MAX_BATCH_INSPECTION_CHARS
+              ? combined
+              : `[批量检查已按总预算截断] 原始 ${combined.length} 字符，仅返回前 ${MAX_BATCH_INSPECTION_CHARS} 字符。请只对确实缺少证据的单个元素补查。\n\n${combined.slice(0, MAX_BATCH_INSPECTION_CHARS)}`;
+          }
+        )
+      }),
+      createTool<{ symbols: string[] }, string>({
+        name: 'query_style_symbols',
+        description: '结构化查询 class 或 CSS 自定义属性，返回有总预算的相关规则/片段；优先于全文搜索 author.css。',
+        inputSchema: objectSchema({
+          symbols: {
+            type: 'array', minItems: 1, maxItems: 12,
+            items: stringProperty('class 名（可带点）或以 -- 开头的 CSS 自定义属性。')
+          }
+        }, ['symbols']),
+        execute: (input, context) => execute(
+          'query_style_symbols', input, context, () => workspace.queryStyleSymbols(input.symbols)
         )
       }),
       createTool<{ className: string }, string>({
@@ -979,7 +1035,7 @@ export class ClineCodingAgentAdapter implements CodingAgentPort {
             );
             const clonedSourceId = result.match(/克隆元素\s+(source-\d+)/)?.[1];
             if (clonedSourceId) {
-              newSourceIds.add(clonedSourceId);
+              registerNewSourceId(clonedSourceId);
               spatialScopeValidated = false;
             }
             return result;
