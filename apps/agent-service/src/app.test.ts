@@ -288,6 +288,9 @@ describe('agent service', () => {
       expect(await renamed.json()).toMatchObject({ title: '订单筛选方案' });
       const preview = await app.request(`/workspaces/${created.workspaceId}/preview`);
       expect(preview.headers.get('content-security-policy')).toContain("script-src 'none'");
+      expect(preview.headers.get('content-security-policy')).toContain("style-src 'self' 'unsafe-inline' http: https:");
+      expect(preview.headers.get('content-security-policy')).toContain("connect-src 'none'");
+      expect(preview.headers.get('content-security-policy')).toContain("form-action 'none'");
       const previewHtml = await preview.text();
       expect(previewHtml).toContain('data-ui-source-id="source-0"');
       expect(previewHtml).toContain('<style data-ui-agent-workspace-styles data-ui-agent-candidate="A">');

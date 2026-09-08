@@ -59,11 +59,14 @@ interface LogStoreOptions {
 }
 
 const sensitiveKey = /authorization|api[-_]?key|token|secret|password|cookie/i;
+const usageCountKeys = new Set(['inputTokens', 'outputTokens', 'totalTokens', 'reasoningTokens', 'cachedInputTokens']);
 
 function redact(value: unknown): unknown {
   if (Array.isArray(value)) return value.map(redact);
   if (!value || typeof value !== 'object') return value;
-  return Object.fromEntries(Object.entries(value).map(([key, item]) => [key, sensitiveKey.test(key) ? '[REDACTED]' : redact(item)]));
+  return Object.fromEntries(Object.entries(value).map(([key, item]) => [key,
+    usageCountKeys.has(key) && typeof item === 'number' && Number.isFinite(item)
+      ? item : sensitiveKey.test(key) ? '[REDACTED]' : redact(item)]));
 }
 
 export class TurnLogStore {

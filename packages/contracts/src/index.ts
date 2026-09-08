@@ -682,3 +682,11 @@ export interface ExtensionProtocolMap {
   contentCommand(data: ContentCommand): ContentCommandResult;
   selectionChanged(data: PageSelection): void;
 }
+// Capture-time facts only: these must never be treated as post-edit geometry.
+export const CAPTURED_LAYOUT_PROPERTIES = [
+  'display', 'position', 'width', 'height', 'min-width', 'min-height', 'max-width', 'max-height',
+  'overflow', 'overflow-x', 'overflow-y', 'flex-direction', 'flex-wrap', 'flex-basis',
+  'flex-grow', 'flex-shrink', 'align-items', 'align-content', 'justify-content',
+  'gap', 'row-gap', 'column-gap', 'grid-template-columns', 'grid-template-rows',
+  'grid-auto-flow', 'grid-column', 'grid-row'
+] as const;

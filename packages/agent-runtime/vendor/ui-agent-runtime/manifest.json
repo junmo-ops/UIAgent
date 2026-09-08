@@ -15,21 +15,29 @@
     "sdkVersion": "0.0.75",
     "license": "Apache-2.0"
   },
-  "includedModules": ["deepseek-compatible-agent-loop"],
+  "includedModules": [
+    "deepseek-compatible-agent-loop"
+  ],
   "externalDependencies": {
-    "npm": ["ai", "@ai-sdk/openai-compatible"],
-    "runtime": ["Node.js built-in modules"]
+    "npm": [
+      "ai",
+      "@ai-sdk/openai-compatible"
+    ],
+    "runtime": [
+      "Node.js built-in modules"
+    ]
   },
   "files": {
     "index.js": {
-      "sha256": "a54e22a1539efe2ccf38111b40d0120cbcfe3e58dc92147553b78cac3d4ce5d6"
+      "sha256": "665f09bce27756333a8ba3086d0a85bf7d5730fef5e51eb6af82cef5028aa2ee"
     },
     "index.d.ts": {
-      "sha256": "38dd99c6be06e43af20038fc9a9380de97a5a51bda85591a8a384e94dac7d201"
+      "sha256": "7d46d887bb9f7f50522cede6b4d088f5cdfa2aae7b6578f1d95bc7d061f80f40"
     },
     "UPSTREAM_NOTICE.md": {
-      "sha256": "6a657834629df7058fa58ea8b07f4be0758b7fae0e83f5ca26f2fb206bc1855d"
+      "sha256": "2f09e22b6d0499709de8c42bd89e99da5ba53c30726a2afc0ed9776127924549"
     }
   },
-  "checksumNote": "manifest.json is excluded to avoid a self-referential checksum."
+  "checksumNote": "manifest.json is excluded to avoid a self-referential checksum.",
+  "localRevision": "2026-09-08-lifecycle-log-v1"
 }

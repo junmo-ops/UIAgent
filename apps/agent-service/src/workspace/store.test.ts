@@ -72,6 +72,19 @@ describe('SourceWorkspaceStore', () => {
     expect(store.get(workspace.workspaceId)).toMatchObject({ revision: 1, canUndo: true, canRedo: false });
   });
 
+  it('reads capture-time layout facts and removes them from newly inserted elements', async () => {
+    const store = createStore();
+    const layout = encodeURIComponent(JSON.stringify({ display: 'grid', gap: '12px', position: 'relative' }));
+    const workspace = store.create({ ...snapshot, html: '<!doctype html><html><body><section data-ui-source-id="source-0" data-ui-agent-captured-layout="' + layout + '">content</section></body></html>' });
+    const tools = store.tools(workspace.workspaceId);
+    const inspection = await tools.inspectElement('source-0');
+    expect(inspection).toContain('"display":"grid"');
+    expect(inspection).toContain('capture-time; not current rendered layout');
+    await tools.insertElement('source-0', 'parentEnd', '<div data-ui-agent-captured-layout="' + layout + '">new</div>');
+    const html = await tools.readFile('index.html');
+    expect(html.match(/data-ui-agent-captured-layout/g)).toHaveLength(1);
+  });
+
   it('returns the existing revision when a verified request needs no source change', async () => {
     const store = createStore();
     const workspace = store.create(snapshot);
@@ -285,7 +298,7 @@ describe('SourceWorkspaceStore', () => {
     await tools.rollback();
   });
 
-  it('allows local SVG paint references but rejects external CSS URLs', () => {
+  it('allows local SVG paint references and external static CSS resources', () => {
     const store = createStore();
     expect(() => store.create({
       ...snapshot,
@@ -294,7 +307,14 @@ describe('SourceWorkspaceStore', () => {
     expect(() => store.create({
       ...snapshot,
       html: '<!doctype html><html><body><div style="background-image:url(https://cdn.example.test/a.png)"></div></body></html>'
-    })).toThrow('CSS 外部 url()');
+    })).not.toThrow();
+  });
+
+  it('accepts static remote override resources without allowing executable CSS', () => {
+    const store = createStore();
+    expect(() => store.create({ ...snapshot, authorOverrides: '@import "https://cdn.example/theme.css"; .card {background:url(https://images.example/card.svg)} /* expression(old) */' })).not.toThrow();
+    expect(() => store.create({ ...snapshot, authorOverrides: '.card {width:expression(alert(1))}' })).toThrow('不安全');
+    expect(() => store.create({ ...snapshot, authorOverrides: '@import "file:///secret";' })).toThrow('HTTP/HTTPS');
   });
 
   it('moves an existing element within its original parent without rebuilding it', async () => {

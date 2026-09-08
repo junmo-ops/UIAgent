@@ -42,6 +42,17 @@ function installDom(html: string) {
 }
 
 describe('captureStaticSnapshot', () => {
+  it.each(['display:block', 'display:flex;gap:8px', 'display:grid;grid-template-columns:1fr 1fr',
+    'position:absolute;overflow:auto'])('retains bounded layout facts without frozen CSS: %s', style => {
+    const document = installDom('<html><body><section style="' + style + '">content</section></body></html>');
+    const snapshot = captureStaticSnapshot(document.querySelector('section') as unknown as HTMLElement, false);
+    const { document: captured } = parseHTML(snapshot.html);
+    const facts = JSON.parse(decodeURIComponent(captured.querySelector('[data-ui-agent-captured-layout]')!.getAttribute('data-ui-agent-captured-layout')!));
+    for (const declaration of style.split(';')) {
+      const [property, value] = declaration.split(':');
+      expect(facts[property!]).toBe(value);
+    }
+  });
   afterEach(() => {
     vi.unstubAllGlobals();
     if (stylePrototype) Reflect.deleteProperty(stylePrototype, 'getPropertyPriority');

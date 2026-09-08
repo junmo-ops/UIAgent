@@ -9,7 +9,7 @@
     "dev:extension": "pnpm --filter @ui-agent/extension dev",
     "build:extension": "pnpm --filter @ui-agent/extension build",
     "build": "pnpm -r --if-present build",
-    "export:internal-service": "node scripts/export-internal-service.mjs",
+    "export:internal-service": "node scripts/export-internal-service.mjs ../uiAgent-package",
     "check:internal-deploy": "node scripts/check-internal-deploy.mjs",
     "typecheck": "pnpm -r --if-present typecheck",
     "test": "vitest run",

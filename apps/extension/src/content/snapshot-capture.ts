@@ -1,4 +1,4 @@
-import { PROTOCOL_VERSION, staticSnapshotSchema, type SnapshotMetrics, type StaticSnapshot } from '@ui-agent/contracts';
+import { CAPTURED_LAYOUT_PROPERTIES, PROTOCOL_VERSION, staticSnapshotSchema, type SnapshotMetrics, type StaticSnapshot } from '@ui-agent/contracts';
 import { captureAccessibleAuthorStyles } from './author-style-capture';
 import type { AuthorStyleResource } from '@ui-agent/contracts';
 
@@ -242,6 +242,10 @@ function sanitizeTree(sourceRoot: HTMLElement, cloneRoot: HTMLElement, registry:
     clone.setAttribute('data-ui-source-id', sourceId);
     clone.setAttribute('data-ui-agent-source-rect', capturedRect(source));
     sanitizeElement(source, clone, registry, resources, includeFrozenStyles);
+    const computedLayout = getComputedStyle(source);
+    clone.setAttribute('data-ui-agent-captured-layout', encodeURIComponent(JSON.stringify(
+      Object.fromEntries(CAPTURED_LAYOUT_PROPERTIES.map(property => [property, computedLayout.getPropertyValue(property)]))
+    )));
     for (const pseudo of includeFrozenStyles ? ['::before', '::after'] as const : []) {
       const rule = capturePseudoStyle(source, sourceId, pseudo);
       if (rule) pseudoRules.push(rule);

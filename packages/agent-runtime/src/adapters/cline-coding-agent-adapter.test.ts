@@ -340,6 +340,30 @@ describe('ClineCodingAgentAdapter', () => {
     expect(workspace.state()).toMatchObject({ committed: true, rolledBack: false });
   });
 
+  it('separates HTML and CSS read budgets and permits inspection after a write', async () => {
+    const workspace = workspaceTools();
+    const adapter = new ClineCodingAgentAdapter({
+      baseUrl: 'https://example.test', apiKey: 'test-key', modelName: 'test-model',
+      factory: config => ({ run: async () => {
+        for (let i = 0; i < 4; i++) {
+          await findTool<any>(config, 'search_text').execute({ path: 'index.html', query: String(i) }, context(1));
+        }
+        expect(await findTool<any>(config, 'search_text').execute({ path: 'author.css', query: 'button' }, context(2)))
+          .not.toContain('读取预算');
+        for (let i = 0; i < 3; i++) {
+          await findTool<any>(config, 'inspect_element').execute({ sourceId: 'source-' + i }, context(3));
+        }
+        await declareIntent(config, 4);
+        await findTool<any>(config, 'replace_text').execute({ path: 'index.html', search: '查询', replace: '确定' }, context(5));
+        expect(await findTool<any>(config, 'inspect_element').execute({ sourceId: 'source-0' }, context(6))).toContain('确定');
+        await findTool<any>(config, 'finish').execute({ summary: '完成' }, context(7));
+        return result(7);
+      } })
+    });
+    const run = await adapter.run({ workspaceId: '11111111-1111-4111-8111-111111111111', request, conversation: [] }, workspace.tools);
+    expect(run.response.kind).toBe('completed');
+  });
+
   it('rolls back when the runtime ends without finish or clarify', async () => {
     const workspace = workspaceTools();
     const adapter = new ClineCodingAgentAdapter({
@@ -491,12 +515,12 @@ describe('ClineCodingAgentAdapter', () => {
     expect(workspace.state().rolledBack).toBe(true);
   });
 
-  it('reserves the final iterations for validation and completion', async () => {
+  it('allows targeted inspection in the final window with a completion reminder', async () => {
     const workspace = workspaceTools();
     let inspected = 0;
     workspace.tools.inspectElement = async () => {
       inspected += 1;
-      return '不应继续读取';
+      return '目标当前源码';
     };
     let budgetMessage = '';
     const adapter = new ClineCodingAgentAdapter({
@@ -526,8 +550,8 @@ describe('ClineCodingAgentAdapter', () => {
       conversation: []
     }, workspace.tools);
 
-    expect(budgetMessage).toContain('停止继续读取');
-    expect(inspected).toBe(0);
+    expect(budgetMessage).toContain('停止扩展范围');
+    expect(inspected).toBe(1);
     expect(run.response.kind).toBe('clarification');
     expect(workspace.state().rolledBack).toBe(true);
   });

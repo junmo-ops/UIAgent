@@ -86,6 +86,11 @@ export interface CodingAgentTurn {
 }
 
 export interface CodingAgentStep {
+  timestamp?: string;
+  toolCallId?: string;
+  outcome?: 'succeeded' | 'failed' | 'blocked';
+  resultChars?: number;
+  resultTruncated?: boolean;
   modelCall: number;
   action: string;
   input?: unknown;
@@ -98,6 +103,14 @@ export interface CodingAgentStep {
 }
 
 export interface CodingAgentCheckpoint {
+  runtime?: import('../../vendor/ui-agent-runtime/index.js').AgentRunDiagnostics;
+  lifecycle?: {
+    submissionMode: 'direct' | 'candidate';
+    intentDeclared: boolean;
+    spatialScopeValidated: boolean;
+    completionAttempts: number;
+    rollback: 'not_requested' | 'succeeded' | 'failed';
+  };
   version: 1;
   adapterId: string;
   workspaceId: string;

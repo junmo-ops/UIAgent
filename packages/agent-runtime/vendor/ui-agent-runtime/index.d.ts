@@ -36,7 +36,37 @@ export interface AgentRunResult {
   outputText: string;
   messages: readonly unknown[];
   usage: Record<string, unknown>;
+  finishReason?: string;
+  diagnostics?: AgentRunDiagnostics;
   error?: Error;
+}
+
+export interface AgentRunDiagnostics {
+  version: number;
+  runtimeRevision: string;
+  countingBasis?: string;
+  maxIterations: number;
+  requiredCompletionTool: boolean;
+  continuationCount: number;
+  completionTool?: string;
+  durationMs: number;
+  status: string;
+  finishReason?: string;
+  error?: { name: string; statusCode?: number };
+  calls: Array<{
+    modelCall: number;
+    startedAt: string;
+    status: string;
+    inputMessageCount: number;
+    outputTextChars: number;
+    firstOutputMs?: number;
+    durationMs?: number;
+    finishReason?: string;
+    continuationReason?: string;
+    usage?: Record<string, number>;
+    error?: { name: string; statusCode?: number };
+    tools: Array<{ name: string; toolCallId?: string; status: string; durationMs?: number; error?: { name: string; statusCode?: number } }>;
+  }>;
 }
 
 export type AgentRuntimeEvent =

@@ -24,7 +24,7 @@ describe('TurnLogStore', () => {
       [{
         modelCall: 1,
         action: 'search',
-        input: { query: 'source-0', path: 'index.html' },
+        input: { query: 'source-0', path: 'index.html', apiKey: 'private-test-value' },
         result: '命中字符 100'
       }],
       850,
@@ -36,6 +36,13 @@ describe('TurnLogStore', () => {
           workspaceId: '11111111-1111-4111-8111-111111111111',
           turnId: 'source-turn',
           status: 'completed',
+          runtime: {
+            version: 1, runtimeRevision: 'test', maxIterations: 45, requiredCompletionTool: true,
+            continuationCount: 1, durationMs: 800, status: 'completed', completionTool: 'finish',
+            calls: [{ modelCall: 1, startedAt: '2026-07-22T00:00:00Z', status: 'completed',
+              inputMessageCount: 1, outputTextChars: 0, finishReason: 'tool-calls', tools: [],
+              usage: { inputTokens: 100, outputTokens: 20 } }]
+          },
           modelCalls: 2,
           toolCalls: 1,
           stepCount: 1,
@@ -52,7 +59,9 @@ describe('TurnLogStore', () => {
     expect(store.get(store.list()[0]!.id)).toMatchObject({
       sourceWorkspaceId: '11111111-1111-4111-8111-111111111111',
       codingAgent: { adapterId: 'cline-sdk', checkpoint: { status: 'completed' } },
-      sourceSteps: [expect.objectContaining({ modelCall: 1 })]
+      sourceSteps: [expect.objectContaining({ modelCall: 1, input: expect.objectContaining({ apiKey: '[REDACTED]' }) })]
     });
+    expect(store.get(store.list()[0]!.id)?.codingAgent?.checkpoint.runtime?.calls[0]?.usage)
+      .toEqual({ inputTokens: 100, outputTokens: 20 });
   });
 });

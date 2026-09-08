@@ -13,6 +13,7 @@ import { parseHTML } from 'linkedom';
 import { type CodingAgentConversationTurn, type CodingWorkspaceTools } from '@ui-agent/agent-runtime';
 import {
   PROTOCOL_VERSION,
+  CAPTURED_LAYOUT_PROPERTIES,
   staticSnapshotSchema,
   MAX_STATIC_SNAPSHOT_HTML_CHARS,
   authorStyleCaptureSchema,
@@ -136,8 +137,10 @@ interface WorkspaceManifest {
   chat?: WorkspaceChatEntry[];
 }
 
-function validateAuthorCss(css: string, resources: AuthorStyleResource[]): string {
+function validateAuthorCss(css: string, _resources: AuthorStyleResource[]): string {
   if (css.length > 30_000_000) throw new Error('author.css 超过 30 MB 限制');
+  if (/<\/style/i.test(css)) throw new Error('author.css 包含非法的 style 闭合标签');
+  css = css.replace(/\/\*[\s\S]*?\*\//g, '');
   if (/<\/style/i.test(css) || /\b(?:javascript\s*:|expression\s*\(|-moz-binding\b|behavior\s*:)/i.test(css)) {
     throw new Error('author.css 包含不安全的可执行内容');
   }
@@ -146,12 +149,11 @@ function validateAuthorCss(css: string, resources: AuthorStyleResource[]): strin
   for (const source of imports) {
     if (!/^https?:\/\//i.test(source)) throw new Error('author.css 包含不安全的 @import');
   }
-  const allowedUrls = new Set(resources.map(resource => resource.url));
   for (const match of css.matchAll(/\burl\s*\(\s*(?:"([^"]*)"|'([^']*)'|([^)]*))\s*\)/gi)) {
     const target = (match[1] ?? match[2] ?? match[3] ?? '').trim();
     if (!target || target.startsWith('#') || target.startsWith('data:')) continue;
     if (imports.has(target)) continue;
-    if (!allowedUrls.has(target)) throw new Error('author.css 引用了未在资源清单中声明的外部 url()');
+    if (!/^https?:\/\//i.test(target)) throw new Error('author.css 包含不支持的资源协议');
   }
   return 'author.css 与资源清单校验通过';
 }
@@ -199,7 +201,7 @@ function validateHtml(html: string): string {
   const cssUrls = html.matchAll(/\burl\s*\(\s*(?:"([^"]*)"|'([^']*)'|([^)]*))\s*\)/gi);
   for (const match of cssUrls) {
     const target = (match[1] ?? match[2] ?? match[3] ?? '').trim().toLowerCase();
-    if (target.startsWith('#') || target.startsWith('data:')) continue;
+    if (target.startsWith('#') || target.startsWith('data:') || /^https?:\/\//i.test(target)) continue;
     throw new Error('源码包含脚本、事件、远程资源或其他不安全内容（检测到：CSS 外部 url()）');
   }
   validateTableStructure(html);
@@ -212,14 +214,19 @@ function validateHtml(html: string): string {
 
 function validateCss(css: string): string {
   if (css.length > 10_000_000) throw new Error('snapshot.css 超过 10 MB 限制');
-  if (/@import\b/i.test(css)) throw new Error('snapshot.css 不允许使用 @import');
   if (/<\/style/i.test(css)) throw new Error('snapshot.css 包含非法的 style 闭合标签');
-  if (/\b(?:javascript\s*:|expression\s*\(|-moz-binding\b)/i.test(css)) {
+  // Comments are not executable CSS and must not trigger resource/legacy-code checks.
+  css = css.replace(/\/\*[\s\S]*?\*\//g, '');
+  for (const source of cssImportSources(css.replace(/\/\*[\s\S]*?\*\//g, ''))) {
+    if (!/^https?:\/\//i.test(source)) throw new Error('CSS @import 必须使用 HTTP/HTTPS 地址');
+  }
+  if (/<\/style/i.test(css)) throw new Error('snapshot.css 包含非法的 style 闭合标签');
+  if (/\b(?:javascript\s*:|expression\s*\(|-moz-binding\b|behavior\s*:)/i.test(css)) {
     throw new Error('snapshot.css 包含不安全的可执行内容');
   }
   for (const match of css.matchAll(/\burl\s*\(\s*(?:"([^"]*)"|'([^']*)'|([^)]*))\s*\)/gi)) {
     const target = (match[1] ?? match[2] ?? match[3] ?? '').trim().toLowerCase();
-    if (target.startsWith('#') || target.startsWith('data:')) continue;
+    if (target.startsWith('#') || target.startsWith('data:') || /^https?:\/\//i.test(target)) continue;
     throw new Error('snapshot.css 包含外部 url()');
   }
   return 'CSS 与安全规则校验通过';
@@ -384,7 +391,7 @@ function cloneWithFreshSourceIds(
       sourceIdMap.set(previousSourceId, sourceId);
       return `${prefix}${sourceId}${suffix}`;
     }
-  ).replace(/\sdata-ui-agent-source-rect\s*=\s*(["'])[^"']*\1/gi, '');
+  ).replace(/\sdata-ui-agent-(?:source-rect|captured-layout)\s*=\s*(["'])[^"']*\1/gi, '');
   if (!rootSourceId) throw new Error('模板元素缺少 data-ui-source-id，无法安全克隆');
   return { html, rootSourceId, sourceIdMap };
 }
@@ -454,7 +461,7 @@ function escapeHtmlAttribute(value: string): string {
   return escapeHtmlText(value).replaceAll('"', '&quot;');
 }
 
-const PROTECTED_DOM_ATTRIBUTES = new Set(['data-ui-source-id', 'data-ui-agent-source-rect', 'style']);
+const PROTECTED_DOM_ATTRIBUTES = new Set(['data-ui-source-id', 'data-ui-agent-source-rect', 'data-ui-agent-captured-layout', 'style']);
 
 function assertMutableAttributeName(name: string): void {
   const normalized = name.toLowerCase();
@@ -511,6 +518,7 @@ function fragmentWithFreshSourceIds(
   let nextId = nextSourceNumber(content);
   for (const element of elements) {
     element.removeAttribute('data-ui-agent-source-rect');
+    element.removeAttribute('data-ui-agent-captured-layout');
     element.setAttribute('data-ui-source-id', `source-${nextId++}`);
   }
   const rootSourceIds = [...container.children]
@@ -606,13 +614,7 @@ function compactElementSource(outerHtml: string): string {
   ].join('\n');
 }
 
-const LAYOUT_PROPERTIES = [
-  'display', 'position', 'width', 'height', 'min-width', 'min-height',
-  'max-width', 'max-height', 'overflow', 'overflow-x', 'overflow-y',
-  'flex-direction', 'flex-wrap', 'flex-basis', 'flex-grow', 'flex-shrink',
-  'align-items', 'align-content', 'justify-content', 'gap', 'row-gap', 'column-gap',
-  'grid-template-columns', 'grid-template-rows', 'grid-auto-flow', 'grid-column', 'grid-row'
-] as const;
+const LAYOUT_PROPERTIES = CAPTURED_LAYOUT_PROPERTIES;
 
 function sourceLayoutFacts(html: string, css: string, sourceId: string): Record<string, unknown> {
   const range = sourceElementRange(html, sourceId);
@@ -622,6 +624,15 @@ function sourceLayoutFacts(html: string, css: string, sourceId: string): Record<
     .map(Number);
   const classNames = /\bclass\s*=\s*["']([^"']+)["']/i.exec(openingTag)?.[1]?.split(/\s+/) ?? [];
   const declarations = new Map<string, string>();
+  const captured = /\bdata-ui-agent-captured-layout\s*=\s*["']([^"']+)["']/i.exec(openingTag)?.[1];
+  if (captured) {
+    try {
+      const facts = JSON.parse(decodeURIComponent(captured));
+      for (const property of LAYOUT_PROPERTIES) {
+        if (typeof facts?.[property] === 'string') declarations.set(property, facts[property]);
+      }
+    } catch { /* Older or malformed captures have no trustworthy layout facts. */ }
+  }
   for (const className of classNames.filter(value => value.startsWith('ui-snapshot-style-'))) {
     for (const rule of cssRulesForClass(css, className)) {
       const body = rule.slice(rule.indexOf('{') + 1, rule.lastIndexOf('}'));
@@ -642,7 +653,8 @@ function sourceLayoutFacts(html: string, css: string, sourceId: string): Record<
         x: rectValues[0], y: rectValues[1], width: rectValues[2], height: rectValues[3]
       }
     } : { capturedRect: null }),
-    computedLayout: Object.fromEntries(declarations)
+    computedLayout: Object.fromEntries(declarations),
+    layoutEvidence: declarations.size ? 'capture-time; not current rendered layout' : 'unavailable; inspect author CSS or recapture with current extension'
   };
 }
 

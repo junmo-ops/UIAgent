@@ -308,6 +308,7 @@ export class ClineCodingAgentAdapter implements CodingAgentPort {
     // adapter must enforce the boundary independently of the model/runtime.
     let clarificationRequested = false;
     let rolledBack = false;
+    let rollbackStatus: 'not_requested' | 'succeeded' | 'failed' = 'not_requested';
     const newSourceIds = new Set<string>();
     let spatialScopeValidated = false;
     let introducedFixedPosition = false;
@@ -345,7 +346,13 @@ export class ClineCodingAgentAdapter implements CodingAgentPort {
     const rollback = async () => {
       if (rolledBack || completion?.kind === 'completed' || completion?.kind === 'draft') return;
       rolledBack = true;
-      await workspace.rollback();
+      try {
+        await workspace.rollback();
+        rollbackStatus = 'succeeded';
+      } catch (error) {
+        rollbackStatus = 'failed';
+        throw error;
+      }
     };
 
     const record = (
@@ -358,6 +365,11 @@ export class ClineCodingAgentAdapter implements CodingAgentPort {
     ) => {
       const timestamp = new Date().toISOString();
       const step: CodingAgentStep = {
+        timestamp,
+        toolCallId: context.toolCallId,
+        outcome: error ? 'failed' : (/^\[(读取预算|重复读取已拦截)\]/.test(result ?? '')
+          || (result?.startsWith('[运行预算]') && result.includes('停止继续读取'))) ? 'blocked' : 'succeeded',
+        ...(result !== undefined ? { resultChars: result.length, resultTruncated: result.length > 16_000 } : {}),
         modelCall: context.iteration,
         action,
         input,
@@ -397,7 +409,8 @@ export class ClineCodingAgentAdapter implements CodingAgentPort {
       }
       const remainingAfterThisCall = Math.max(0, this.maxIterations - context.iteration);
       const finalizationStartsAt = Math.max(1, this.maxIterations - FINALIZATION_WINDOW + 1);
-      if (BUDGETED_READ_ACTIONS.has(action) && context.iteration >= finalizationStartsAt) {
+      if (BUDGETED_READ_ACTIONS.has(action) && !['inspect_element', 'inspect_elements'].includes(action)
+        && context.iteration >= finalizationStartsAt) {
         const message = `[运行预算] 当前第 ${context.iteration}/${this.maxIterations} 轮，已进入最后 ${FINALIZATION_WINDOW} 轮，停止继续读取。若修改已完成，请立即调用 validate_workspace 后 finish；若关键信息仍不足，请调用 clarify。`;
         record(action, input, context, message);
         return message;
@@ -405,23 +418,32 @@ export class ClineCodingAgentAdapter implements CodingAgentPort {
       const readKey = BUDGETED_READ_ACTIONS.has(action)
         ? `${action}:${JSON.stringify(input)}`
         : undefined;
+      const budgetKey = action === 'search_text' || action === 'read_file'
+        ? `${action}:${(input as { path?: string }).path ?? ''}`
+        : action;
       const actionLimit = MAX_READ_CALLS_PER_ACTION[action];
+      if (readKey && completedReadResults.has(readKey)) {
+        const message = '[重复读取已拦截] 当前源码版本的相同查询已经返回，请使用已有证据；修改源码后可重新检查。';
+        record(action, input, context, message);
+        return message;
+      }
       if (actionLimit) {
-        const actionCount = (readActionCounts.get(action) ?? 0) + 1;
-        readActionCounts.set(action, actionCount);
+        const actionCount = (readActionCounts.get(budgetKey) ?? 0) + 1;
+        readActionCounts.set(budgetKey, actionCount);
         if (actionCount > actionLimit) {
           const message = `[读取预算] ${action} 已调用 ${actionCount} 次，超过本轮上限 ${actionLimit} 次。请停止继续检索，使用已有上下文完成修改和校验；若信息不足则调用 clarify。`;
           record(action, input, context, message);
           return message;
         }
       }
-      if (readKey && completedReadResults.has(readKey)) {
-        const message = `[重复读取已拦截] ${action} 的相同参数在本轮已执行，不能提供新证据。请使用已有结果继续批量检查、修改、校验或澄清。`;
-        record(action, input, context, message);
-        return message;
-      }
       try {
         const result = await operation();
+        if (['replace_text', 'apply_patch', 'set_element_text', 'set_element_attributes',
+          'insert_element', 'wrap_element', 'unwrap_element', 'remove_element',
+          'reorder_children', 'apply_dom_operations', 'move_element', 'clone_element'].includes(action)) {
+          completedReadResults.clear();
+          readActionCounts.clear();
+        }
         if (readKey) completedReadResults.set(readKey, result);
         throwIfCancelled();
         const guidedResult = remainingAfterThisCall <= 5
@@ -1145,7 +1167,7 @@ export class ClineCodingAgentAdapter implements CodingAgentPort {
         maxIterations: this.maxIterations
       });
       if (signal?.aborted) abortActiveAgent();
-      let result = await activeAgent.run(JSON.stringify({
+      const result = await activeAgent.run(JSON.stringify({
         instruction: turn.request.instruction,
         selectedSourceId: turn.request.sourceId,
         replyToClarificationId: turn.request.replyToClarificationId,
@@ -1153,25 +1175,12 @@ export class ClineCodingAgentAdapter implements CodingAgentPort {
         conversation: turn.conversation.slice(-8),
         files
       }));
-      throwIfCancelled();
-      // Some compatible runtimes treat completionPolicy as advisory and may
-      // stop naturally after validate_workspace. Give the same Agent one
-      // bounded finalization turn so a validated edit is not rolled back only
-      // because the model omitted the lifecycle tool call.
-      if (!completion && result.status === 'completed' && !result.error) {
-        const finalizationResult = await activeAgent.run(JSON.stringify({
-          instruction: `本轮源码修改与 validate_workspace 已完成。请不要继续读取或修改；现在调用 finish。${finishDescription}如果无法完成，调用 clarify 说明原因。`,
-          selectedSourceId: turn.request.sourceId,
-          conversation: turn.conversation.slice(-2),
-          files
-        }));
-        result = finalizationResult;
-        throwIfCancelled();
-      }
       checkpoint = {
         ...checkpoint,
-        modelCalls: Math.max(checkpoint.modelCalls, result.iterations)
+        modelCalls: Math.max(checkpoint.modelCalls, result.iterations),
+        ...(result.diagnostics ? { runtime: result.diagnostics } : {})
       };
+      throwIfCancelled();
       if (completion?.kind === 'completed') {
         response = {
           kind: 'completed',
@@ -1201,7 +1210,7 @@ export class ClineCodingAgentAdapter implements CodingAgentPort {
       } else {
         await rollback();
         response = failedResponse(
-          result.error ?? new Error(`Cline 运行结束但没有调用 finish 或 clarify（status=${result.status}）`)
+          result.error ?? new Error(`Agent 未成功提交或澄清（status=${result.status}；最后操作=${checkpoint.lastAction ?? '无'}；最后工具错误=${steps.filter(step => step.error).at(-1)?.error ?? '无'}）`)
         );
       }
     } catch (error) {
@@ -1221,6 +1230,11 @@ export class ClineCodingAgentAdapter implements CodingAgentPort {
     const timestamp = new Date().toISOString();
     checkpoint = {
       ...checkpoint,
+      lifecycle: {
+        submissionMode: workspace.submissionMode ?? 'direct', intentDeclared, spatialScopeValidated,
+        completionAttempts: steps.filter(step => step.action === 'finish').length,
+        rollback: rollbackStatus
+      },
       status: response.kind === 'completed'
         || response.kind === 'draft'
         ? 'completed'

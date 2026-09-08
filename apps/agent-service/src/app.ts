@@ -1,4 +1,5 @@
 import { zValidator } from '@hono/zod-validator';
+import { fetchWorkspaceResource, resourceErrorCode } from './workspace/resource-fetch';
 import {
   clineAssistantChatFromEnvironment,
   clineAssistantRouterFromEnvironment,
@@ -828,9 +829,9 @@ export function createApp(
       const resource = workspaceStore.authorStyleResource(workspaceId, Number(c.req.param('resourceIndex')));
       if (!resource) return c.text('样式资源不存在', 404);
       try {
-        // Only URLs recorded and checked against author.css can reach this
-        // proxy. Do not follow a redirect to an unrecorded origin.
-        const response = await fetch(resource.url, { redirect: 'error' });
+        // Only recorded resources enter the proxy; redirects are bounded and
+        // never forward browser cookies or authorization headers.
+        const response = await fetchWorkspaceResource(resource.url);
         if (!response.ok) {
           workspaceStore.recordAuthorResourceFailure(workspaceId, Number(c.req.param('resourceIndex')), `HTTP ${response.status}`);
           return c.text(`样式资源请求失败 (${response.status})`, 502);
@@ -846,8 +847,10 @@ export function createApp(
         c.header('Cache-Control', 'private, max-age=3600');
         return c.body(bytes);
       } catch (error) {
-        workspaceStore.recordAuthorResourceFailure(workspaceId, Number(c.req.param('resourceIndex')), error instanceof Error ? error.message : '请求失败');
-        return c.text('样式资源无法加载', 502);
+        const code = resourceErrorCode(error);
+        workspaceStore.recordAuthorResourceFailure(workspaceId, Number(c.req.param('resourceIndex')), code);
+        console.warn('[resource-fetch]', { workspaceId, resourceIndex: c.req.param('resourceIndex'), host: new URL(resource.url).hostname, code });
+        return c.text(`样式资源无法加载 (${code})`, code === 'RESOURCE_TOO_LARGE' ? 413 : 502);
       }
     })
     .get('/v1/workspaces/:workspaceId/conversation', c => {
@@ -883,10 +886,7 @@ export function createApp(
         if (!html) return c.text('静态源码副本不存在', 404);
         c.header('X-UI-Agent-Candidate', candidate);
         c.header('X-UI-Agent-Candidate-Label', candidate === 'B' ? 'author-rules-overlay' : 'frozen-computed-style');
-        const externalStyleOrigins = candidate === 'B'
-          ? workspaceStore.externalAuthorStyleOrigins(c.req.param('workspaceId'))
-          : [];
-        const externalSources = externalStyleOrigins.length ? ` ${externalStyleOrigins.join(' ')}` : '';
+        const externalSources = ' http: https:';
         c.header('Content-Security-Policy', `default-src 'none'; style-src 'self' 'unsafe-inline'${externalSources}; img-src 'self' data: blob:${externalSources}; font-src 'self' data:${externalSources}; connect-src 'none'; script-src 'none'; form-action 'none'; frame-src 'none'; object-src 'none'; base-uri 'none'`);
         c.header('X-Content-Type-Options', 'nosniff');
         c.header('Referrer-Policy', 'no-referrer');
@@ -933,8 +933,7 @@ export function createApp(
           workspaceId, candidateId, candidateVersion, assetQuery, workspaceAssetPath, candidateAssetPath
         );
         if (!html) return c.text('候选版本不存在或已失效', 404);
-        const externalStyleOrigins = manifest.renderMode === 'B' ? workspaceStore.externalAuthorStyleOrigins(workspaceId) : [];
-        const externalSources = externalStyleOrigins.length ? ` ${externalStyleOrigins.join(' ')}` : '';
+        const externalSources = ' http: https:';
         c.header('X-UI-Agent-Candidate', manifest.renderMode);
         c.header('X-UI-Agent-Document-Ref', `${candidateId}:${candidateVersion}`);
         c.header('Content-Security-Policy', `default-src 'none'; style-src 'self' 'unsafe-inline'${externalSources}; img-src 'self' data: blob:${externalSources}; font-src 'self' data:${externalSources}; connect-src 'none'; script-src 'none'; form-action 'none'; frame-src 'none'; object-src 'none'; base-uri 'none'`);
