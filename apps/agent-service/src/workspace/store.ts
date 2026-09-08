@@ -108,13 +108,68 @@ const UNSAFE_HTML_RULES = [
   { label: 'HTTP Meta 指令', pattern: /<\s*meta\b[^>]*\bhttp-equiv\s*=/i },
   { label: 'DOM 事件属性', pattern: /\son[a-z]+\s*=/i },
   { label: 'srcdoc 嵌入内容', pattern: /\ssrcdoc\s*=/i },
-  { label: 'javascript URL', pattern: /\bjavascript\s*:/i },
-  { label: 'CSS @import', pattern: /@import\b/i },
   {
     label: 'HTTP/HTTPS 外部资源属性',
     pattern: /\s(?:src|srcset|href|action|formaction|poster)\s*=\s*["']?\s*(?:https?:|\/\/)/i
   }
 ];
+
+const URL_BEARING_ATTRIBUTES = new Set([
+  'href', 'src', 'srcset', 'action', 'formaction', 'poster', 'xlink:href'
+]);
+
+function normalizeUrlProtocol(value: string): string {
+  // Browsers ignore ASCII whitespace and control characters while resolving a
+  // scheme. Normalize them before checking so `java&#x0A;script:` cannot evade
+  // the attribute-level guard.
+  return value.trim().replace(/[\u0000-\u0020\u007f]+/g, '').toLocaleLowerCase();
+}
+
+function containsUnsafeCssExecutableContent(css: string): boolean {
+  const executableCss = css.replace(/\/\*[\s\S]*?\*\//g, '');
+  if (/\b(?:expression\s*\(|-moz-binding\b|behavior\s*:)/i.test(executableCss)) return true;
+  for (const match of executableCss.matchAll(/\burl\s*\(\s*(?:"([^"]*)"|'([^']*)'|([^)]*))\s*\)/gi)) {
+    const target = (match[1] ?? match[2] ?? match[3] ?? '').trim();
+    if (normalizeUrlProtocol(target).startsWith('javascript:')) return true;
+  }
+  return false;
+}
+
+function validateCssResourceUrls(css: string, errorMessage: string): void {
+  for (const match of css.matchAll(/\burl\s*\(\s*(?:"([^"]*)"|'([^']*)'|([^)]*))\s*\)/gi)) {
+    const target = (match[1] ?? match[2] ?? match[3] ?? '').trim().toLowerCase();
+    if (target.startsWith('#') || target.startsWith('data:') || /^https?:\/\//i.test(target)) continue;
+    throw new Error(errorMessage);
+  }
+}
+
+function validateEmbeddedHtmlSafety(html: string): void {
+  const { document } = parseHTML(html);
+  for (const element of [...document.querySelectorAll('*')]) {
+    for (const attribute of [...element.attributes]) {
+      const name = attribute.name.toLocaleLowerCase();
+      if (URL_BEARING_ATTRIBUTES.has(name) && normalizeUrlProtocol(attribute.value).startsWith('javascript:')) {
+        throw new Error('源码包含脚本、事件、远程资源或其他不安全内容（检测到：javascript URL）');
+      }
+      if (name === 'style') {
+        if (containsUnsafeCssExecutableContent(attribute.value)) {
+          throw new Error('源码包含脚本、事件、远程资源或其他不安全内容（检测到：CSS 可执行内容）');
+        }
+        validateCssResourceUrls(attribute.value, '源码包含脚本、事件、远程资源或其他不安全内容（检测到：CSS 外部 url()）');
+      }
+    }
+    if (element.localName === 'style') {
+      const css = element.textContent ?? '';
+      if (/@import\b/i.test(css)) {
+        throw new Error('源码包含脚本、事件、远程资源或其他不安全内容（检测到：CSS @import）');
+      }
+      if (containsUnsafeCssExecutableContent(css)) {
+        throw new Error('源码包含脚本、事件、远程资源或其他不安全内容（检测到：CSS 可执行内容）');
+      }
+      validateCssResourceUrls(css, '源码包含脚本、事件、远程资源或其他不安全内容（检测到：CSS 外部 url()）');
+    }
+  }
+}
 
 interface WorkspaceManifest {
   workspaceVersion?: 1 | 2;
@@ -141,7 +196,7 @@ function validateAuthorCss(css: string, _resources: AuthorStyleResource[]): stri
   if (css.length > 30_000_000) throw new Error('author.css 超过 30 MB 限制');
   if (/<\/style/i.test(css)) throw new Error('author.css 包含非法的 style 闭合标签');
   css = css.replace(/\/\*[\s\S]*?\*\//g, '');
-  if (/<\/style/i.test(css) || /\b(?:javascript\s*:|expression\s*\(|-moz-binding\b|behavior\s*:)/i.test(css)) {
+  if (containsUnsafeCssExecutableContent(css)) {
     throw new Error('author.css 包含不安全的可执行内容');
   }
   const executableCss = css.replace(/\/\*[\s\S]*?\*\//g, '');
@@ -198,12 +253,7 @@ function validateHtml(html: string): string {
   }
   const unsafe = UNSAFE_HTML_RULES.find(rule => rule.pattern.test(html));
   if (unsafe) throw new Error(`源码包含脚本、事件、远程资源或其他不安全内容（检测到：${unsafe.label}）`);
-  const cssUrls = html.matchAll(/\burl\s*\(\s*(?:"([^"]*)"|'([^']*)'|([^)]*))\s*\)/gi);
-  for (const match of cssUrls) {
-    const target = (match[1] ?? match[2] ?? match[3] ?? '').trim().toLowerCase();
-    if (target.startsWith('#') || target.startsWith('data:') || /^https?:\/\//i.test(target)) continue;
-    throw new Error('源码包含脚本、事件、远程资源或其他不安全内容（检测到：CSS 外部 url()）');
-  }
+  validateEmbeddedHtmlSafety(html);
   validateTableStructure(html);
   validateControlledInteractions(html);
   if (html.length > MAX_STATIC_SNAPSHOT_HTML_CHARS) {
@@ -221,7 +271,7 @@ function validateCss(css: string): string {
     if (!/^https?:\/\//i.test(source)) throw new Error('CSS @import 必须使用 HTTP/HTTPS 地址');
   }
   if (/<\/style/i.test(css)) throw new Error('snapshot.css 包含非法的 style 闭合标签');
-  if (/\b(?:javascript\s*:|expression\s*\(|-moz-binding\b|behavior\s*:)/i.test(css)) {
+  if (containsUnsafeCssExecutableContent(css)) {
     throw new Error('snapshot.css 包含不安全的可执行内容');
   }
   for (const match of css.matchAll(/\burl\s*\(\s*(?:"([^"]*)"|'([^']*)'|([^)]*))\s*\)/gi)) {
