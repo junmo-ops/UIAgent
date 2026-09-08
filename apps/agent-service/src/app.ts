@@ -271,7 +271,13 @@ export function createApp(
           overflowY: node.styles.overflowY,
           visibility: node.styles.visibility,
           flexDirection: node.styles.flexDirection,
-          gridTemplateColumns: node.styles.gridTemplateColumns
+          gridTemplateColumns: node.styles.gridTemplateColumns,
+          backgroundColor: node.styles.backgroundColor,
+          backgroundImage: node.styles.backgroundImage,
+          color: node.styles.color,
+          borderColor: node.styles.borderColor,
+          borderRadius: node.styles.borderRadius,
+          boxShadow: node.styles.boxShadow
         }
       }));
     const repairFacts = JSON.stringify({

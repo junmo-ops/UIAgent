@@ -131,7 +131,13 @@ async function observeWorkspacePreview(sourceIds: string[], documentRef: Documen
         gridTemplateColumns: style.gridTemplateColumns,
         gridTemplateRows: style.gridTemplateRows,
         font: style.font,
-        lineHeight: style.lineHeight
+        lineHeight: style.lineHeight,
+        backgroundColor: style.backgroundColor,
+        backgroundImage: style.backgroundImage,
+        color: style.color,
+        borderColor: style.borderColor,
+        borderRadius: style.borderRadius,
+        boxShadow: style.boxShadow
       },
       clippingAncestors
     };

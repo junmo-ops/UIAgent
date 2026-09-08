@@ -704,6 +704,8 @@ function sourceLayoutFacts(html: string, css: string, sourceId: string): Record<
       }
     } : { capturedRect: null }),
     computedLayout: Object.fromEntries(declarations),
+    inlineStyle: decodeBasicEntities(/\sstyle\s*=\s*(?:"([^"]*)"|'([^']*)')/i.exec(openingTag)?.slice(1).find(value => value !== undefined) ?? ''),
+    cascadeNote: 'inlineStyle 是当前源码行内声明（含自定义属性），普通样式表选择器再复杂也不能覆盖同一元素的普通行内声明；computedLayout 是捕获值，不是修改后的生效样式。',
     layoutEvidence: declarations.size ? 'capture-time; not current rendered layout' : 'unavailable; inspect author CSS or recapture with current extension'
   };
 }
@@ -1663,7 +1665,9 @@ export class SourceWorkspaceStore {
       updatedAt: new Date().toISOString(),
       chat: response.kind === 'completed'
         ? (manifest.chat ?? []).filter(entry => entry.revision < response.revision).map(entry => {
-          if (entry.id === request.turnId) return { ...entry, revision: response.revision };
+          if (entry.id === request.turnId || (request.replyToClarificationId && entry.id === request.replyToClarificationId)) {
+            return { ...entry, revision: response.revision };
+          }
           if (request.replyToClarificationId && entry.clarification?.clarificationId === request.replyToClarificationId) {
             return {
                 ...entry,
@@ -1851,6 +1855,7 @@ export class SourceWorkspaceStore {
           .slice(0, 12);
         const layoutContext = {
           target: sourceLayoutFacts(html, working['snapshot.css'], sourceId),
+          children: (node?.childrenSourceIds ?? []).slice(0, 8).map(child => sourceLayoutFacts(html, working['snapshot.css'], child)),
           ancestors: ancestry
             .slice(0, -1)
             .slice(-6)

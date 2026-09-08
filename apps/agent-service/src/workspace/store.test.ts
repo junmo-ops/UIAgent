@@ -85,6 +85,18 @@ describe('SourceWorkspaceStore', () => {
     expect(html.match(/data-ui-agent-captured-layout/g)).toHaveLength(1);
   });
 
+  it.each(['display:block', 'display:flex', 'display:grid', 'position:relative', 'overflow:auto'])('exposes current inline variable declarations and child paint context for %s', async layout => {
+    const store = createStore();
+    const workspace = store.create({ ...snapshot, authorStyles: { cssText: 'section{color:black}', readableSheets: 1, unreadableSheets: 0, missing: [] }, html: `<!doctype html><html><body><section data-ui-source-id="source-0" style="${layout};--surface:blue!important"><div data-ui-source-id="source-1" style="background:var(--surface)">content</div></section></body></html>` });
+    const tools = store.tools(workspace.workspaceId);
+    const inspection = await tools.inspectElement('source-0');
+    const context = JSON.parse(inspection.split('\n').find(line => line.startsWith('布局上下文: '))!.slice('布局上下文: '.length));
+    expect(context.target.inlineStyle).toContain('--surface:blue!important');
+    expect(context.children[0].inlineStyle).toBe('background:var(--surface)');
+    expect(context.target.cascadeNote).toContain('普通样式表');
+    await tools.rollback();
+  });
+
   it('returns the existing revision when a verified request needs no source change', async () => {
     const store = createStore();
     const workspace = store.create(snapshot);
@@ -213,6 +225,52 @@ describe('SourceWorkspaceStore', () => {
     ]));
     store.undo(workspace.workspaceId);
     expect(store.conversation(workspace.workspaceId)).toEqual([]);
+  });
+
+  it('undoes and redoes a clarified second edit as one chat group without losing the first edit', async () => {
+    const store = createStore();
+    const workspace = store.create(snapshot);
+    const id = workspace.workspaceId;
+    const first = crypto.randomUUID();
+    const question = crypto.randomUUID();
+    const reply = crypto.randomUUID();
+    const append = (entryId: string, role: 'user' | 'assistant', text: string, revision: number, clarification?: { clarificationId: string; options: Array<{ id: string; label: string }>; allowFreeText: boolean }) => store.appendChat(id, {
+      id: entryId, role, text, revision, createdAt: new Date().toISOString(), ...(clarification && { clarification })
+    });
+    append(first, 'user', '改文案', 0);
+    const firstTools = store.tools(id);
+    await firstTools.replaceInElement('source-0', '查 询', '确定');
+    await firstTools.commit('文案完成');
+    store.recordTurn(id, turnRequest('改文案', { turnId: first }), {
+      kind: 'completed', summary: '文案完成', revision: 1, modelCalls: 1, toolCalls: 1
+    });
+    append(crypto.randomUUID(), 'assistant', '文案完成', 1);
+    append(question, 'user', '改背景', 1);
+    append(crypto.randomUUID(), 'assistant', '哪个背景？', 1, {
+      clarificationId: question, options: [{ id: 'selected', label: '选中按钮' }], allowFreeText: true
+    });
+    append(reply, 'user', '选中按钮', 1);
+    const secondTools = store.tools(id);
+    await secondTools.replaceInElement('source-0', '确定', '确定（绿色）');
+    await secondTools.commit('背景完成');
+    store.recordTurn(id, turnRequest('选中按钮', { turnId: reply, replyToClarificationId: question, clarificationOptionId: 'selected' }), {
+      kind: 'completed', summary: '背景完成', revision: 2, modelCalls: 1, toolCalls: 1
+    });
+    append(crypto.randomUUID(), 'assistant', '背景完成', 2);
+    expect(store.chat(id).map(entry => entry.revision)).toEqual([1, 1, 2, 2, 2, 2]);
+    expect(store.chat(id).find(entry => entry.clarification)?.clarification?.resolved).toBe(true);
+    store.undo(id);
+    expect(store.html(id)).toContain('确定');
+    expect(store.html(id)).not.toContain('确定（绿色）');
+    expect(store.chat(id).map(entry => entry.text)).toEqual(['改文案', '文案完成']);
+    store.undo(id);
+    expect(store.html(id)).toContain('查 询');
+    expect(store.chat(id)).toEqual([]);
+    store.redo(id);
+    expect(store.chat(id).map(entry => entry.text)).toEqual(['改文案', '文案完成']);
+    store.redo(id);
+    expect(store.html(id)).toContain('确定（绿色）');
+    expect(store.chat(id)).toHaveLength(6);
   });
 
   it('keeps user-visible workspace chat with revisions and hides undone messages', async () => {

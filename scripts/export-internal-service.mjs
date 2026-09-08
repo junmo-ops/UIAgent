@@ -1,14 +1,18 @@
-import { cpSync, existsSync, mkdirSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from 'node:fs';
+import { appendFileSync, cpSync, existsSync, mkdirSync, readFileSync, readdirSync, statSync, writeFileSync } from 'node:fs';
 import { dirname, isAbsolute, relative, resolve } from 'node:path';
-import { spawnSync } from 'node:child_process';
+import { internalServiceLockfile } from './internal-service-lockfile.mjs';
 import { fileURLToPath } from 'node:url';
 
 const projectRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const outputArgument = process.argv[2] === '--' ? process.argv[3] : process.argv[2];
 const internalNpmRegistry = 'http://central.jaf.cmbchina.cn/artifactory/api/npm/group-npm/';
 const deploymentPnpmVersion = '10.33.0';
-// 部署包必须基于行内制品库解析，避免宽版本范围被公网解析到行内不存在的版本。
-const lockfileRegistry = process.env.UI_AGENT_LOCKFILE_REGISTRY ?? internalNpmRegistry;
+const servicePaths = ['apps/agent-service', 'packages/agent-runtime', 'packages/contracts'];
+// Validate before creating output. Export never invokes a package manager/network.
+const deploymentLockfile = internalServiceLockfile(
+  readFileSync(resolve(projectRoot, 'pnpm-lock.yaml'), 'utf8'),
+  Object.fromEntries(servicePaths.map(path => [path, JSON.parse(readFileSync(resolve(projectRoot, path, 'package.json'), 'utf8'))]))
+);
 
 if (!outputArgument) {
   throw new Error('请指定一个空目录，例如：pnpm export:internal-service -- ../ui-agent-service');
@@ -101,22 +105,9 @@ writeFileSync(
 
 writeFileSync(resolve(outputDirectory, 'apps/agent-service/.env.example'), `HOST=127.0.0.1\nPORT=8787\nAUTH_MODE=development\nMODEL_MODE=remote\nMODEL_PROVIDER=deepseek\nMODEL_BASE_URL=https://api.deepseek.com\nMODEL_API_KEY=\nMODEL_NAME=deepseek-v4-flash\n`);
 
-const npxCommand = process.platform === 'win32' ? 'npx.cmd' : 'npx';
-const lockfileResult = spawnSync(
-  npxCommand,
-  ['--yes', `pnpm@${deploymentPnpmVersion}`, 'install', '--lockfile-only', '--ignore-scripts'],
-  {
-    cwd: outputDirectory,
-    encoding: 'utf8',
-    stdio: 'pipe',
-    env: { ...process.env, npm_config_registry: lockfileRegistry }
-  }
-);
-if (lockfileResult.status !== 0) {
-  rmSync(outputDirectory, { recursive: true, force: true });
-  throw new Error(`无法生成服务端专用 pnpm-lock.yaml：${lockfileResult.stderr || lockfileResult.stdout}`);
-}
+writeFileSync(resolve(outputDirectory, 'pnpm-lock.yaml'), deploymentLockfile);
 
 writeFileSync(resolve(outputDirectory, 'README.md'), `# UI Agent Service - Internal Deployment Source\n\n该目录由 UIAgent 主仓库自动生成，是独立的服务端部署工程。它不携带插件、Demo、测试或开发依赖；Dockerfile 是唯一的构建入口。\n\n## 本地调试\n\n\`\`\`bash\nnpx --yes pnpm@${deploymentPnpmVersion} install\ncp apps/agent-service/.env.example apps/agent-service/.env\nnpx --yes pnpm@${deploymentPnpmVersion} dev\n\`\`\`\n\n使用 \`npx pnpm@${deploymentPnpmVersion}\` 可避免本机全局 pnpm 或 Corepack 版本干扰。\n\n## 内部流水线\n\n- 构建引擎：Node.js 22.9.0\n- 自动化编译脚本：\`test -f Dockerfile && test -f pnpm-lock.yaml\`\n- 容器制品发布步骤：使用根目录 \`Dockerfile\` 构建并发布镜像\n- 不要在流水线宿主机执行 \`pnpm install\`、\`tsc\` 或测试命令\n\nDockerfile 使用行内 npm 制品库安装固定的 \`pnpm@${deploymentPnpmVersion}\` 与运行时依赖；不会使用 Corepack。\n\n## 服务单元\n\n配置监听端口 \`8787\`、HTTP 健康检查路径 \`/health\`，并通过平台环境变量注入模型、鉴权、CORS 等配置。\n\n环境文件、密钥、日志和工作区数据均不应提交。每次修改主仓库的服务端依赖后，请重新执行导出命令生成新的部署仓库。\n`);
 
-console.log(`已生成内部服务端独立部署包：${outputDirectory}`);
+appendFileSync(resolve(outputDirectory, 'README.md'), '\n## 导出与依赖预检\n\n导出是离线操作，复用主仓库锁文件的精确版本，不访问 npm 源。未引用的底层包元数据保留，不会额外安装前端依赖。只有行内预检和流水线安装需要网络；导出成功不代表锁定版本在行内可下载。依赖变更后请更新主仓库锁文件，并在行内执行 `npm run check:internal-deploy`（主仓库命令）。\n');
+console.log(`已离线生成内部服务端独立部署包：${outputDirectory}`);

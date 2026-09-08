@@ -544,7 +544,11 @@ export const liveObservationNodeSchema = z.object({
   styles: z.object({
     display: z.string(), position: z.string(), overflowX: z.string(), overflowY: z.string(),
     visibility: z.string(), opacity: z.string(), flexDirection: z.string(), gap: z.string(),
-    gridTemplateColumns: z.string(), gridTemplateRows: z.string(), font: z.string(), lineHeight: z.string()
+    gridTemplateColumns: z.string(), gridTemplateRows: z.string(), font: z.string(), lineHeight: z.string(),
+    // Optional for older extensions; absent values are not evidence of a match.
+    backgroundColor: z.string().optional(), backgroundImage: z.string().optional(),
+    color: z.string().optional(), borderColor: z.string().optional(),
+    borderRadius: z.string().optional(), boxShadow: z.string().optional()
   }),
   clippingAncestors: z.array(z.object({
     sourceId: z.string().min(1).max(100).optional(), tag: z.string().min(1).max(80),

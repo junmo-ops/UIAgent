@@ -19,7 +19,6 @@ function run(command, args, cwd) {
     env: {
       ...process.env,
       INTERNAL_NPM_REGISTRY: registry,
-      UI_AGENT_LOCKFILE_REGISTRY: registry,
       npm_config_registry: registry
     }
   });

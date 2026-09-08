@@ -51,6 +51,8 @@ const clineSourceRules = [
   '需要在文件开头、末尾或明确锚点旁插入内容时使用 apply_patch，不要为了追加内容反复寻找唯一的文件尾字符串。',
   'inspect_element 会返回目标、祖先和兄弟节点的布局上下文（捕获时矩形与关键计算样式）、domText 和 styleClasses。必须用布局上下文理解视觉关系；domText 只证明文字存在于源码，不能证明渲染后可见。原始规则模式需要了解规则时，先 search_text/read_file 定位只读 author.css；冻结模式用 read_style_rule，不要连续切片读取 snapshot.css。',
   '需要检查多个元素或样式时，优先使用 inspect_elements 和 read_style_rules 批量读取，避免逐个调用消耗迭代次数。',
+  '修改视觉属性前检查 inspect 返回的 inlineStyle、目标及子元素的实际绘制规则和 CSS 变量引用。普通行内声明优先于任意普通样式表选择器；增加 class 数量或把规则放到文件末尾不能覆盖它。原始规则模式仍只写 author-overrides.css：需要覆盖普通行内声明时，可以对已确认目标的具体属性或自定义属性使用局部 !important；不要全局加 !important。行内本身为 !important 时不能宣称普通覆盖层已生效。背景可能由子元素或伪元素绘制，不能假设一定在容器自身。',
+  '颜色、背景、边框等样式需求必须把可测量的样式目标列入 renderConstraintIndexes，并将实际绘制元素加入 verificationSourceIds。浏览器观察包含 backgroundColor、backgroundImage、color、borderColor、borderRadius、boxShadow；只有最终计算样式证据才能证明覆盖生效，捕获布局和 CSS 字符串不能证明。未采集的状态或伪元素不得宣称验证通过。',
   '先用一次结构化查询取得候选元素，再一次批量 inspect 取得目标、父级和同级上下文；不得为同一语义目标连续搜索不同关键词来猜测层级。相同参数的读取或空间校验不会产生新证据，禁止重复调用。',
   '新增可见控件前，必须批量检查目标容器和相邻同类控件的布局；优先 clone 相邻同类结构。冻结模式可使用 insert_element 的 styleReferenceSourceId 复制同类冻结样式；原始规则模式应复用经 author.css 证实的现有 class，必要时在 author-overrides.css 为新 sourceId 增加局部样式。不得假设 flex、间距或垂直居中的工具类存在。',
   '新增控件前必须记录父容器宽高、布局方向、换行策略和兄弟元素矩形；新增后可再次批量 inspect 同一容器核对源码结构和预期容器关系。inspect 返回的是捕获或源码布局上下文，不能证明候选页没有换行、溢出、遮挡或裁切；这类真实渲染结论只能由后续浏览器几何验证产生，finish 前不得声称已经验证。若空间不足，必须调整为可容纳的布局方案后再 finish，不能仅以 HTML/CSS 存在作为通过。',
@@ -219,7 +221,8 @@ export class ClineCodingAgentAdapter implements CodingAgentPort {
       baseUrl: this.options.baseUrl,
       maxIterations: 4,
       systemPrompt: [
-        '你是网页副本的几何验证器。只能根据调用中提供的结构化需求、真实浏览器几何和就绪状态作出结论。',
+        '你是网页副本的几何与样式验证器。只能根据调用中提供的结构化需求、真实浏览器几何、计算样式和就绪状态作出结论。',
+        '颜色或背景约束必须检查对应绘制元素的 styles.backgroundColor/backgroundImage/color 等实际计算值，不能以尺寸正确、元素存在或源码已写入代替。透明背景不能证明子元素或伪元素的背景颜色；缺少绘制元素数据时返回 unknown。旧插件未提供样式字段时也返回 unknown。',
         '当前模型没有图片输入。不得声称看过截图，也不得把截图、DOM 字符串或源码存在当成视觉通过。',
         '逐一判断每个 source 和被标为可渲染验证的 constraint。source 项可以通过“目标按需求已删除”；缺失的元素本身不是失败。未列入 renderConstraintIndexes 的约束是修改范围说明，不要为它们生成检查结果。',
         '若几何数据不足以证明某项，标记 unknown；若可证伪则标记 failed。不要猜测页面未提供的层级、样式或位置。',
@@ -534,7 +537,7 @@ export class ClineCodingAgentAdapter implements CodingAgentPort {
           renderConstraintIndexes: {
             type: 'array', minItems: 1, maxItems: 20,
             items: { type: 'integer', minimum: 1 },
-            description: 'visualConstraints 中可由当前浏览器几何直接验证的约束序号（从 1 开始）。每个候选至少列出一项；仅作为修改范围说明的约束不要列入。'
+            description: 'visualConstraints 中可由当前浏览器几何或计算样式直接验证的约束序号（从 1 开始）。颜色等样式目标也必须列入；每个候选至少列出一项；仅作为修改范围说明的约束不要列入。'
           },
           layoutScope: { type: 'string', enum: ['selected-context', 'explicit-container', 'global'] },
           ambiguityAssessment: stringProperty('说明为何当前信息足以得到唯一方案；不得用来掩盖未解决歧义。')

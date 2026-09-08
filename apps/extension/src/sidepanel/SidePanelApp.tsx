@@ -2,6 +2,7 @@ import { lazy, Suspense, useEffect, useRef, useState } from 'react';
 import { Alert, Button, Input, Modal, Spin, Switch, Tooltip } from 'antd';
 import type { TextAreaRef } from 'antd/es/input/TextArea';
 import {
+  type SourceTurnRequest,
   PROTOCOL_VERSION,
   assistantTurnRequestSchema,
   assistantTurnResponseSchema,
@@ -412,7 +413,8 @@ export function SidePanelApp() {
         finalOutcome.instruction,
         sourceWorkspace,
         finalOutcome.targetScope === 'selection' ? selection?.selected.sourceId : undefined,
-        turnId
+        turnId,
+        { replyToClarificationId, clarificationOptionId }
       );
     } catch (error) {
       fail(error);
@@ -532,7 +534,8 @@ export function SidePanelApp() {
     text: string,
     workspace: ActiveWorkspace,
     sourceId?: string,
-    turnId = crypto.randomUUID()
+    turnId = crypto.randomUUID(),
+    clarificationReply: Pick<SourceTurnRequest, 'replyToClarificationId' | 'clarificationOptionId'> = {}
   ) => {
     setSnapshotBusy(true);
     let settled = false;
@@ -555,7 +558,8 @@ export function SidePanelApp() {
         turnId,
         traceId: crypto.randomUUID(),
         instruction: text,
-        sourceId
+        sourceId,
+        ...clarificationReply
       });
       setSourceProgress({
         workspaceId: workspace.workspaceId,
