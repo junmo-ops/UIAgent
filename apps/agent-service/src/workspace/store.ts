@@ -659,7 +659,7 @@ function compactElementSource(outerHtml: string, maxHtmlChars = 4_000): string {
   )].slice(0, 40);
   return [
     `domText: ${JSON.stringify(domText)}`,
-    'visibilityNote: domText 仅表示源码中存在文字，不代表元素在渲染后可见；请使用 validate_workspace 检查静态裁剪风险。',
+    'visibilityNote: domText 仅表示源码中存在文字，不代表元素在渲染后可见；完成时的内置工作区校验会检查静态裁剪风险。',
     `rawTextSegments: ${JSON.stringify(rawTextSegments)}`,
     `styleClasses: ${JSON.stringify(styleClasses)}`,
     `compactHtml: ${compactHtml}`
@@ -1843,22 +1843,25 @@ export class SourceWorkspaceStore {
         const content = readableContent(path);
         const matches: Array<{ index: number; contextStart: number; contextEnd: number }> = [];
         let offset = 0;
-        while (matches.length < 10) {
+        while (matches.length < 4) {
           const index = content.indexOf(query, offset);
           if (index < 0) break;
           matches.push({
             index,
-            contextStart: Math.max(0, index - 600),
-            contextEnd: Math.min(content.length, index + query.length + 600)
+            contextStart: Math.max(0, index - 250),
+            contextEnd: Math.min(content.length, index + query.length + 250)
           });
           offset = index + Math.max(1, query.length);
         }
-        return matches.length
+        const result = matches.length
           ? matches.map((item, matchIndex) => [
             `${path} 匹配 ${matchIndex + 1}：命中字符 ${item.index}，建议读取 startChar=${item.contextStart}, endChar=${item.contextEnd}`,
             content.slice(item.contextStart, item.contextEnd)
           ].join('\n')).join('\n\n')
           : `${path} 中没有找到“${query}”`;
+        return result.length <= 4_000
+          ? result
+          : `${result.slice(0, 4_000)}\n[搜索结果已截断，请按命中位置定向读取]`;
       },
       readFile: async (path, startLine = 1, endLine, startChar, endChar) => {
         const content = readableContent(path);
@@ -1936,8 +1939,8 @@ export class SourceWorkspaceStore {
           const className = symbol.replace(/^\./, '');
           const matches = sources.flatMap(source => {
             const values = variable
-              ? cssSnippetsForSymbol(source.content, symbol)
-              : cssRulesForClass(source.content, className).slice(0, 6);
+              ? cssSnippetsForSymbol(source.content, symbol, 4)
+              : cssRulesForClass(source.content, className).slice(0, 4);
             return values.map(value => `${source.path}: ${value}`);
           });
           return matches.length
@@ -1945,9 +1948,9 @@ export class SourceWorkspaceStore {
             : `${symbol}：未找到可读取的样式定义或引用`;
         });
         const result = sections.join('\n\n---\n\n');
-        return result.length <= 12_000
+        return result.length <= 4_000
           ? result
-          : `[样式查询已按总预算截断] 原始 ${result.length} 字符，仅返回前 12000 字符。\n\n${result.slice(0, 12_000)}`;
+          : `[样式查询已按总预算截断] 原始 ${result.length} 字符，仅返回前 4000 字符。\n\n${result.slice(0, 4_000)}`;
       },
       readStyleRule: async rawClassName => {
         const className = rawClassName.replace(/^\./, '');

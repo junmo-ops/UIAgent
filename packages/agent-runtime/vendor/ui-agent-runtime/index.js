@@ -59,9 +59,10 @@ export class Agent {
     let emptyContinuations = 0;
     const usage = {};
     const runtimeStarted = Date.now();
-    const diagnostics = { version: 1, runtimeRevision: '2026-09-08-requirement-review-v7',
+    const diagnostics = { version: 1, runtimeRevision: '2026-09-09-performance-v8',
       countingBasis: 'streamText invocations; SDK internal network retries are not counted',
-      maxIterations: this.config.maxIterations ?? 12, requiredCompletionTool: this.config.completionPolicy?.requireCompletionTool === true,
+      maxIterations: this.config.maxIterations ?? 12, maxOutputTokens: this.config.maxOutputTokens,
+      requiredCompletionTool: this.config.completionPolicy?.requireCompletionTool === true,
       calls: [], continuationCount: 0 };
     let currentCall;
     const errorInfo = error => {
@@ -129,10 +130,12 @@ export class Agent {
           status: 'running', inputMessageCount: messages.length, availableTools: Object.keys(tools), outputTextChars: 0, tools: [] };
         diagnostics.calls.push(currentCall);
         this.emit({ type: 'model-call-updated', call: { modelCall: iterations, startedAt: currentCall.startedAt, status: 'running' } });
-        let reasoning = '', reasoningTruncated = false, lastReasoningUpdate = 0;
+        let reasoning = '', reasoningTruncated = false;
         let calls = 0, inputErrors = 0, text = '';
+        const reportedToolErrorIds = new Set();
         const stream = streamText({ model: provider.chatModel(this.config.modelId),
-          system: this.config.systemPrompt, messages, tools, stopWhen: stepCountIs(1), abortSignal: controller.signal });
+          system: this.config.systemPrompt, messages, tools, maxOutputTokens: this.config.maxOutputTokens,
+          stopWhen: stepCountIs(1), abortSignal: controller.signal });
         for await (const event of stream.fullStream) {
           if (currentCall.firstOutputMs === undefined && ['text-delta', 'reasoning-delta', 'tool-call'].includes(event.type)) {
             currentCall.firstOutputMs = Date.now() - callStarted;
@@ -145,10 +148,6 @@ export class Agent {
             reasoning = (reasoning + delta).slice(0, 12000);
             currentCall.reasoning = reasoning;
             currentCall.reasoningTruncated = reasoningTruncated;
-            if (Date.now() - lastReasoningUpdate > 500) {
-              lastReasoningUpdate = Date.now();
-              this.emit({ type: 'model-call-updated', call: { modelCall: iterations, startedAt: currentCall.startedAt, status: 'running', reasoning, reasoningTruncated } });
-            }
           }
           if (event.type === 'text-delta') {
             const delta = event.text ?? event.textDelta ?? '';
@@ -157,6 +156,18 @@ export class Agent {
             this.emit({ type: 'assistant-text-delta', iteration: iterations, text: delta, accumulatedText: outputText });
           }
           if (event.type === 'tool-call') {
+            if (event.invalid) {
+              inputErrors++;
+              if (event.toolCallId) reportedToolErrorIds.add(event.toolCallId);
+              const error = errorInfo(event.error ?? new Error('Invalid tool call'));
+              lastToolError = error.message ?? 'Invalid tool call';
+              (currentCall.toolInputErrors ??= []).push({
+                ...(event.toolName ? { name: sanitizeDiagnosticText(event.toolName) } : {}),
+                ...(event.toolCallId ? { toolCallId: sanitizeDiagnosticText(event.toolCallId) } : {}),
+                ...(error.message ? { message: error.message } : {})
+              });
+              continue;
+            }
             calls++;
             (currentCall.toolCalls ??= []).push({
               ...(event.toolName ? { name: sanitizeDiagnosticText(event.toolName) } : {}),
@@ -165,12 +176,30 @@ export class Agent {
             this.emit({ type: 'tool-started', iteration: iterations, toolCall: event });
           }
           if (event.type === 'tool-input-error') {
-            inputErrors++;
-            (currentCall.toolInputErrors ??= []).push({
-              ...(event.toolName ? { name: sanitizeDiagnosticText(event.toolName) } : {}),
-              ...(event.toolCallId ? { toolCallId: sanitizeDiagnosticText(event.toolCallId) } : {}),
-              ...(event.errorText ? { message: sanitizeDiagnosticText(event.errorText) } : {})
-            });
+            if (!event.toolCallId || !reportedToolErrorIds.has(event.toolCallId)) {
+              inputErrors++;
+              if (event.toolCallId) reportedToolErrorIds.add(event.toolCallId);
+              if (event.errorText) lastToolError = sanitizeDiagnosticText(event.errorText);
+              (currentCall.toolInputErrors ??= []).push({
+                ...(event.toolName ? { name: sanitizeDiagnosticText(event.toolName) } : {}),
+                ...(event.toolCallId ? { toolCallId: sanitizeDiagnosticText(event.toolCallId) } : {}),
+                ...(event.errorText ? { message: sanitizeDiagnosticText(event.errorText) } : {})
+              });
+            }
+          }
+          if (event.type === 'tool-error') {
+            if (!event.toolCallId || !reportedToolErrorIds.has(event.toolCallId)) {
+              inputErrors++;
+              if (event.toolCallId) reportedToolErrorIds.add(event.toolCallId);
+              const error = errorInfo(event.error);
+              lastToolError = error.message ?? lastToolError;
+              (currentCall.toolInputErrors ??= []).push({
+                ...(event.toolName ? { name: sanitizeDiagnosticText(event.toolName) } : {}),
+                ...(event.toolCallId ? { toolCallId: sanitizeDiagnosticText(event.toolCallId) } : {}),
+                ...(error.message ? { message: error.message } : {})
+              });
+            }
+            this.emit({ type: 'tool-finished', iteration: iterations, toolCall: event });
           }
           if (event.type === 'tool-result') this.emit({ type: 'tool-finished', iteration: iterations, toolCall: event });
         }
@@ -187,7 +216,7 @@ export class Agent {
         if (typeof reasoningTokens === 'number') currentCall.usage.reasoningTokens = reasoningTokens;
         if (typeof cachedInputTokens === 'number') currentCall.usage.cachedInputTokens = cachedInputTokens;
         this.emit({ type: 'model-call-updated', call: { modelCall: iterations, startedAt: currentCall.startedAt,
-          status: 'completed', durationMs: currentCall.durationMs, usage: currentCall.usage, tools: currentCall.tools, reasoning, reasoningTruncated } });
+          status: 'completed', durationMs: currentCall.durationMs, usage: currentCall.usage, tools: currentCall.tools } });
         for (const [key, value] of Object.entries(currentCall.usage)) usage[key] = (usage[key] ?? 0) + value;
         currentCall.toolCallCount = calls;
         currentCall.toolInputErrorCount = inputErrors;
@@ -198,7 +227,7 @@ export class Agent {
           if (!outputText && typeof completionOutput === 'string') outputText = completionOutput;
           break;
         }
-        if (['error', 'content-filter', 'length'].includes(finishReason)) throw new Error('Model stopped: ' + finishReason);
+        if (['error', 'content-filter'].includes(finishReason)) throw new Error('Model stopped: ' + finishReason);
         if (!currentCall.executedToolCallCount) {
           const attemptedToolWithoutExecution = calls + inputErrors > 0;
           if (!required) {

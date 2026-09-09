@@ -2,14 +2,6 @@ import type { AgentRunResult, AgentTool, AgentToolContext } from '../../vendor/u
 import { describe, expect, it } from 'vitest';
 import { PROTOCOL_VERSION, type SourceTurnRequest } from '@ui-agent/contracts';
 import type { CodingAgentEvent, CodingWorkspaceTools } from '../core/coding-agent-port';
-import type { RequirementReview } from '../source-editing/requirement-review';
-
-const completedReview: { requirementReview: RequirementReview } = { requirementReview: {
-  originalRequestReviewed: true, missingRequirements: [], checks: [
-    { constraintIndex: 1, status: 'implemented', evidence: '测试工作区目标节点实现' },
-    { constraintIndex: 2, status: 'implemented', evidence: '测试工作区仅对目标应用修改' }
-  ]
-} };
 import {
   ClineCodingAgentAdapter,
   clineCodingAgentFromEnvironment,
@@ -44,7 +36,7 @@ function result(iterations: number, status: AgentRunResult['status'] = 'complete
 function findTool<TInput>(
   config: ClineAgentFactoryInput,
   name: string
-): AgentTool<TInput & Partial<typeof completedReview>, string> {
+): AgentTool<TInput, string> {
   const tool = config.tools.find(item => item.name === name);
   if (!tool) throw new Error(`tool not found: ${name}`);
   return tool as AgentTool<TInput, string>;
@@ -57,14 +49,12 @@ async function declareIntent(config: ClineAgentFactoryInput, iteration: number):
     verificationSourceIds: string[];
     visualConstraints: string[];
     renderConstraintIndexes: number[];
-    ambiguityAssessment: string;
   }>(config, 'declare_intent').execute({
     summary: '按用户要求修改选中元素',
     relevantSourceIds: ['source-0'],
     verificationSourceIds: ['source-0'],
     visualConstraints: ['目标元素可见且未被裁切', '保持无关结构和样式不变'],
-    renderConstraintIndexes: [1],
-    ambiguityAssessment: '目标元素和修改内容已经明确'
+    renderConstraintIndexes: [1]
   }, context(iteration));
 }
 
@@ -222,22 +212,20 @@ describe('ClineCodingAgentAdapter', () => {
           configuredMaxIterations = config.maxIterations;
           const replaceTool = findTool<{ path: string; search: string; replace: string }>(config, 'replace_text');
           expect(replaceTool.isAvailable).toBeUndefined();
-          expect(findTool<Record<string, never>>(config, 'list_files').isAvailable).toBeUndefined();
-          await findTool<Record<string, never>>(config, 'list_files').execute({}, context(1));
           await findTool<{ sourceId: string }>(config, 'inspect_element').execute(
             { sourceId: 'source-0' },
-            context(2)
+            context(1)
           );
-          await declareIntent(config, 3);
+          await declareIntent(config, 2);
           await replaceTool.execute(
             { path: 'index.html', search: '查询', replace: '确定' },
-            context(4)
+            context(3)
           );
           await findTool<{ summary: string }>(config, 'finish').execute(
-            { summary: '已修改按钮文案', ...completedReview },
-            context(5)
+            { summary: '已修改按钮文案' },
+            context(4)
           );
-          return result(5);
+          return result(4);
         }
       })
     });
@@ -250,7 +238,6 @@ describe('ClineCodingAgentAdapter', () => {
 
     expect(configuredTools).toEqual([
       'declare_intent',
-      'list_files',
       'query_workspace_structure',
       'search_text',
       'read_file',
@@ -273,7 +260,6 @@ describe('ClineCodingAgentAdapter', () => {
       'move_element',
       'clone_element',
       'validate_spatial_scope',
-      'validate_workspace',
       'finish',
       'clarify'
     ]);
@@ -283,19 +269,18 @@ describe('ClineCodingAgentAdapter', () => {
     expect(run.response).toMatchObject({
       kind: 'completed',
       revision: 2,
-      modelCalls: 5,
+      modelCalls: 4,
       toolCalls: 4
     });
     expect(run.checkpoint).toMatchObject({
       adapterId: 'cline-sdk',
       status: 'completed',
-      modelCalls: 5,
+      modelCalls: 4,
       toolCalls: 4,
-      stepCount: 5,
+      stepCount: 4,
       lastAction: 'finish'
     });
     expect(run.steps.map(step => step.action)).toEqual([
-      'list_files',
       'inspect_element',
       'declare_intent',
       'replace_text',
@@ -309,7 +294,7 @@ describe('ClineCodingAgentAdapter', () => {
     expect(events.at(-1)?.type).toBe('coding-agent.turn.completed');
   });
 
-  it('requires compact inspection before a source can be expanded and bounds batch inspection output', async () => {
+  it('allows direct full inspection and bounds batch inspection output', async () => {
     const workspace = workspaceTools();
     workspace.tools.inspectElement = async () => 'x'.repeat(5_000);
     const adapter = new ClineCodingAgentAdapter({
@@ -320,7 +305,7 @@ describe('ClineCodingAgentAdapter', () => {
         run: async () => {
           const inspect = findTool<{ sourceId: string; detail?: 'compact' | 'full' }>(config, 'inspect_element');
           const firstFull = await inspect.execute({ sourceId: 'source-0', detail: 'full' }, context(1));
-          expect(firstFull).toContain('[展开条件]');
+          expect(firstFull).toHaveLength(5_000);
           expect(await inspect.execute({ sourceId: 'source-0' }, context(2))).toHaveLength(5_000);
           expect(await inspect.execute({ sourceId: 'source-0', detail: 'full' }, context(3))).toHaveLength(5_000);
 
@@ -336,7 +321,6 @@ describe('ClineCodingAgentAdapter', () => {
             evidence: string;
           }>(config, 'finish').execute({
             summary: '测试完成',
-            ...completedReview,
             outcome: 'already_satisfied',
             evidence: '已对紧凑、展开和批量读取预算进行源码工具验证。'
           }, context(6));
@@ -362,23 +346,21 @@ describe('ClineCodingAgentAdapter', () => {
       modelName: 'test-model',
       factory: config => ({
         run: async () => {
-          await findTool<Record<string, never>>(config, 'list_files').execute({}, context(1));
           await findTool<{ sourceId: string }>(config, 'inspect_element').execute(
             { sourceId: 'source-0' },
-            context(2)
+            context(1)
           );
-          await declareIntent(config, 3);
+          await declareIntent(config, 2);
           await findTool<{
             summary: string;
             outcome: 'already_satisfied';
             evidence: string;
           }>(config, 'finish').execute({
             summary: '按钮及选项菜单已经存在',
-            ...completedReview,
             outcome: 'already_satisfied',
             evidence: '已读取当前按钮、菜单选项和声明式交互结构，并完成工作区校验。'
-          }, context(4));
-          return result(4);
+          }, context(3));
+          return result(3);
         }
       })
     });
@@ -415,7 +397,7 @@ describe('ClineCodingAgentAdapter', () => {
         await declareIntent(config, 4);
         await findTool<any>(config, 'replace_text').execute({ path: 'index.html', search: '查询', replace: '确定' }, context(5));
         expect(await findTool<any>(config, 'inspect_element').execute({ sourceId: 'source-0' }, context(6))).toContain('确定');
-        await findTool<any>(config, 'finish').execute({ summary: '完成', ...completedReview }, context(7));
+        await findTool<any>(config, 'finish').execute({ summary: '完成' }, context(7));
         return result(7);
       } })
     });
@@ -475,7 +457,7 @@ describe('ClineCodingAgentAdapter', () => {
             edits: [{ kind: 'insert', position: 'end', text: '\n.dropdown{position:absolute}' }]
           }, context(2));
           await findTool<{ summary: string }>(config, 'finish').execute(
-            { summary: '已增加下拉样式', ...completedReview },
+            { summary: '已增加下拉样式' },
             context(3)
           );
           return result(3);
@@ -515,7 +497,7 @@ describe('ClineCodingAgentAdapter', () => {
             targetSourceId: 'source-49'
           }, context(3));
           await findTool<{ summary: string }>(config, 'finish').execute(
-            { summary: '已移动筛选项', ...completedReview },
+            { summary: '已移动筛选项' },
             context(4)
           );
           return result(4);
@@ -648,7 +630,7 @@ describe('ClineCodingAgentAdapter', () => {
           }, context(2));
           try {
             await findTool<{ summary: string }>(config, 'finish').execute(
-              { summary: '新增提示', ...completedReview },
+              { summary: '新增提示' },
               context(3)
             );
           } catch (error) {
@@ -666,7 +648,7 @@ describe('ClineCodingAgentAdapter', () => {
             reason: '提示位于选中按钮内部'
           }, context(4));
           await findTool<{ summary: string }>(config, 'finish').execute(
-            { summary: '已在选中按钮内新增提示', ...completedReview },
+            { summary: '已在选中按钮内新增提示' },
             context(5)
           );
           return result(5);

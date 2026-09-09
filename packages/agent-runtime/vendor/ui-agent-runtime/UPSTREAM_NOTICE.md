@@ -25,12 +25,14 @@ This is a local implementation change, not an upstream Cline SDK update.
 an allowlisted request identifier and an allowlisted response summary. Request
 bodies, URLs, credentials and arbitrary response headers remain excluded.
 
-2026-09-08: Tool availability is now reevaluated before every model request.
-UIAgent uses this generic phase mechanism to expose mutation and completion
-tools only after structured intent has been declared.
-
 2026-09-08: The local runtime now records the per-call available-tool set so
-long runs can be diagnosed by phase. UIAgent's adapter limits pre-intent
-research, requires a compact element inspection before an expanded one, and
-caps batch inspection and style-symbol queries. These are local orchestration
-and context-budget changes, not an upstream Cline SDK update.
+long runs can be diagnosed. UIAgent's adapter caps batch inspection and
+style-symbol results. These are local orchestration and context-budget changes,
+not an upstream Cline SDK update.
+
+2026-09-09: Per-call model output is bounded by a configurable token limit.
+Invalid tool calls and tool errors are recorded explicitly, while raw reasoning
+remains available in final server diagnostics instead of being sent repeatedly
+through the progress API. The adapter also supplies compact selected-element
+context with the initial request and uses a shorter planning/completion
+protocol to reduce model round trips.

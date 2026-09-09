@@ -48,6 +48,7 @@ export interface AgentRunDiagnostics {
   runtimeRevision: string;
   countingBasis?: string;
   maxIterations: number;
+  maxOutputTokens?: number;
   requiredCompletionTool: boolean;
   continuationCount: number;
   completionTool?: string;
@@ -96,6 +97,7 @@ export interface AgentOptions {
   systemPrompt?: string;
   tools?: readonly AgentTool<any, any>[];
   maxIterations?: number;
+  maxOutputTokens?: number;
   toolExecution?: 'sequential' | 'parallel';
   completionPolicy?: { requireCompletionTool?: boolean };
   [key: string]: unknown;

@@ -103,7 +103,7 @@ writeFileSync(
     .replace('mkdir -p /opt/deployments/data/source-workspaces /data/logs', 'chmod -R 777 /opt/deployments \\\n  && mkdir -p /opt/deployments/data/source-workspaces /opt/deployments/data/logs'),
 );
 
-writeFileSync(resolve(outputDirectory, 'apps/agent-service/.env.example'), `HOST=127.0.0.1\nPORT=8787\nAUTH_MODE=development\nMODEL_MODE=remote\nMODEL_PROVIDER=deepseek\nMODEL_BASE_URL=https://api.deepseek.com\nMODEL_API_KEY=\nMODEL_NAME=deepseek-v4-flash\n`);
+writeFileSync(resolve(outputDirectory, 'apps/agent-service/.env.example'), `HOST=127.0.0.1\nPORT=8787\nAUTH_MODE=development\nMODEL_MODE=remote\nMODEL_PROVIDER=deepseek\nMODEL_BASE_URL=https://api.deepseek.com\nMODEL_API_KEY=\nMODEL_NAME=deepseek-v4-flash\n# CLINE_MAX_ITERATIONS=45\n# CLINE_MAX_OUTPUT_TOKENS=8192\n`);
 
 writeFileSync(resolve(outputDirectory, 'pnpm-lock.yaml'), deploymentLockfile);
 

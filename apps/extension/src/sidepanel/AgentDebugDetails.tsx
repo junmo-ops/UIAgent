@@ -20,10 +20,6 @@ export function AgentDebugDetails({ progress }: { progress: SourceTurnProgress }
         <summary>第 {call.modelCall} 轮 · {call.status === 'running' ? (running ? '进行中' : '已结束，未返回统计') : call.status === 'failed' ? '失败' : '完成'} · {(ms / 1000).toFixed(1)} 秒</summary>
         <p>输入 {call.usage?.inputTokens ?? '未返回'} · 输出 {call.usage?.outputTokens ?? '未返回'} · 推理 {call.usage?.reasoningTokens ?? '未返回'} token</p>
         {call.tools?.map((tool, index) => <p key={index}>{tool.name} · {tool.status} · {tool.durationMs ?? '未返回'} ms</p>)}
-        <details>
-          <summary>接口返回的推理内容{call.reasoningTruncated ? '（已截断）' : ''}</summary>
-          <pre style={{ whiteSpace: 'pre-wrap', overflowWrap: 'anywhere', maxHeight: 240, overflow: 'auto', fontSize: 12 }}>{call.reasoning || '接口未返回推理文本。'}</pre>
-        </details>
       </details>;
     })}
   </details>;

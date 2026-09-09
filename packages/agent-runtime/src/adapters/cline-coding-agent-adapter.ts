@@ -26,7 +26,6 @@ import {
   type GeometryVerificationResult
 } from '../core/coding-agent-port';
 import { CONTROLLED_INTERACTION_INSTRUCTIONS } from '../source-editing/controlled-interaction-instructions';
-import { validateRequirementReview, type RequirementReview } from '../source-editing/requirement-review';
 
 const objectSchema = (
   properties: Record<string, unknown>,
@@ -44,46 +43,23 @@ const stringProperty = (description: string): Record<string, unknown> => ({
 });
 
 const clineSourceRules = [
-  '已提供 selectedSourceId 时先 inspect_element 获取准确节点及上下文，无需把 sourceId 当语义关键词搜索。结构查询用于寻找未知节点。',
-  'visualConstraints 必须完整覆盖原始请求及澄清中的文案、布局、初始状态、打开和关闭等交互要求。能力限制不能成为删除需求的理由。finish 前重新阅读原始请求和 conversation，填写 requirementReview，逐项关联实现证据；发现声明时漏掉的要求必须补做并重新声明完整意图，或调用 clarify 确认范围。implemented 只表示有源码实现证据，不代表真实视觉或交互测试通过，禁止把源码推断当浏览器验证。',
-  '你是静态网页源码编辑 Agent。你只能使用本次会话显式提供的源码工具。',
-  '页面只用于 UI 需求示意，不需要真实接口、脚本或业务提交。',
-  '工作区包含 index.html、结构索引和样式文件。若 list_files 中存在 author.css 或 author-style-links.json，则当前使用原始规则模式：author.css 仅供读取和检索；author-style-links.json 仅记录可渲染、不可读取规则的外链，不能当作样式证据；视觉修改只能写入 author-overrides.css。snapshot.css 是 A 候选的冻结回退和布局事实，不得在该模式下修改。若两者都不存在，视觉修改写入 snapshot.css。',
-  '先调用 list_files；若没有明确 sourceId，必须先调用 query_workspace_structure 定位语义结构。只有结构化查询不足时才搜索或读取 outline.json，不要直接读取整个大文件。',
-  'index.html 保存页面结构。原始规则模式中，结构与文案修改 index.html、视觉修改 author-overrides.css；冻结模式中视觉修改 snapshot.css。outline.json 与 source-map.json 由系统维护，只能读取，不能修改。',
-  'replace_text 的 search 必须来自刚刚读取的源码，且应足够唯一；不要猜测源码。',
-  '需要在文件开头、末尾或明确锚点旁插入内容时使用 apply_patch，不要为了追加内容反复寻找唯一的文件尾字符串。',
-  'inspect_element 会返回目标、祖先和兄弟节点的布局上下文（捕获时矩形与关键计算样式）、domText 和 styleClasses。必须先使用 compact；只有 compact 明确不足时才能对同一 sourceId 使用 full。domText 只证明文字存在于源码，不能证明渲染后可见。了解 class 或 CSS 变量时优先使用 query_style_symbols，不要反复全文搜索或切片读取大 CSS。',
-  '需要检查多个元素时可使用 inspect_elements；该工具有整体输出预算，结果不足时只补查真正必要的单个元素。需要检查多个 class 或 CSS 变量时优先使用 query_style_symbols。',
-  '修改视觉属性前检查 inspect 返回的 inlineStyle、目标及子元素的实际绘制规则和 CSS 变量引用。普通行内声明优先于任意普通样式表选择器；增加 class 数量或把规则放到文件末尾不能覆盖它。原始规则模式仍只写 author-overrides.css：需要覆盖普通行内声明时，可以对已确认目标的具体属性或自定义属性使用局部 !important；不要全局加 !important。行内本身为 !important 时不能宣称普通覆盖层已生效。背景可能由子元素或伪元素绘制，不能假设一定在容器自身。',
-  '颜色、背景、边框等样式需求必须把可测量的样式目标列入 renderConstraintIndexes，并将实际绘制元素加入 verificationSourceIds。浏览器观察包含 backgroundColor、backgroundImage、color、borderColor、borderRadius、boxShadow；只有最终计算样式证据才能证明覆盖生效，捕获布局和 CSS 字符串不能证明。未采集的状态或伪元素不得宣称验证通过。',
-  '先用一次结构化查询取得候选元素，再一次批量 inspect 取得目标、父级和同级上下文；不得为同一语义目标连续搜索不同关键词来猜测层级。相同参数的读取或空间校验不会产生新证据，禁止重复调用。',
-  '新增可见控件前，必须批量检查目标容器和相邻同类控件的布局；优先 clone 相邻同类结构。冻结模式可使用 insert_element 的 styleReferenceSourceId 复制同类冻结样式；原始规则模式应复用经 author.css 证实的现有 class，必要时在 author-overrides.css 为新 sourceId 增加局部样式。不得假设 flex、间距或垂直居中的工具类存在。',
-  '新增控件前必须记录父容器宽高、布局方向、换行策略和兄弟元素矩形；新增后可再次批量 inspect 同一容器核对源码结构和预期容器关系。inspect 返回的是捕获或源码布局上下文，不能证明候选页没有换行、溢出、遮挡或裁切；这类真实渲染结论只能由后续浏览器几何验证产生，finish 前不得声称已经验证。若空间不足，必须调整为可容纳的布局方案后再 finish，不能仅以 HTML/CSS 存在作为通过。',
-  '移动已有元素必须使用 move_element，禁止用大段 replace_text 删除后重建或重排。',
-  '删除完整元素必须使用 remove_element(sourceId)，禁止读取或复制完整 outerHTML 后再用 replace_text 删除。',
-  '完整文本使用 set_element_text；属性增删使用 set_element_attributes；插入、包裹、解包和排序分别使用 insert_element、wrap_element、unwrap_element、reorder_children。',
-  '多个相关 DOM 修改优先使用 apply_dom_operations 原子批量执行；任一项失败会整体回滚。',
-  '新增与现有组件同款的结构时优先使用 clone_element，再用局部替换或 Patch 完成差异；不要手写复制整段组件源码。',
-  '同一个工具错误重复出现时必须更换策略；不得用重复读取和重复替换消耗迭代次数。',
-  '如果有 selectedSourceId，可用 inspect_element 读取该元素的紧凑源码。',
-  '空间定位优先级：用户明确指定页面、视口、弹窗、表格等容器时以该容器为准；否则所有“顶部、底部、左侧、右侧、中间、附近”等位置都必须以 selectedSourceId 或其最近语义祖先为锚点。',
-  '需求涉及选中元素的相邻组件时，只扩展到最近公共父容器。除非用户明确说页面、浏览器视口、全局、悬浮或固定，否则禁止把新增模块放到页面根节点或使用 position:fixed。',
-  '新增元素后必须调用 validate_spatial_scope，说明实际容器和新增顶层 sourceId；无法确定参照容器时调用 clarify，不得自行猜测全局位置。',
-  '执行前判断需求是否存在会显著影响最终视觉结果的歧义。若存在两个或以上合理方案，不得自行选择，必须 clarify；位置、范围、布局方式、参考样式或新增内容不明确都属于常见歧义。',
-  '澄清前可以读取必要的局部结构和父容器布局，但不要修改源码。问题只询问无法从源码确定的关键信息，并尽量提供 2-4 个互斥、具体的选项；低风险且结果唯一的局部修改不要反问。',
-  '任何源码写入前必须先调用 declare_intent，明确目标、现有相关 sourceId、验证所需 sourceId、视觉约束和歧义判断。不得搜索、推算或预填尚未创建的 sourceId；系统会在创建后自动把新节点加入验证范围。renderConstraintIndexes 只列出可以由当前浏览器几何直接证明的约束序号；“其他元素未受影响”这类需要修改前基线的约束应保留为修改范围，不作为当前渲染发布门槛。仍有多个合理结果时不要调用 declare_intent，直接 clarify。',
-  '如果请求包含 replyToClarificationId，应把当前 instruction 理解为用户对上一条澄清问题的回答，并结合 conversation 继续原需求，不要重复询问已经回答的信息。',
-  '优先复用已有结构和 class；新增同类组件时复制相邻源码结构，再修改必要内容。',
+  '你是静态网页源码编辑 Agent，只使用本次提供的源码工具。页面用于 UI 示意，不实现真实接口或业务提交。',
+  '输入已包含文件摘要；有 selectedElementContext 时直接使用，无需重复枚举文件、搜索或检查同一选中元素。没有目标上下文时先 query_workspace_structure，再按需 inspect_element。取得足够证据后立即修改，不要为了寻找更理想的 class、变量或示例继续扩展搜索。',
+  'index.html 保存结构和文案。存在 author.css 或 author-style-links.json 时，视觉修改只写 author-overrides.css，author.css 仅供查询，snapshot.css 不可修改；否则视觉修改写 snapshot.css。outline.json 和 source-map.json 只读。',
+  'inspect_element 默认返回目标、祖先、同级、布局和局部源码；只有缺少完成当前修改的具体信息时才使用 full。样式优先 query_style_symbols，避免全文搜索大 CSS。',
+  '修改前只需确认目标、最近相关容器和必要的相邻元素。新增同类组件优先复用现有结构和 class；没有合适结构时再增加局部 HTML/CSS。修改行内样式时注意级联优先级，背景也可能由子元素或伪元素绘制。',
+  '位置描述以用户明确容器为准，否则以 selectedSourceId 或最近语义祖先为锚点。相邻组件只扩展到最近公共父容器；用户未明确要求全局视口定位时不得新增 position:fixed。新增元素后调用 validate_spatial_scope。',
+  '若多个方案会显著改变最终视觉结果，修改前调用 clarify；问题只询问源码无法确定的信息。已有澄清回复时结合 conversation 继续原需求。',
+  '首次写入前调用一次 declare_intent，简洁列出目标、相关 sourceId、需要浏览器验证的约束和布局范围。新增 sourceId 会由系统自动加入验证范围。',
+  '文本、属性、插入、移动、删除和批量操作使用对应结构化工具；精确替换必须基于已读取原文，追加 CSS 使用 apply_patch。相关修改尽量在同一轮并行调用或用批量工具完成。',
   '不得添加 script、事件属性、远程资源、接口请求、表单 action 或 javascript: URL。',
   CONTROLLED_INTERACTION_INSTRUCTIONS,
-  '每次修改后检查工具结果；目标达成后先调用 validate_workspace。若提示元素被 overflow 裁剪，必须调整父容器尺寸、overflow 或定位，不能直接声明完成。',
-  'finish 只会生成等待真实渲染验证的候选草稿，不会发布正式 Revision。若本轮无需改动，先调用 declare_intent 和 validate_workspace；随后调用 finish，并明确 outcome=already_satisfied，同时写明源码证据。不得把未验证的猜测当作已满足。',
-  '不要只用自然语言声称生成草稿。没有调用 finish 或 clarify，本轮就不算完成。',
-  '不要做与用户请求无关的重构。'
+  '修改完成后直接调用 finish；finish 会执行工作区校验。新增元素仍须先完成空间归属校验。源码和捕获布局不能证明真实渲染结果，不得声称已经通过浏览器验证。无需修改时提供源码证据并使用 already_satisfied。',
+  '没有调用 finish 或 clarify，本轮不算完成。保持推理和工具说明简洁，不做无关重构。'
 ].join('\n');
 
 const DEFAULT_MAX_ITERATIONS = 45;
+const DEFAULT_MAX_OUTPUT_TOKENS = 8_192;
 const MAX_BATCH_INSPECTION_CHARS = 12_000;
 const MAX_BATCH_ELEMENT_CHARS = 4_000;
 const FINALIZATION_WINDOW = 3;
@@ -99,7 +75,7 @@ const MAX_READ_CALLS_PER_ACTION: Readonly<Record<string, number>> = {
   read_file: 3
 };
 const BUDGETED_READ_ACTIONS = new Set([
-  'list_files', 'query_workspace_structure', 'search_text', 'read_file', 'inspect_element', 'inspect_elements',
+  'query_workspace_structure', 'search_text', 'read_file', 'inspect_element', 'inspect_elements',
   'query_style_symbols', 'read_style_rule', 'read_style_rules'
 ]);
 
@@ -117,6 +93,7 @@ export interface ClineAgentFactoryInput {
   systemPrompt: string;
   tools: readonly AgentTool<any, any>[];
   maxIterations: number;
+  maxOutputTokens: number;
 }
 
 export type ClineAgentFactory = (input: ClineAgentFactoryInput) => ClineAgentInstance;
@@ -126,6 +103,7 @@ export interface ClineCodingAgentOptions {
   apiKey: string;
   modelName: string;
   maxIterations?: number;
+  maxOutputTokens?: number;
   factory?: ClineAgentFactory;
 }
 
@@ -206,10 +184,12 @@ function cssClassNamesIn(css: string): Set<string> {
 export class ClineCodingAgentAdapter implements CodingAgentPort {
   readonly adapterId = 'cline-sdk';
   private readonly maxIterations: number;
+  private readonly maxOutputTokens: number;
   private readonly factory: ClineAgentFactory;
 
   constructor(private readonly options: ClineCodingAgentOptions) {
     this.maxIterations = options.maxIterations ?? DEFAULT_MAX_ITERATIONS;
+    this.maxOutputTokens = options.maxOutputTokens ?? DEFAULT_MAX_OUTPUT_TOKENS;
     this.factory = options.factory ?? (input => new Agent({
       providerId: input.providerId,
       modelId: input.modelId,
@@ -218,6 +198,7 @@ export class ClineCodingAgentAdapter implements CodingAgentPort {
       systemPrompt: input.systemPrompt,
       tools: input.tools,
       maxIterations: input.maxIterations,
+      maxOutputTokens: input.maxOutputTokens,
       toolExecution: 'sequential',
       completionPolicy: { requireCompletionTool: true }
     }));
@@ -236,6 +217,7 @@ export class ClineCodingAgentAdapter implements CodingAgentPort {
       apiKey: this.options.apiKey,
       baseUrl: this.options.baseUrl,
       maxIterations: 4,
+      maxOutputTokens: this.maxOutputTokens,
       systemPrompt: [
         '你是网页副本的几何与样式验证器。只能根据调用中提供的结构化需求、真实浏览器几何、计算样式和就绪状态作出结论。',
         '颜色或背景约束必须检查对应绘制元素的 styles.backgroundColor/backgroundImage/color 等实际计算值，不能以尺寸正确、元素存在或源码已写入代替。透明背景不能证明子元素或伪元素的背景颜色；缺少绘制元素数据时返回 unknown。旧插件未提供样式字段时也返回 unknown。',
@@ -316,9 +298,7 @@ export class ClineCodingAgentAdapter implements CodingAgentPort {
     const finishDescription = workspace.submissionMode === 'candidate'
       ? 'finish 校验并物化候选草稿，不发布正式 Revision；服务随后执行真实渲染验证。'
       : 'finish 校验并直接提交正式 Revision；当前未启用自动渲染验证，实际页面效果由用户检查，不得声称正在等待自动渲染验证。';
-    const modeRules = clineSourceRules.replace(
-      'finish 只会生成等待真实渲染验证的候选草稿，不会发布正式 Revision。', finishDescription
-    );
+    const modeRules = clineSourceRules;
     const startedAt = new Date().toISOString();
     const steps: CodingAgentStep[] = [];
     let completion: Completion | undefined;
@@ -333,7 +313,6 @@ export class ClineCodingAgentAdapter implements CodingAgentPort {
     let introducedFixedPosition = false;
     let intentDeclared = false;
     let declaredIntent: import('@ui-agent/contracts').WorkspaceIntent | undefined;
-    const compactInspectedSourceIds = new Set<string>();
     const changedPositioningClassNames = new Set<string>();
     const repeatedFailures = new Map<string, number>();
     const readActionCounts = new Map<string, number>();
@@ -432,7 +411,7 @@ export class ClineCodingAgentAdapter implements CodingAgentPort {
       const finalizationStartsAt = Math.max(1, this.maxIterations - FINALIZATION_WINDOW + 1);
       if (BUDGETED_READ_ACTIONS.has(action) && !['inspect_element', 'inspect_elements'].includes(action)
         && context.iteration >= finalizationStartsAt) {
-        const message = `[运行预算] 当前第 ${context.iteration}/${this.maxIterations} 轮，已进入最后 ${FINALIZATION_WINDOW} 轮，停止继续读取。若修改已完成，请立即调用 validate_workspace 后 finish；若关键信息仍不足，请调用 clarify。`;
+        const message = `[运行预算] 当前第 ${context.iteration}/${this.maxIterations} 轮，已进入最后 ${FINALIZATION_WINDOW} 轮，停止继续读取。若修改已完成，请立即调用 finish；若关键信息仍不足，请调用 clarify。`;
         record(action, input, context, message, undefined, true, 'blocked');
         return message;
       }
@@ -468,7 +447,7 @@ export class ClineCodingAgentAdapter implements CodingAgentPort {
         if (readKey) completedReadResults.set(readKey, result);
         throwIfCancelled();
         const guidedResult = remainingAfterThisCall <= 5
-          ? `[运行预算] 当前第 ${context.iteration}/${this.maxIterations} 轮，本次后最多剩余 ${remainingAfterThisCall} 轮。请停止扩展范围，完成必要修改并预留 validate_workspace 与 finish。\n\n${result}`
+          ? `[运行预算] 当前第 ${context.iteration}/${this.maxIterations} 轮，本次后最多剩余 ${remainingAfterThisCall} 轮。请停止扩展范围，完成必要修改并预留 finish。\n\n${result}`
           : result;
         record(action, input, context, guidedResult);
         return guidedResult;
@@ -541,48 +520,44 @@ export class ClineCodingAgentAdapter implements CodingAgentPort {
         visualConstraints?: string[];
         renderConstraintIndexes?: number[];
         layoutScope?: 'selected-context' | 'explicit-container' | 'global';
-        ambiguityAssessment: string;
       }, string>({
         name: 'declare_intent',
-        description: '在任何源码写入前声明模型对需求的结构化理解。仅在不存在尚未解决的关键歧义时调用；否则调用 clarify。',
+        description: '首次写入前简洁声明目标和浏览器需要验证的事实；有关键歧义时改用 clarify。',
         inputSchema: objectSchema({
           summary: stringProperty('准备实现的明确目标。'),
           relevantSourceIds: {
-            type: 'array', maxItems: 20,
+            type: 'array', maxItems: 12,
             items: stringProperty('与本次目标相关的 sourceId。')
           },
           verificationSourceIds: {
-            type: 'array', minItems: 1, maxItems: 40,
-            items: stringProperty('真实浏览器必须测量的 sourceId。包括目标、容器和每个用于证明约束成立的相关元素。')
+            type: 'array', maxItems: 16,
+            items: stringProperty('真实浏览器需要测量的已有 sourceId。')
           },
           visualConstraints: {
-            type: 'array', maxItems: 20,
-            items: stringProperty('修改后必须成立的视觉或结构约束。')
+            type: 'array', maxItems: 12,
+            items: stringProperty('需要浏览器验证的简洁视觉或结构约束。')
           },
           renderConstraintIndexes: {
-            type: 'array', minItems: 1, maxItems: 20,
+            type: 'array', maxItems: 12,
             items: { type: 'integer', minimum: 1 },
-            description: 'visualConstraints 中可由当前浏览器几何或计算样式直接验证的约束序号（从 1 开始）。颜色等样式目标也必须列入；每个候选至少列出一项；仅作为修改范围说明的约束不要列入。'
+            description: 'visualConstraints 中可由浏览器几何或计算样式验证的序号；省略时默认验证第一项。'
           },
-          layoutScope: { type: 'string', enum: ['selected-context', 'explicit-container', 'global'] },
-          ambiguityAssessment: stringProperty('说明为何当前信息足以得到唯一方案；不得用来掩盖未解决歧义。')
-        }, ['summary', 'verificationSourceIds', 'renderConstraintIndexes', 'ambiguityAssessment']),
+          layoutScope: { type: 'string', enum: ['selected-context', 'explicit-container', 'global'] }
+        }, ['summary']),
         execute: (input, context) => execute(
           'declare_intent',
           input,
           context,
           async () => {
-            const sourceIds = [...new Set([...(input.relevantSourceIds ?? []), ...(input.verificationSourceIds ?? [])])];
-            const constraints = [...new Set(input.visualConstraints ?? [])];
-            const renderConstraintIndexes = [...new Set(input.renderConstraintIndexes ?? [])];
+            const sourceIds = [...new Set([
+              ...(turn.request.sourceId ? [turn.request.sourceId] : []),
+              ...(input.relevantSourceIds ?? []),
+              ...(input.verificationSourceIds ?? [])
+            ])];
+            const constraints = [...new Set(input.visualConstraints?.length ? input.visualConstraints : [input.summary])];
+            const renderConstraintIndexes = [...new Set(input.renderConstraintIndexes?.length ? input.renderConstraintIndexes : [1])];
             if (!sourceIds.length) {
               throw new Error('declare_intent 必须列出至少一个实际相关的 sourceId；请先查询并检查目标结构，无法定位时调用 clarify');
-            }
-            if (!constraints.length) {
-              throw new Error('declare_intent 必须列出至少一条需求约束；请明确修改后应成立的内容、布局或可见性要求');
-            }
-            if (!renderConstraintIndexes.length) {
-              throw new Error('declare_intent 必须列出至少一条可由当前浏览器观察直接验证的约束；仅作修改范围说明的约束不能作为候选发布依据');
             }
             if (renderConstraintIndexes.some(index => index < 1 || index > constraints.length)) {
               throw new Error('renderConstraintIndexes 必须引用 visualConstraints 中存在的序号');
@@ -598,19 +573,8 @@ export class ClineCodingAgentAdapter implements CodingAgentPort {
               layoutScope: input.layoutScope ?? 'selected-context',
               createdAt: new Date().toISOString()
             };
-            return `意图已声明：${input.summary}\n视觉约束：${input.visualConstraints?.join('；') || '无'}\n歧义判断：${input.ambiguityAssessment}`;
+            return `意图已声明：${input.summary}`;
           }
-        )
-      }),
-      createTool<Record<string, never>, string>({
-        name: 'list_files',
-        description: '列出当前静态源码工作区允许访问的文件及字符数。',
-        inputSchema: objectSchema({}),
-        execute: (input, context) => execute(
-          'list_files',
-          input,
-          context,
-          async () => JSON.stringify(await workspace.listFiles())
         )
       }),
       createTool<{ query: string; selectedSourceId?: string; limit?: number }, string>({
@@ -676,32 +640,15 @@ export class ClineCodingAgentAdapter implements CodingAgentPort {
       }),
       createTool<{ sourceId: string; detail?: 'compact' | 'full' }, string>({
         name: 'inspect_element',
-        description: '按 data-ui-source-id 读取页面元素的局部源码、文字和样式线索。默认 compact；只有精简结果不足以判断时才使用 full。',
+        description: '按 data-ui-source-id 读取页面元素的局部源码、文字和样式线索。默认 compact，信息不足时可直接使用 full。',
         inputSchema: objectSchema({
           sourceId: stringProperty('元素的 data-ui-source-id。'),
           detail: { type: 'string', enum: ['compact', 'full'] }
         }, ['sourceId']),
-        execute: (input, context) => {
-          const detail = input.detail ?? 'compact';
-          if (detail === 'full' && !compactInspectedSourceIds.has(input.sourceId)) {
-            const message = `[展开条件] 必须先对 ${input.sourceId} 执行 compact 检查；只有精简结果缺少完成当前判断所需的信息时，才能请求 full。`;
-            // This is a workflow correction, not a completed read. Keeping it
-            // out of the completed-read cache lets the required compact read
-            // and the subsequent full read proceed normally.
-            record('inspect_element', input, context, message, undefined, true, 'blocked');
-            return Promise.resolve(message);
-          }
-          return execute(
-            'inspect_element',
-            input,
-            context,
-            async () => {
-              const result = await workspace.inspectElement(input.sourceId, { detail });
-              if (detail === 'compact') compactInspectedSourceIds.add(input.sourceId);
-              return result;
-            }
-          );
-        }
+        execute: (input, context) => execute(
+          'inspect_element', input, context,
+          () => workspace.inspectElement(input.sourceId, { detail: input.detail ?? 'compact' })
+        )
       }),
       createTool<{ sourceIds: string[] }, string>({
         name: 'inspect_elements',
@@ -721,7 +668,6 @@ export class ClineCodingAgentAdapter implements CodingAgentPort {
           async () => {
             const sections = await Promise.all(input.sourceIds.map(async sourceId => {
               const result = await workspace.inspectElement(sourceId, { detail: 'compact' });
-              compactInspectedSourceIds.add(sourceId);
               return `元素 ${sourceId}\n${result.slice(0, MAX_BATCH_ELEMENT_CHARS)}`;
             }));
             const combined = sections.join('\n\n---\n\n');
@@ -1115,43 +1061,22 @@ export class ClineCodingAgentAdapter implements CodingAgentPort {
           }
         )
       }),
-      createTool<Record<string, never>, string>({
-        name: 'validate_workspace',
-        description: '检查当前工作副本是否仍为安全、可预览的静态页面。',
-        inputSchema: objectSchema({}),
-        execute: (input, context) => execute(
-          'validate_workspace',
-          input,
-          context,
-          () => workspace.validate()
-        )
-      }),
       createTool<{
         summary: string;
         outcome?: 'changed' | 'already_satisfied';
         evidence?: string;
-        requirementReview?: RequirementReview;
       }, string>({
         name: 'finish',
         description: `${finishDescription}若当前副本无需改动，设置 outcome=already_satisfied，并提供源码证据。`,
         inputSchema: objectSchema({
           summary: stringProperty('面向用户的简洁修改说明。'),
-          requirementReview: objectSchema({
-            originalRequestReviewed: { type: 'boolean', const: true, description: '已重新核对原始请求及澄清，而非只检查声明列表。' },
-            missingRequirements: { type: 'array', items: stringProperty('原始请求中未覆盖或尚未实现的要求；存在任何缺项禁止提交。') },
-            checks: { type: 'array', minItems: 1, items: objectSchema({
-              constraintIndex: { type: 'integer', minimum: 1 },
-              status: { type: 'string', enum: ['implemented', 'unsupported', 'incomplete'] },
-              evidence: stringProperty('该约束的具体实现证据，例如节点、属性、样式及工具结果；不得伪造渲染结论。')
-            }, ['constraintIndex', 'status', 'evidence']) }
-          }, ['originalRequestReviewed', 'missingRequirements', 'checks']),
           outcome: {
             type: 'string',
             enum: ['changed', 'already_satisfied'],
             description: '本轮是否产生了源码修改；默认 changed。'
           },
           evidence: stringProperty('仅 outcome=already_satisfied 时填写：说明已读取和验证的当前源码证据。')
-        }, ['summary', 'requirementReview']),
+        }, ['summary']),
         lifecycle: { completesRun: true },
         execute: async (input, context) => {
           try {
@@ -1160,7 +1085,6 @@ export class ClineCodingAgentAdapter implements CodingAgentPort {
               throw new Error('本轮已进入等待用户澄清状态，禁止提交；请等待用户回复后开启新一轮执行');
             }
             requireIntentDeclared();
-            validateRequirementReview(input.requirementReview, declaredIntent?.constraints.length ?? 0);
             if (introducedFixedPosition && declaredIntent?.layoutScope !== 'global') {
               throw new Error('当前已确认意图不是 global 布局范围，本轮却新增了 position:fixed；请调整到已确认容器内');
             }
@@ -1233,15 +1157,24 @@ export class ClineCodingAgentAdapter implements CodingAgentPort {
     try {
       throwIfCancelled();
       const files = await workspace.listFiles();
+      let selectedElementContext: string | undefined;
+      if (turn.request.sourceId) {
+        try {
+          selectedElementContext = await workspace.inspectElement(turn.request.sourceId, { detail: 'compact' });
+        } catch {
+          // A stale selection should not prevent semantic lookup inside the workspace.
+        }
+      }
       throwIfCancelled();
       activeAgent = this.factory({
         providerId: 'openai-compatible',
         modelId: this.options.modelName,
         apiKey: this.options.apiKey,
         baseUrl: this.options.baseUrl,
-        systemPrompt: `${modeRules}\n单轮最多 ${this.maxIterations} 次模型决策；从第 ${Math.max(1, this.maxIterations - FINALIZATION_WINDOW + 1)} 轮起必须停止扩展读取，只能完成必要修改、校验并 finish，或 clarify。`,
+        systemPrompt: `${modeRules}\n单轮最多 ${this.maxIterations} 次模型决策；从第 ${Math.max(1, this.maxIterations - FINALIZATION_WINDOW + 1)} 轮起必须停止扩展读取，只能完成必要修改并 finish，或 clarify。`,
         tools,
-        maxIterations: this.maxIterations
+        maxIterations: this.maxIterations,
+        maxOutputTokens: this.maxOutputTokens
       });
       unsubscribe = activeAgent.subscribe?.(event => {
         const timestamp = new Date().toISOString();
@@ -1262,7 +1195,11 @@ export class ClineCodingAgentAdapter implements CodingAgentPort {
         replyToClarificationId: turn.request.replyToClarificationId,
         clarificationOptionId: turn.request.clarificationOptionId,
         conversation: turn.conversation.slice(-8),
-        files
+        files,
+        workspaceMode: files.some(file => file.path === 'author.css' || file.path === 'author-style-links.json')
+          ? 'author-rules'
+          : 'frozen-styles',
+        selectedElementContext
       }));
       checkpoint = {
         ...checkpoint,
@@ -1360,10 +1297,15 @@ export function clineCodingAgentFromEnvironment(
   if (!Number.isInteger(parsedMaxIterations) || parsedMaxIterations < 1) {
     throw new Error('CLINE_MAX_ITERATIONS 必须是大于 0 的整数');
   }
+  const parsedMaxOutputTokens = Number(env.CLINE_MAX_OUTPUT_TOKENS ?? DEFAULT_MAX_OUTPUT_TOKENS);
+  if (!Number.isInteger(parsedMaxOutputTokens) || parsedMaxOutputTokens < 1) {
+    throw new Error('CLINE_MAX_OUTPUT_TOKENS 必须是大于 0 的整数');
+  }
   return new ClineCodingAgentAdapter({
     baseUrl: env.MODEL_BASE_URL,
     apiKey: env.MODEL_API_KEY,
     modelName: env.MODEL_NAME,
-    maxIterations: parsedMaxIterations
+    maxIterations: parsedMaxIterations,
+    maxOutputTokens: parsedMaxOutputTokens
   });
 }
