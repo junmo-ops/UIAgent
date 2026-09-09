@@ -5,6 +5,7 @@ import {
   readdirSync,
   renameSync,
   rmSync,
+  statSync,
   writeFileSync
 } from 'node:fs';
 import { basename, dirname, resolve, sep } from 'node:path';
@@ -804,6 +805,9 @@ export class SourceWorkspaceStore {
   private readonly frozenStyleVariantEnabled: boolean;
   private readonly active = new Set<string>();
   private readonly resourceLoadFailures = new Map<string, Map<number, string>>();
+  // LRU bounded by estimated retained string size; never retain all workspaces.
+  private readonly sheetCache = new Map<string, { signature: string; weight: number; sheets: AuthorStyleSheet[] }>();
+  private sheetCacheWeight = 0;
 
   constructor(root = '.snapshots/source-workspaces', options: SourceWorkspaceStoreOptions = {}) {
     this.root = resolve(root);
@@ -973,15 +977,41 @@ export class SourceWorkspaceStore {
   }
 
   authorStyleSheets(workspaceId: string): AuthorStyleSheet[] {
-    const raw = this.readOptionalFile(resolve(this.workspacePath(workspaceId), 'author-sheets.json'));
-    if (!raw) return [];
+    const path = resolve(this.workspacePath(workspaceId), 'author-sheets.json');
     try {
+      const stat = statSync(path);
+      const signature = `${stat.ino}:${stat.size}:${stat.mtimeMs}:${stat.ctimeMs}`;
+      const cached = this.sheetCache.get(path);
+      if (cached?.signature === signature) {
+        this.sheetCache.delete(path);
+        this.sheetCache.set(path, cached);
+        return cached.sheets;
+      }
+      this.evictSheetCache(path);
+      const raw = readFileSync(path, 'utf8');
       const parsed = JSON.parse(raw) as unknown;
       const result = authorStyleSheetSchema.array().safeParse(parsed);
-      return result.success ? result.data : [];
+      if (!result.success) return [];
+      const weight = raw.length * 2 + result.data.length * 1024;
+      const budget = 32 * 1024 * 1024;
+      if (weight <= budget) {
+        while (this.sheetCache.size && (this.sheetCacheWeight + weight > budget || this.sheetCache.size >= 32)) {
+          this.evictSheetCache(this.sheetCache.keys().next().value!);
+        }
+        this.sheetCache.set(path, { signature, weight, sheets: result.data });
+        this.sheetCacheWeight += weight;
+      }
+      return result.data;
     } catch {
+      this.evictSheetCache(path);
       return [];
     }
+  }
+
+  private evictSheetCache(path: string): void {
+    const cached = this.sheetCache.get(path);
+    if (cached) this.sheetCacheWeight -= cached.weight;
+    this.sheetCache.delete(path);
   }
 
   authorOverrides(workspaceId: string): string {
@@ -1003,7 +1033,8 @@ export class SourceWorkspaceStore {
     if (!Number.isSafeInteger(index) || index < 0) return undefined;
     const sheet = this.authorStyleSheets(workspaceId)[index];
     if (!sheet || sheet.renderOnly || sheet.cssText === undefined) return undefined;
-    validateAuthorCss(sheet.cssText, this.authorStyleResources(workspaceId));
+    // validateAuthorCss does not consume the resource list; avoid rereading it per sheet.
+    validateAuthorCss(sheet.cssText, []);
     return sheet.cssText;
   }
 
@@ -1626,6 +1657,12 @@ export class SourceWorkspaceStore {
       const orderedStyleLinks = authorSheets.length
         ? authorSheets.map((sheet, index) => {
           const attributes = `${sheet.media ? ` media="${escapeHtmlAttribute(sheet.media)}"` : ''}${sheet.disabled ? ' disabled' : ''}`;
+          if (sheet.sourceKind === 'inline' && !sheet.renderOnly && sheet.cssText !== undefined) {
+            validateAuthorCss(sheet.cssText, []);
+            // A disabled attribute on <style> is not equivalent to sheet.disabled.
+            const media = sheet.disabled ? 'not all' : sheet.media;
+            return `<style${media ? ` media="${escapeHtmlAttribute(media)}"` : ''} data-ui-agent-author-styles data-ui-agent-candidate="B">${sheet.cssText}</style>`;
+          }
           return sheet.renderOnly
             ? `<link rel="stylesheet" href="${escapeHtmlAttribute(sheet.sourceUrl)}"${attributes} data-ui-agent-render-only-stylesheet>`
             : `<link rel="stylesheet" href="${workspaceAssetPath}author-sheets/${index}${assetQuery}"${attributes} data-ui-agent-author-styles data-ui-agent-candidate="B">`;
@@ -1638,8 +1675,8 @@ export class SourceWorkspaceStore {
     }
     const localizedHtml = this.localizeSnapshotResources(html, authorResources);
     return /<\/head>/i.test(localizedHtml)
-      ? localizedHtml.replace(/<\/head>/i, `${style}\n</head>`)
-      : localizedHtml.replace(/<body\b/i, `${style}\n<body`);
+      ? localizedHtml.replace(/<\/head>/i, () => `${style}\n</head>`)
+      : localizedHtml.replace(/<body\b/i, () => `${style}\n<body`);
   }
 
   conversation(workspaceId: string): CodingAgentConversationTurn[] {

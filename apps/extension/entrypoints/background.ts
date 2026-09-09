@@ -132,7 +132,7 @@ async function hydrateAuthorStyles(tab: Browser.tabs.Tab, snapshot: NonNullable<
           }
         }
       } else {
-        sheets.push({ sourceUrl: source, cssText: sanitized.cssText, renderOnly: false });
+        sheets.push({ sourceUrl: source, sourceKind: 'external', cssText: sanitized.cssText, renderOnly: false });
       }
       resources.push(...sanitized.resources);
       if (sanitized.filteredRules) missing.push(`${source}（过滤 ${sanitized.filteredRules} 条不安全规则）`);

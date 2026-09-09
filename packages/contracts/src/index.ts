@@ -32,6 +32,7 @@ export type AuthorStyleResource = z.infer<typeof authorStyleResourceSchema>;
 
 export const authorStyleSheetSchema = z.object({
   sourceUrl: z.string().url().max(4_000),
+  sourceKind: z.enum(['inline', 'external']).optional(),
   cssText: z.string().max(10_000_000).optional(),
   renderOnly: z.boolean(),
   media: z.string().max(2_000).optional(),

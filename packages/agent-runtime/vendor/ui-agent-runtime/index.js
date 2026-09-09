@@ -5,18 +5,18 @@ import { createOpenAICompatible } from '@ai-sdk/openai-compatible';
 import { jsonSchema, streamText, stepCountIs } from 'ai';
 
 const asError = value => value instanceof Error ? value : new Error(String(value));
-const RATE_LIMIT_DELAYS = [60_000, 90_000, 120_000];
+const RATE_LIMIT_RETRY_LIMIT = 10;
+const RATE_LIMIT_DELAY_MS = 10_000;
 const isOutputRateLimit = error => error?.statusCode === 433 &&
   /\bLAILGW0433\b/.test(`${error.responseBody ?? ''} ${error.message ?? ''}`);
-const retryDelay = (error, attempt) => {
+const retryDelay = error => {
   const headers = error.responseHeaders;
   const value = typeof headers?.get === 'function' ? headers.get('retry-after')
     : Object.entries(headers ?? {}).find(([key]) => key.toLowerCase() === 'retry-after')?.[1];
   const seconds = value == null || String(value).trim() === '' ? NaN : Number(value);
   const serverDelay = Number.isFinite(seconds) ? seconds * 1000 : Date.parse(String(value)) - Date.now();
-  // Never retry earlier than the gateway requests; a longer wait exceeds our budget.
-  if (serverDelay > 120_000) return undefined;
-  return Math.max(RATE_LIMIT_DELAYS[attempt], Number.isFinite(serverDelay) ? serverDelay : 0);
+  // Never retry earlier than the gateway requests.
+  return Math.max(RATE_LIMIT_DELAY_MS, Number.isFinite(serverDelay) ? serverDelay : 0);
 };
 const sanitizeDiagnosticText = value => String(value ?? '')
   .replace(/Bearer\s+[A-Za-z0-9._~+/=-]+/gi, 'Bearer [REDACTED]')
@@ -74,7 +74,7 @@ export class Agent {
     let rateLimitRetries = 0;
     const usage = {};
     const runtimeStarted = Date.now();
-    const diagnostics = { version: 1, runtimeRevision: '2026-09-09-rate-limit-v9',
+    const diagnostics = { version: 1, runtimeRevision: '2026-09-09-rate-limit-v10',
       countingBasis: 'model decision rounds; rate-limit request retries are recorded separately per call',
       maxIterations: this.config.maxIterations ?? 12, maxOutputTokens: this.config.maxOutputTokens,
       requiredCompletionTool: this.config.completionPolicy?.requireCompletionTool === true,
@@ -226,13 +226,10 @@ export class Agent {
             // Only retry a rejected request, never replay a partially executed stream.
             if (controller.signal.aborted || !isOutputRateLimit(error) ||
               currentCall.firstOutputMs !== undefined || currentCall.tools.length) throw error;
-            if (rateLimitRetries >= RATE_LIMIT_DELAYS.length) {
-              throw Object.assign(new Error('模型共享输出额度仍不足，已达到本轮 3 次自动重试上限，请稍后再试。', { cause: error }), { statusCode: 433, code: 'LAILGW0433' });
+            if (rateLimitRetries >= RATE_LIMIT_RETRY_LIMIT) {
+              throw Object.assign(new Error('模型共享输出额度仍不足，连续 10 次自动重试未恢复，已停止本轮修改，请稍后再试。', { cause: error }), { statusCode: 433, code: 'LAILGW0433' });
             }
-            const waitMs = retryDelay(error, rateLimitRetries);
-            if (waitMs === undefined) {
-              throw Object.assign(new Error('模型共享输出额度不足，服务端要求的等待时间超过本轮自动重试范围，请稍后再试。', { cause: error }), { statusCode: 433, code: 'LAILGW0433' });
-            }
+            const waitMs = retryDelay(error);
             rateLimitRetries++;
             const retryAt = new Date(Date.now() + waitMs).toISOString();
             (currentCall.rateLimitRetries ??= []).push({ attempt: rateLimitRetries,
@@ -240,7 +237,10 @@ export class Agent {
             this.emit({ type: 'model-call-updated', call: { modelCall: iterations,
               startedAt: currentCall.startedAt, status: 'running',
               rateLimitWait: { attempt: rateLimitRetries, retryAt } } });
-            await delay(waitMs, undefined, { signal: controller.signal });
+            // Chunk long Retry-After waits to avoid Node timer overflow and allow cancellation.
+            for (let remaining = waitMs; remaining > 0; remaining -= 60_000) {
+              await delay(Math.min(remaining, 60_000), undefined, { signal: controller.signal });
+            }
             this.emit({ type: 'model-call-updated', call: { modelCall: iterations,
               startedAt: currentCall.startedAt, status: 'running', rateLimitWait: null } });
           }
@@ -252,6 +252,7 @@ export class Agent {
         currentCall.status = 'completed';
         messages.push(...await stream.responseMessages);
         const stepUsage = await stream.usage;
+        rateLimitRetries = 0;
         currentCall.usage = Object.fromEntries(Object.entries(stepUsage ?? {}).filter(([, value]) => typeof value === 'number'));
         const reasoningTokens = stepUsage?.outputTokenDetails?.reasoningTokens ?? stepUsage?.outputTokensDetails?.reasoningTokens;
         const cachedInputTokens = stepUsage?.inputTokenDetails?.cacheReadTokens ?? stepUsage?.inputTokensDetails?.cacheReadTokens;

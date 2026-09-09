@@ -29,15 +29,15 @@
   },
   "files": {
     "index.js": {
-      "sha256": "9cbfd0f2975f6d6ae4e8dd7322e1b638cb748d49804893340c0cbf8930e3b356"
+      "sha256": "43524ad7664a434afb2165071788169b7d164d089698d68b0c9aff073d85ecbb"
     },
     "index.d.ts": {
       "sha256": "201f51d3758eaf78a77d2e793d401c81bb98d84d0f33332e7a2ed072afc44353"
     },
     "UPSTREAM_NOTICE.md": {
-      "sha256": "e5d7a08e0bd8cd8cb57b376c0b69f435a3304281e00883de10b358527cb67dc0"
+      "sha256": "c556b1c71ad188e0c99f0f845ed3fbf7b7cad549548f8368a117a0e0559de45a"
     }
   },
   "checksumNote": "manifest.json is excluded to avoid a self-referential checksum.",
-  "localRevision": "2026-09-09-rate-limit-v9"
+  "localRevision": "2026-09-09-rate-limit-v10"
 }

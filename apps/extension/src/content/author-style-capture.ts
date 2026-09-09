@@ -106,23 +106,24 @@ export function captureAccessibleAuthorStyles(documentRef: Document = document):
   const resources: AuthorStyleResource[] = [];
   for (const sheet of Array.from(documentRef.styleSheets)) {
     const href = sheet.href || documentRef.location.href;
+    const sourceKind = sheet.href ? 'external' as const : 'inline' as const;
     const media = sheet.media.mediaText.trim();
     const disabled = Boolean(sheet.disabled);
     try {
       const rules = sheet.cssRules;
       const rawCss = Array.from(rules).map(rule => rule.cssText).join('\n');
-      const sanitized = sanitizeAuthorCssText(rawCss, href);
+      const sanitized = sanitizeAuthorCssText(rawCss, sheet.href || sheet.ownerNode?.baseURI || documentRef.baseURI);
       const filteredCount = sanitized.filteredRules;
       if (filteredCount > 0) missing.push(`${href}（过滤 ${filteredCount} 条不安全规则）`);
       chunks.push(`/* source: ${href.replace(/[\r\n*]/g, ' ')} */\n${sanitized.cssText}`);
-      sheets.push({ sourceUrl: href, cssText: sanitized.cssText, renderOnly: false, ...(media ? { media } : {}), ...(disabled ? { disabled } : {}) });
+      sheets.push({ sourceUrl: href, sourceKind, cssText: sanitized.cssText, renderOnly: false, ...(media ? { media } : {}), ...(disabled ? { disabled } : {}) });
       resources.push(...sanitized.resources);
       readableSheets += 1;
     } catch {
       unreadableSheets += 1;
       missing.push(href);
       if (/^https?:\/\//i.test(href)) unreadableSources.push(href);
-      if (/^https?:\/\//i.test(href)) sheets.push({ sourceUrl: href, renderOnly: true, ...(media ? { media } : {}), ...(disabled ? { disabled } : {}) });
+      if (/^https?:\/\//i.test(href)) sheets.push({ sourceUrl: href, sourceKind, renderOnly: true, ...(media ? { media } : {}), ...(disabled ? { disabled } : {}) });
     }
   }
   return {

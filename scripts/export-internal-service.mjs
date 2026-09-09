@@ -1,4 +1,4 @@
-import { appendFileSync, cpSync, existsSync, mkdirSync, readFileSync, readdirSync, statSync, writeFileSync } from 'node:fs';
+import { appendFileSync, cpSync, existsSync, lstatSync, mkdirSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { dirname, isAbsolute, relative, resolve } from 'node:path';
 import { internalServiceLockfile } from './internal-service-lockfile.mjs';
 import { fileURLToPath } from 'node:url';
@@ -15,7 +15,7 @@ const deploymentLockfile = internalServiceLockfile(
 );
 
 if (!outputArgument) {
-  throw new Error('请指定一个空目录，例如：pnpm export:internal-service -- ../ui-agent-service');
+  throw new Error('请指定交付目录，例如：pnpm export:internal-service -- ../ui-agent-service');
 }
 
 const outputDirectory = resolve(projectRoot, outputArgument);
@@ -24,9 +24,22 @@ if (!outputRelativeToProject.startsWith('..') || isAbsolute(outputRelativeToProj
   throw new Error('交付目录必须位于当前项目目录之外，避免将生成文件混入源码仓库。');
 }
 
-if (existsSync(outputDirectory) && readdirSync(outputDirectory).length > 0) {
-  throw new Error(`交付目录必须为空：${outputDirectory}`);
+const projectRelativeToOutput = relative(outputDirectory, projectRoot);
+if (!projectRelativeToOutput.startsWith('..') || isAbsolute(projectRelativeToOutput) || outputDirectory === dirname(outputDirectory)) {
+  throw new Error('交付目录不能是当前项目的上级目录或文件系统根目录。');
 }
+
+if (existsSync(outputDirectory)) {
+  const outputStat = lstatSync(outputDirectory);
+  if (outputStat.isSymbolicLink() || !outputStat.isDirectory()) {
+    throw new Error(`交付路径必须是普通目录，不能是文件或符号链接：${outputDirectory}`);
+  }
+  for (const entry of readdirSync(outputDirectory)) {
+    if (entry === '.git') continue;
+    rmSync(resolve(outputDirectory, entry), { recursive: true, force: true });
+  }
+}
+mkdirSync(outputDirectory, { recursive: true });
 
 const excludedDirectoryNames = new Set(['node_modules', 'dist', 'coverage', '.output', '.wxt', '.logs', '.snapshots']);
 const excludedFileNames = new Set(['.DS_Store']);
