@@ -1,9 +1,23 @@
 // UIAgent maintained runtime. API provenance: see UPSTREAM_NOTICE.md.
 import { randomUUID } from 'node:crypto';
+import { setTimeout as delay } from 'node:timers/promises';
 import { createOpenAICompatible } from '@ai-sdk/openai-compatible';
 import { jsonSchema, streamText, stepCountIs } from 'ai';
 
 const asError = value => value instanceof Error ? value : new Error(String(value));
+const RATE_LIMIT_DELAYS = [60_000, 90_000, 120_000];
+const isOutputRateLimit = error => error?.statusCode === 433 &&
+  /\bLAILGW0433\b/.test(`${error.responseBody ?? ''} ${error.message ?? ''}`);
+const retryDelay = (error, attempt) => {
+  const headers = error.responseHeaders;
+  const value = typeof headers?.get === 'function' ? headers.get('retry-after')
+    : Object.entries(headers ?? {}).find(([key]) => key.toLowerCase() === 'retry-after')?.[1];
+  const seconds = value == null || String(value).trim() === '' ? NaN : Number(value);
+  const serverDelay = Number.isFinite(seconds) ? seconds * 1000 : Date.parse(String(value)) - Date.now();
+  // Never retry earlier than the gateway requests; a longer wait exceeds our budget.
+  if (serverDelay > 120_000) return undefined;
+  return Math.max(RATE_LIMIT_DELAYS[attempt], Number.isFinite(serverDelay) ? serverDelay : 0);
+};
 const sanitizeDiagnosticText = value => String(value ?? '')
   .replace(/Bearer\s+[A-Za-z0-9._~+/=-]+/gi, 'Bearer [REDACTED]')
   .replace(/((?:api[-_]?key|token|authorization|secret)["']?\s*[:=]\s*["']?)[^"'\s,}]+/gi, '$1[REDACTED]')
@@ -57,10 +71,11 @@ export class Agent {
     const messages = [{ role: 'user', content: typeof input === 'string' ? input : JSON.stringify(input) }];
     let iterations = 0, outputText = '', finishReason, lastToolError, completed = false, completionOutput;
     let emptyContinuations = 0;
+    let rateLimitRetries = 0;
     const usage = {};
     const runtimeStarted = Date.now();
-    const diagnostics = { version: 1, runtimeRevision: '2026-09-09-performance-v8',
-      countingBasis: 'streamText invocations; SDK internal network retries are not counted',
+    const diagnostics = { version: 1, runtimeRevision: '2026-09-09-rate-limit-v9',
+      countingBasis: 'model decision rounds; rate-limit request retries are recorded separately per call',
       maxIterations: this.config.maxIterations ?? 12, maxOutputTokens: this.config.maxOutputTokens,
       requiredCompletionTool: this.config.completionPolicy?.requireCompletionTool === true,
       calls: [], continuationCount: 0 };
@@ -133,75 +148,102 @@ export class Agent {
         let reasoning = '', reasoningTruncated = false;
         let calls = 0, inputErrors = 0, text = '';
         const reportedToolErrorIds = new Set();
-        const stream = streamText({ model: provider.chatModel(this.config.modelId),
-          system: this.config.systemPrompt, messages, tools, maxOutputTokens: this.config.maxOutputTokens,
-          stopWhen: stepCountIs(1), abortSignal: controller.signal });
-        for await (const event of stream.fullStream) {
-          if (currentCall.firstOutputMs === undefined && ['text-delta', 'reasoning-delta', 'tool-call'].includes(event.type)) {
-            currentCall.firstOutputMs = Date.now() - callStarted;
-          }
-          if (event.type === 'error') throw asError(event.error);
-          if (event.type === 'abort') throw new Error('Model stream aborted');
-          if (event.type === 'reasoning-delta') {
-            const delta = event.text ?? event.textDelta ?? '';
-            reasoningTruncated ||= reasoning.length + delta.length > 12000;
-            reasoning = (reasoning + delta).slice(0, 12000);
-            currentCall.reasoning = reasoning;
-            currentCall.reasoningTruncated = reasoningTruncated;
-          }
-          if (event.type === 'text-delta') {
-            const delta = event.text ?? event.textDelta ?? '';
-            text += delta; outputText += delta;
-            currentCall.outputTextChars += delta.length;
-            this.emit({ type: 'assistant-text-delta', iteration: iterations, text: delta, accumulatedText: outputText });
-          }
-          if (event.type === 'tool-call') {
-            if (event.invalid) {
-              inputErrors++;
-              if (event.toolCallId) reportedToolErrorIds.add(event.toolCallId);
-              const error = errorInfo(event.error ?? new Error('Invalid tool call'));
-              lastToolError = error.message ?? 'Invalid tool call';
-              (currentCall.toolInputErrors ??= []).push({
-                ...(event.toolName ? { name: sanitizeDiagnosticText(event.toolName) } : {}),
-                ...(event.toolCallId ? { toolCallId: sanitizeDiagnosticText(event.toolCallId) } : {}),
-                ...(error.message ? { message: error.message } : {})
-              });
-              continue;
+        let stream;
+        for (;;) {
+          try {
+            stream = streamText({ model: provider.chatModel(this.config.modelId),
+              system: this.config.systemPrompt, messages, tools, maxOutputTokens: this.config.maxOutputTokens,
+              stopWhen: stepCountIs(1), abortSignal: controller.signal });
+            for await (const event of stream.fullStream) {
+              if (currentCall.firstOutputMs === undefined && ['text-delta', 'reasoning-delta', 'tool-call'].includes(event.type)) {
+                currentCall.firstOutputMs = Date.now() - callStarted;
+              }
+              if (event.type === 'error') throw asError(event.error);
+              if (event.type === 'abort') throw new Error('Model stream aborted');
+              if (event.type === 'reasoning-delta') {
+                const delta = event.text ?? event.textDelta ?? '';
+                reasoningTruncated ||= reasoning.length + delta.length > 12000;
+                reasoning = (reasoning + delta).slice(0, 12000);
+                currentCall.reasoning = reasoning;
+                currentCall.reasoningTruncated = reasoningTruncated;
+              }
+              if (event.type === 'text-delta') {
+                const delta = event.text ?? event.textDelta ?? '';
+                text += delta; outputText += delta;
+                currentCall.outputTextChars += delta.length;
+                this.emit({ type: 'assistant-text-delta', iteration: iterations, text: delta, accumulatedText: outputText });
+              }
+              if (event.type === 'tool-call') {
+                if (event.invalid) {
+                  inputErrors++;
+                  if (event.toolCallId) reportedToolErrorIds.add(event.toolCallId);
+                  const error = errorInfo(event.error ?? new Error('Invalid tool call'));
+                  lastToolError = error.message ?? 'Invalid tool call';
+                  (currentCall.toolInputErrors ??= []).push({
+                    ...(event.toolName ? { name: sanitizeDiagnosticText(event.toolName) } : {}),
+                    ...(event.toolCallId ? { toolCallId: sanitizeDiagnosticText(event.toolCallId) } : {}),
+                    ...(error.message ? { message: error.message } : {})
+                  });
+                  continue;
+                }
+                calls++;
+                (currentCall.toolCalls ??= []).push({
+                  ...(event.toolName ? { name: sanitizeDiagnosticText(event.toolName) } : {}),
+                  ...(event.toolCallId ? { toolCallId: sanitizeDiagnosticText(event.toolCallId) } : {})
+                });
+                this.emit({ type: 'tool-started', iteration: iterations, toolCall: event });
+              }
+              if (event.type === 'tool-input-error') {
+                if (!event.toolCallId || !reportedToolErrorIds.has(event.toolCallId)) {
+                  inputErrors++;
+                  if (event.toolCallId) reportedToolErrorIds.add(event.toolCallId);
+                  if (event.errorText) lastToolError = sanitizeDiagnosticText(event.errorText);
+                  (currentCall.toolInputErrors ??= []).push({
+                    ...(event.toolName ? { name: sanitizeDiagnosticText(event.toolName) } : {}),
+                    ...(event.toolCallId ? { toolCallId: sanitizeDiagnosticText(event.toolCallId) } : {}),
+                    ...(event.errorText ? { message: sanitizeDiagnosticText(event.errorText) } : {})
+                  });
+                }
+              }
+              if (event.type === 'tool-error') {
+                if (!event.toolCallId || !reportedToolErrorIds.has(event.toolCallId)) {
+                  inputErrors++;
+                  if (event.toolCallId) reportedToolErrorIds.add(event.toolCallId);
+                  const error = errorInfo(event.error);
+                  lastToolError = error.message ?? lastToolError;
+                  (currentCall.toolInputErrors ??= []).push({
+                    ...(event.toolName ? { name: sanitizeDiagnosticText(event.toolName) } : {}),
+                    ...(event.toolCallId ? { toolCallId: sanitizeDiagnosticText(event.toolCallId) } : {}),
+                    ...(error.message ? { message: error.message } : {})
+                  });
+                }
+                this.emit({ type: 'tool-finished', iteration: iterations, toolCall: event });
+              }
+              if (event.type === 'tool-result') this.emit({ type: 'tool-finished', iteration: iterations, toolCall: event });
             }
-            calls++;
-            (currentCall.toolCalls ??= []).push({
-              ...(event.toolName ? { name: sanitizeDiagnosticText(event.toolName) } : {}),
-              ...(event.toolCallId ? { toolCallId: sanitizeDiagnosticText(event.toolCallId) } : {})
-            });
-            this.emit({ type: 'tool-started', iteration: iterations, toolCall: event });
-          }
-          if (event.type === 'tool-input-error') {
-            if (!event.toolCallId || !reportedToolErrorIds.has(event.toolCallId)) {
-              inputErrors++;
-              if (event.toolCallId) reportedToolErrorIds.add(event.toolCallId);
-              if (event.errorText) lastToolError = sanitizeDiagnosticText(event.errorText);
-              (currentCall.toolInputErrors ??= []).push({
-                ...(event.toolName ? { name: sanitizeDiagnosticText(event.toolName) } : {}),
-                ...(event.toolCallId ? { toolCallId: sanitizeDiagnosticText(event.toolCallId) } : {}),
-                ...(event.errorText ? { message: sanitizeDiagnosticText(event.errorText) } : {})
-              });
+            break;
+          } catch (error) {
+            // Only retry a rejected request, never replay a partially executed stream.
+            if (controller.signal.aborted || !isOutputRateLimit(error) ||
+              currentCall.firstOutputMs !== undefined || currentCall.tools.length) throw error;
+            if (rateLimitRetries >= RATE_LIMIT_DELAYS.length) {
+              throw Object.assign(new Error('模型共享输出额度仍不足，已达到本轮 3 次自动重试上限，请稍后再试。', { cause: error }), { statusCode: 433, code: 'LAILGW0433' });
             }
-          }
-          if (event.type === 'tool-error') {
-            if (!event.toolCallId || !reportedToolErrorIds.has(event.toolCallId)) {
-              inputErrors++;
-              if (event.toolCallId) reportedToolErrorIds.add(event.toolCallId);
-              const error = errorInfo(event.error);
-              lastToolError = error.message ?? lastToolError;
-              (currentCall.toolInputErrors ??= []).push({
-                ...(event.toolName ? { name: sanitizeDiagnosticText(event.toolName) } : {}),
-                ...(event.toolCallId ? { toolCallId: sanitizeDiagnosticText(event.toolCallId) } : {}),
-                ...(error.message ? { message: error.message } : {})
-              });
+            const waitMs = retryDelay(error, rateLimitRetries);
+            if (waitMs === undefined) {
+              throw Object.assign(new Error('模型共享输出额度不足，服务端要求的等待时间超过本轮自动重试范围，请稍后再试。', { cause: error }), { statusCode: 433, code: 'LAILGW0433' });
             }
-            this.emit({ type: 'tool-finished', iteration: iterations, toolCall: event });
+            rateLimitRetries++;
+            const retryAt = new Date(Date.now() + waitMs).toISOString();
+            (currentCall.rateLimitRetries ??= []).push({ attempt: rateLimitRetries,
+              timestamp: new Date().toISOString(), waitMs, retryAt, error: errorInfo(error) });
+            this.emit({ type: 'model-call-updated', call: { modelCall: iterations,
+              startedAt: currentCall.startedAt, status: 'running',
+              rateLimitWait: { attempt: rateLimitRetries, retryAt } } });
+            await delay(waitMs, undefined, { signal: controller.signal });
+            this.emit({ type: 'model-call-updated', call: { modelCall: iterations,
+              startedAt: currentCall.startedAt, status: 'running', rateLimitWait: null } });
           }
-          if (event.type === 'tool-result') this.emit({ type: 'tool-finished', iteration: iterations, toolCall: event });
         }
         await queue;
         finishReason = await stream.finishReason;
@@ -216,7 +258,7 @@ export class Agent {
         if (typeof reasoningTokens === 'number') currentCall.usage.reasoningTokens = reasoningTokens;
         if (typeof cachedInputTokens === 'number') currentCall.usage.cachedInputTokens = cachedInputTokens;
         this.emit({ type: 'model-call-updated', call: { modelCall: iterations, startedAt: currentCall.startedAt,
-          status: 'completed', durationMs: currentCall.durationMs, usage: currentCall.usage, tools: currentCall.tools } });
+          status: 'completed', rateLimitWait: null, durationMs: currentCall.durationMs, usage: currentCall.usage, tools: currentCall.tools } });
         for (const [key, value] of Object.entries(currentCall.usage)) usage[key] = (usage[key] ?? 0) + value;
         currentCall.toolCallCount = calls;
         currentCall.toolInputErrorCount = inputErrors;
@@ -257,7 +299,7 @@ export class Agent {
         currentCall.durationMs = Date.now() - Date.parse(currentCall.startedAt);
         currentCall.error = errorInfo(error);
         this.emit({ type: 'model-call-updated', call: { modelCall: iterations, startedAt: currentCall.startedAt,
-          status: 'failed', durationMs: currentCall.durationMs, tools: currentCall.tools } });
+          status: 'failed', rateLimitWait: null, durationMs: currentCall.durationMs, tools: currentCall.tools } });
       }
       const final = result(this.externallyAborted ? 'aborted' : 'failed', asError(error));
       this.emit({ type: 'run-failed', error: final.error, result: final }); return final;

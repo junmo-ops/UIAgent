@@ -69,6 +69,7 @@ export interface AgentRunDiagnostics {
     durationMs?: number;
     finishReason?: string;
     continuationReason?: string;
+    rateLimitRetries?: Array<{ attempt: number; timestamp: string; waitMs: number; retryAt: string; error: AgentErrorDiagnostic }>;
     usage?: Record<string, number>;
     error?: AgentErrorDiagnostic;
     tools: Array<{ name: string; toolCallId?: string; status: string; durationMs?: number; error?: AgentErrorDiagnostic }>;

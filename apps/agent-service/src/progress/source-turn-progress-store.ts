@@ -143,6 +143,10 @@ export class SourceTurnProgressStore {
         ...current,
         ...(current.status === 'running' && !previous && call.status === 'running'
           ? { phase: 'analyzing' as const, message: '正在分析当前页面并规划下一步…' } : {}),
+        ...(current.status === 'running' && call.rateLimitWait
+          ? { message: `模型服务繁忙，等待后自动重试（第 ${call.rateLimitWait.attempt}/3 次），可随时停止。` }
+          : current.status === 'running' && previous?.rateLimitWait && !call.rateLimitWait
+            ? { message: call.status === 'running' ? '正在重新请求模型，继续本轮修改…' : '模型请求已结束…' } : {}),
         modelCalls: Math.max(current.modelCalls, call.modelCall),
         modelDetails: [...(current.modelDetails ?? []).filter(item => item.modelCall !== call.modelCall), call]
           .sort((a, b) => a.modelCall - b.modelCall).slice(-60),

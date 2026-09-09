@@ -438,6 +438,7 @@ export const modelCallProgressSchema = z.object({
   modelCall: z.number().int().positive(),
   startedAt: z.string(),
   status: z.enum(['running', 'completed', 'failed']),
+  rateLimitWait: z.object({ attempt: z.number().int().positive(), retryAt: z.string() }).nullable().optional(),
   durationMs: z.number().nonnegative().optional(),
   usage: z.record(z.string(), z.number()).optional(),
   reasoning: z.string().max(12000).optional(),

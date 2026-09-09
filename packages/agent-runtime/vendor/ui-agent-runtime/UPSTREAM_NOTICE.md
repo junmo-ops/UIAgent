@@ -36,3 +36,10 @@ remains available in final server diagnostics instead of being sent repeatedly
 through the progress API. The adapter also supplies compact selected-element
 context with the initial request and uses a shorter planning/completion
 protocol to reduce model round trips.
+
+2026-09-09: Gateway output quota rejection (HTTP 433 with LAILGW0433) is
+retried before any streamed output or tool execution. The run retains prior
+messages and edits, allows cancellation during waits, and permits at most
+three retries per run (60/90/120 seconds, respecting longer Retry-After values
+within a 120-second per-wait budget). Retries are recorded separately from
+model decision rounds. This is a local runtime change.

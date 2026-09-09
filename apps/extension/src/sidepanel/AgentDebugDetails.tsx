@@ -18,6 +18,7 @@ export function AgentDebugDetails({ progress }: { progress: SourceTurnProgress }
       const ms = call.durationMs ?? Math.max(0, (running ? now : Date.parse(progress.updatedAt)) - Date.parse(call.startedAt));
       return <details key={call.modelCall}>
         <summary>第 {call.modelCall} 轮 · {call.status === 'running' ? (running ? '进行中' : '已结束，未返回统计') : call.status === 'failed' ? '失败' : '完成'} · {(ms / 1000).toFixed(1)} 秒</summary>
+        {running && call.rateLimitWait && <p>模型服务繁忙，约 {Math.max(0, Math.ceil((Date.parse(call.rateLimitWait.retryAt) - now) / 1000))} 秒后重试（第 {call.rateLimitWait.attempt}/3 次）。</p>}
         <p>输入 {call.usage?.inputTokens ?? '未返回'} · 输出 {call.usage?.outputTokens ?? '未返回'} · 推理 {call.usage?.reasoningTokens ?? '未返回'} token</p>
         {call.tools?.map((tool, index) => <p key={index}>{tool.name} · {tool.status} · {tool.durationMs ?? '未返回'} ms</p>)}
       </details>;
