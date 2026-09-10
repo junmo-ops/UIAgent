@@ -1,4 +1,5 @@
 import { defineConfig } from 'wxt';
+import extensionPackage from './package.json';
 
 const serviceUrl = new URL(process.env.WXT_PUBLIC_AGENT_SERVICE_URL ?? 'http://127.0.0.1:8787');
 // Chrome match patterns do not permit ports. The service origin below still
@@ -15,7 +16,7 @@ export default defineConfig({
   manifest: {
     name: 'UI 需求示意助手',
     description: '选择页面区域，通过自然语言生成受控的静态 UI 需求示意。',
-    version: '0.1.0',
+    version: extensionPackage.version,
     permissions: ['activeTab', 'scripting', 'sidePanel', 'storage', 'downloads'],
     host_permissions: [serviceHostPermission],
     action: { default_title: '打开 UI 需求示意助手' }

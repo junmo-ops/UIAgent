@@ -71,14 +71,16 @@ export class Agent {
     const messages = [{ role: 'user', content: typeof input === 'string' ? input : JSON.stringify(input) }];
     let iterations = 0, outputText = '', finishReason, lastToolError, completed = false, completionOutput;
     let emptyContinuations = 0;
+    let outputLimitRecoveryStreak = 0;
+    let outputLimitRecoveryCount = 0;
     let rateLimitRetries = 0;
     const usage = {};
     const runtimeStarted = Date.now();
-    const diagnostics = { version: 1, runtimeRevision: '2026-09-09-rate-limit-v10',
+    const diagnostics = { version: 1, runtimeRevision: '2026-09-10-stall-guards-v12',
       countingBasis: 'model decision rounds; rate-limit request retries are recorded separately per call',
       maxIterations: this.config.maxIterations ?? 12, maxOutputTokens: this.config.maxOutputTokens,
       requiredCompletionTool: this.config.completionPolicy?.requireCompletionTool === true,
-      calls: [], continuationCount: 0 };
+      calls: [], continuationCount: 0, outputLimitRecoveryCount: 0 };
     let currentCall;
     const errorInfo = error => {
       const value = asError(error);
@@ -96,6 +98,7 @@ export class Agent {
     const required = this.config.completionPolicy?.requireCompletionTool === true;
     // Serialize tool execution; successful completion prevents later mutations.
     let queue = Promise.resolve();
+    let terminalToolError;
     const runtimeTools = () => Object.fromEntries((this.config.tools ?? [])
       .filter(tool => tool.isAvailable?.({ iteration: iterations }) !== false)
       .map(tool => [tool.name, {
@@ -120,6 +123,7 @@ export class Agent {
             toolLog.status = 'failed';
             toolLog.error = errorInfo(error);
             lastToolError = asError(error).message;
+            if (error?.terminalToolError === true) terminalToolError = asError(error);
             return { error: lastToolError };
           } finally {
             toolLog.durationMs = Date.now() - toolStarted;
@@ -246,6 +250,7 @@ export class Agent {
           }
         }
         await queue;
+        if (terminalToolError) throw terminalToolError;
         finishReason = await stream.finishReason;
         currentCall.finishReason = finishReason;
         currentCall.durationMs = Date.now() - callStarted;
@@ -272,6 +277,18 @@ export class Agent {
         }
         if (['error', 'content-filter'].includes(finishReason)) throw new Error('Model stopped: ' + finishReason);
         if (!currentCall.executedToolCallCount) {
+          if (finishReason === 'length') {
+            if (outputLimitRecoveryStreak >= 1) {
+              throw new Error('模型连续两次达到单轮输出上限且没有执行任何工具，已停止本轮修改，避免继续空转；请缩小需求范围或稍后重试。');
+            }
+            outputLimitRecoveryStreak++;
+            outputLimitRecoveryCount++;
+            diagnostics.outputLimitRecoveryCount = outputLimitRecoveryCount;
+            diagnostics.continuationCount++;
+            currentCall.continuationReason = 'output_limit_without_tool';
+            messages.push({ role: 'user', content: '刚才的输出达到单轮上限，且没有执行任何工具。不要重新规划、复述需求或输出长篇分析；下一轮必须只执行一个具体工具调用。若现有信息不足以安全修改，立即调用澄清工具。' });
+            continue;
+          }
           const attemptedToolWithoutExecution = calls + inputErrors > 0;
           if (!required) {
             if (!attemptedToolWithoutExecution) {
@@ -287,7 +304,10 @@ export class Agent {
             ? 'tool_call_not_executed'
             : text.trim() ? 'text_without_completion' : 'empty_response';
           diagnostics.continuationCount++;
-        } else emptyContinuations = 0;
+        } else {
+          emptyContinuations = 0;
+          outputLimitRecoveryStreak = 0;
+        }
       }
       if (!completed) throw new Error('Agent exceeded maxIterations (' + (this.config.maxIterations ?? 12) + ') without completion' + (lastToolError ? '; lastToolError=' + lastToolError : ''));
       const final = result('completed'); this.emit({ type: 'run-finished', result: final }); return final;

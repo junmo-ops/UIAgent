@@ -226,7 +226,7 @@ async function captureRenderEvidence(tab: Browser.tabs.Tab, document: Extract<Co
   }
 }
 
-async function createWorkspaceFromViewport(tab: Browser.tabs.Tab, restoreOriginalViewport: boolean): Promise<SourceWorkspaceInfo> {
+async function createWorkspaceFromViewport(tab: Browser.tabs.Tab): Promise<SourceWorkspaceInfo> {
   if (!tab.id) throw new BrowserCommandError('TAB_UNAVAILABLE', '当前标签页不可用');
   try {
     // The preview replaces the source in this same tab.  Capturing the current
@@ -237,7 +237,7 @@ async function createWorkspaceFromViewport(tab: Browser.tabs.Tab, restoreOrigina
     if (!capabilitiesResponse.ok) throw new Error('无法读取副本采集配置');
     const capabilities = await capabilitiesResponse.json() as { replicaAEnabled?: boolean };
     const captured = await sendToContent(tab, {
-      type: restoreOriginalViewport ? 'capturePageSnapshotAfterViewportReflow' : 'capturePageSnapshot',
+      type: 'capturePageSnapshot',
       includeFrozenStyles: capabilities.replicaAEnabled === true
     });
     if (!captured.ok) throw new BrowserCommandError(captured.code, captured.error);
@@ -518,11 +518,8 @@ export default defineBackground(() => {
       if (current.id !== tabId) {
         throw new BrowserCommandError('TAB_CHANGED', '插件仍绑定在打开它时的页面。请切回原页面，或在当前页面重新点击插件图标。');
       }
-      if (command.type === 'createWorkspaceFromFullViewport') {
-        return { ok: true, workspace: await createWorkspaceFromViewport(tab, true) };
-      }
       if (command.type === 'createWorkspaceFromVisibleViewport') {
-        return { ok: true, workspace: await createWorkspaceFromViewport(tab, false) };
+        return { ok: true, workspace: await createWorkspaceFromViewport(tab) };
       }
       if (command.type === 'exportScreenshot') return await exportScreenshot(tab);
       return await sendToContent(tab, command);

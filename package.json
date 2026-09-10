@@ -8,6 +8,7 @@
     "dev:service": "pnpm --filter @ui-agent/agent-service dev",
     "dev:extension": "pnpm --filter @ui-agent/extension dev",
     "build:extension": "pnpm --filter @ui-agent/extension build",
+    "release:extension": "node scripts/release-extension.mjs",
     "build": "pnpm -r --if-present build",
     "export:internal-service": "node scripts/export-internal-service.mjs ../uiAgent-package",
     "check:internal-deploy": "node scripts/check-internal-deploy.mjs",

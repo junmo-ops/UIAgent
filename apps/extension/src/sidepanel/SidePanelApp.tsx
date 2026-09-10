@@ -1,5 +1,5 @@
 import { lazy, Suspense, useEffect, useRef, useState } from 'react';
-import { Alert, Button, Input, Modal, Spin, Switch, Tooltip } from 'antd';
+import { Alert, Button, Input, Modal, Spin, Tooltip } from 'antd';
 import type { TextAreaRef } from 'antd/es/input/TextArea';
 import {
   type SourceTurnRequest,
@@ -21,19 +21,16 @@ import {
   type PageSelection,
   type SourceWorkspaceInfo,
   type SourceTurnResponse,
-  type SourceTurnProgress,
-  type StaticSnapshot
+  type SourceTurnProgress
 } from '@ui-agent/contracts';
 import { onMessage, sendMessage } from '../messaging';
-import {
-  createPortableSnapshotPackage,
-  parsePortableSnapshotPackage,
-  portableSnapshotFilename,
-  serializePortableSnapshotPackage
-} from '../snapshot/portable-snapshot';
 import { DEFAULT_AGENT_SERVICE_URL, getAgentServiceUrl } from '../service/agent-service-config';
 import { agentServiceFetch } from '../service/agent-service-client';
 import { readAssistantEventStream } from '../service/assistant-event-stream';
+import {
+  fetchAvailableExtensionUpdate,
+  type ExtensionUpdateInfo
+} from '../service/extension-update';
 import {
   sourceWorkspaceSessionItem,
   type ActiveSourceTurnSession,
@@ -139,18 +136,15 @@ export function SidePanelApp() {
   const [assistantBusy, setAssistantBusy] = useState(false);
   const [streamingAnswerId, setStreamingAnswerId] = useState<string>();
   const [snapshotBusy, setSnapshotBusy] = useState(false);
-  const [useVisibleViewport, setUseVisibleViewport] = useState(true);
-  const [exportConfirmOpen, setExportConfirmOpen] = useState(false);
   const [moreOpen, setMoreOpen] = useState(false);
+  const [availableUpdate, setAvailableUpdate] = useState<ExtensionUpdateInfo>();
   const composerRef = useRef<TextAreaRef>(null);
-  const snapshotFileRef = useRef<HTMLInputElement>(null);
   const repairValidationAbortRef = useRef<AbortController | undefined>(undefined);
   const resumedTurnIdsRef = useRef(new Set<string>());
   const [recoveryAttempt, setRecoveryAttempt] = useState(0);
   const [initializationAttempt, setInitializationAttempt] = useState(0);
   const [sessionReady, setSessionReady] = useState(false);
   const busy = snapshotBusy || assistantBusy || Boolean(activeSourceTurn) || Boolean(sourceWorkspace && !sessionReady);
-
   useEffect(() => {
     let disposed = false;
     let retryTimer: ReturnType<typeof setTimeout> | undefined;
@@ -241,6 +235,23 @@ export function SidePanelApp() {
     return () => {
       window.clearTimeout(timer);
       controller.abort();
+    };
+  }, [serviceUrl]);
+  useEffect(() => {
+    let disposed = false;
+    const check = async () => {
+      try {
+        const update = await fetchAvailableExtensionUpdate(serviceUrl);
+        if (!disposed) setAvailableUpdate(update);
+      } catch {
+        // 更新检查不能影响插件核心功能，下次打开或定时检查时再重试。
+      }
+    };
+    void check();
+    const timer = window.setInterval(() => void check(), 6 * 60 * 60 * 1000);
+    return () => {
+      disposed = true;
+      window.clearInterval(timer);
     };
   }, [serviceUrl]);
   useEffect(() => {
@@ -902,64 +913,11 @@ export function SidePanelApp() {
     }
   };
 
-  const openWorkspaceFromSnapshot = async (snapshot: StaticSnapshot, sourceTabId?: number) => {
-    setSnapshotBusy(true);
-    let loadingTabId: number | undefined;
-    let previewReady = false;
-    try {
-      const loadingTab = await browser.tabs.create({
-        url: browser.runtime.getURL('/workspace-loading.html'),
-        active: false
-      });
-      loadingTabId = loadingTab.id;
-      if (!loadingTabId) throw new Error('静态副本标签页创建失败');
-      const response = await fetchAgentService(`${serviceUrl.replace(/\/$/, '')}/v1/workspaces`, {
-        method: 'POST',
-        headers: { 'content-type': 'application/json' },
-        body: JSON.stringify(snapshot)
-      });
-      if (!response.ok) throw await serviceResponseError(response, '静态源码工作区服务返回');
-      const created = sourceWorkspaceCreatedSchema.parse(await response.json());
-      const persistedWorkspace: SourceWorkspaceInfo = {
-        ...created,
-        sourceUrl: snapshot.sourceUrl,
-        revision: 0,
-        canUndo: false,
-        canRedo: false
-      };
-      await sourceWorkspaceSessionItem.setValue({
-        workspace: persistedWorkspace,
-        chat,
-        editSessionId,
-        sourceTabId
-      });
-      setPendingClarification(undefined);
-      setInstruction('');
-      setSelection(undefined);
-      const tab = await browser.tabs.update(loadingTabId, { url: created.previewUrl, active: false });
-      if (!tab?.id) throw new Error('静态副本标签页更新失败');
-      previewReady = true;
-      // This panel instance belongs to the source tab. Do not migrate its
-      // editorClientId or workspace UI to the new preview tab. The preview
-      // creates its own tab-scoped panel and restores the persisted session.
-      await browser.tabs.update(tab.id, { active: true });
-      setSnapshotBusy(false);
-    } catch (error) {
-      fail(error);
-      if (loadingTabId && !previewReady) {
-        void browser.tabs.remove(loadingTabId).catch(() => undefined);
-      } else if (loadingTabId && previewReady) {
-        // Workspace 已经成功创建时保留副本。切换过去后，新 Side Panel 会再次尝试绑定。
-        void browser.tabs.update(loadingTabId, { active: true }).catch(() => undefined);
-      }
-      setSnapshotBusy(false);
-    }
-  };
   const createSourceWorkspace = async () => {
     setSnapshotBusy(true);
     try {
       const result = await command({
-        type: useVisibleViewport ? 'createWorkspaceFromVisibleViewport' : 'createWorkspaceFromFullViewport'
+        type: 'createWorkspaceFromVisibleViewport'
       });
       const workspace = result.workspace;
       if (!workspace) throw new Error('副本已创建，但后台没有返回工作区信息');
@@ -982,46 +940,6 @@ export function SidePanelApp() {
     } catch (error) {
       fail(error);
       setSnapshotBusy(false);
-    }
-  };
-  const exportPortableSnapshot = async () => {
-    setExportConfirmOpen(false);
-    setSnapshotBusy(true);
-    try {
-      // Portable exports retain their existing standalone frozen representation.
-      const captured = await command({ type: 'capturePageSnapshot', includeFrozenStyles: true });
-      if (!captured.snapshot) throw new Error('页面没有返回可导出的静态快照');
-      const portable = createPortableSnapshotPackage(captured.snapshot);
-      const blob = new Blob([serializePortableSnapshotPackage(portable)], { type: 'application/json' });
-      const url = URL.createObjectURL(blob);
-      try {
-        await browser.downloads.download({
-          url,
-          filename: portableSnapshotFilename(captured.snapshot.title, captured.snapshot.capturedAt),
-          saveAs: true
-        });
-      } finally {
-        window.setTimeout(() => URL.revokeObjectURL(url), 5_000);
-      }
-      setNotice('离线快照包已导出');
-      setError(undefined);
-    } catch (error) {
-      fail(error);
-    } finally {
-      setSnapshotBusy(false);
-    }
-  };
-  const importPortableSnapshot = async (file: File) => {
-    setSnapshotBusy(true);
-    try {
-      const portable = parsePortableSnapshotPackage(await file.text());
-      setEditSessionId(crypto.randomUUID());
-      await openWorkspaceFromSnapshot(portable.snapshot);
-    } catch (error) {
-      fail(error);
-      setSnapshotBusy(false);
-    } finally {
-      if (snapshotFileRef.current) snapshotFileRef.current.value = '';
     }
   };
   const fail = (error: unknown) => {
@@ -1101,7 +1019,7 @@ export function SidePanelApp() {
             <div className="snapshot-welcome">
               <span className="empty-icon"><UiIcon name="snapshot" /></span>
               <strong>在静态副本中编辑当前页面</strong>
-              <p>确认后将在新标签页复制当前页面。进入副本后再选择区域、描述改动，原页面不会受到影响。</p>
+              <p>确认后会将当前标签页切换为静态副本。进入副本后再选择区域、描述改动，原页面不会受到影响。</p>
             </div>
           )}
           {sourceWorkspace && chat.length === 0 && (
@@ -1199,41 +1117,7 @@ export function SidePanelApp() {
               >
                 进入副本编辑
               </Button>
-              <span>复制当前页面并在新标签页打开</span>
-            </div>
-            <div className="snapshot-width-setting">
-              <div>
-                <strong>副本宽度</strong>
-                <span>{useVisibleViewport ? '当前可见范围（保持侧边栏打开）' : '当前可见范围（等待布局稳定）'}</span>
-              </div>
-              <Switch
-                size="small"
-                checked={useVisibleViewport}
-                disabled={busy}
-                onChange={setUseVisibleViewport}
-                checkedChildren="可见"
-                unCheckedChildren="原始"
-                aria-label="切换副本宽度"
-              />
-            </div>
-            <div className="snapshot-transfer-actions">
-              <Button type="text" icon={<UiIcon name="download" />} disabled={busy} onClick={() => setExportConfirmOpen(true)}>
-                导出快照包
-              </Button>
-              <i />
-              <Button type="text" icon={<UiIcon name="upload" />} disabled={busy} onClick={() => snapshotFileRef.current?.click()}>
-                导入快照包
-              </Button>
-              <input
-                ref={snapshotFileRef}
-                className="snapshot-file-input"
-                type="file"
-                accept=".json,application/json"
-                onChange={event => {
-                  const file = event.target.files?.[0];
-                  if (file) void importPortableSnapshot(file);
-                }}
-              />
+              <span>在当前标签页打开可编辑副本</span>
             </div>
           </div>
         )}
@@ -1298,16 +1182,31 @@ export function SidePanelApp() {
       </section>
 
       <Modal
-        open={exportConfirmOpen}
-        title="导出离线快照包"
-        okText="确认并导出"
-        cancelText="取消"
-        onCancel={() => setExportConfirmOpen(false)}
-        onOk={() => void exportPortableSnapshot()}
+        title={`必须更新 UI 需求示意助手至 v${availableUpdate?.version ?? ''}`}
+        open={Boolean(availableUpdate)}
+        okText="下载更新包"
+        cancelButtonProps={{ style: { display: 'none' } }}
+        closable={false}
+        keyboard={false}
+        maskClosable={false}
+        onOk={() => {
+          if (!availableUpdate) return;
+          void browser.downloads.download({
+            url: availableUpdate.downloadUrl,
+            filename: `ui-agent-extension-${availableUpdate.version}.zip`,
+            saveAs: true
+          }).catch(fail);
+        }}
       >
-        <p>快照包不包含脚本、接口、Cookie 或浏览器 Storage，但会包含页面当前可见文字和输入框中的值。</p>
-        <p>请确认页面内容已经脱敏，并通过公司允许的方式传输文件。</p>
+        <p>当前版本已停止使用，请完成更新并在 Chrome 扩展程序页面重新加载。</p>
+        {availableUpdate?.releaseNotes && <p className="extension-update-notes">{availableUpdate.releaseNotes}</p>}
+        <ol className="extension-update-steps">
+          <li>下载并解压 ZIP。</li>
+          <li>用新文件覆盖原来的插件目录，不要卸载现有插件。</li>
+          <li>打开 chrome://extensions，在本插件卡片上点击“重新加载”。</li>
+        </ol>
       </Modal>
+
     </main>
   );
 }

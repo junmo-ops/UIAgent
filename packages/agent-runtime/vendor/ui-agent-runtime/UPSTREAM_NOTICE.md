@@ -43,3 +43,13 @@ messages and edits, allows cancellation during waits, and permits at most
 ten consecutive retries at ten-second intervals, respecting longer Retry-After
 values. A completed model request resets the retry counter. Retries are recorded separately from
 model decision rounds. This is a local runtime change.
+
+2026-09-10: A model response that exhausts its output-token limit without
+executing a tool receives one concise action-only recovery prompt. A second
+such response stops the run instead of repeatedly consuming long model rounds.
+This is a local runtime change.
+
+2026-09-10: Adapter tool errors explicitly marked terminal now stop the run
+after the current streamed tool result is drained. This makes the existing
+identical-error retry ceiling effective and prevents repeated failed strategies
+from consuming the remaining model-iteration budget.

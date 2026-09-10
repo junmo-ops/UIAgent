@@ -10,6 +10,7 @@ test-results/
 .env
 .logs/
 apps/agent-service/.snapshots/
+apps/agent-service/extension-release/
 .DS_Store
 *.log
 *.tsbuildinfo

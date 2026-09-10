@@ -78,6 +78,11 @@ const BUDGETED_READ_ACTIONS = new Set([
   'query_workspace_structure', 'search_text', 'read_file', 'inspect_element', 'inspect_elements',
   'query_style_symbols', 'read_style_rule', 'read_style_rules'
 ]);
+const MUTATING_ACTIONS = new Set([
+  'replace_text', 'apply_patch', 'replace_in_element', 'set_element_text', 'set_element_attributes',
+  'insert_element', 'wrap_element', 'unwrap_element', 'remove_element', 'reorder_children',
+  'apply_dom_operations', 'move_element', 'clone_element'
+]);
 
 export interface ClineAgentInstance {
   subscribe?(listener: (event: import('../../vendor/ui-agent-runtime/index.js').AgentRuntimeEvent) => void): () => void;
@@ -438,11 +443,11 @@ export class ClineCodingAgentAdapter implements CodingAgentPort {
       }
       try {
         const result = await operation();
-        if (['replace_text', 'apply_patch', 'set_element_text', 'set_element_attributes',
-          'insert_element', 'wrap_element', 'unwrap_element', 'remove_element',
-          'reorder_children', 'apply_dom_operations', 'move_element', 'clone_element'].includes(action)) {
+        if (MUTATING_ACTIONS.has(action)) {
           completedReadResults.clear();
           readActionCounts.clear();
+          repeatedFailures.clear();
+          if (newSourceIds.size > 0) spatialScopeValidated = false;
         }
         if (readKey) completedReadResults.set(readKey, result);
         throwIfCancelled();
@@ -461,7 +466,10 @@ export class ClineCodingAgentAdapter implements CodingAgentPort {
           : baseMessage;
         record(action, input, context, undefined, message);
         if (repeated >= MAX_IDENTICAL_TOOL_FAILURES) {
-          throw new Error(`${message} 已达到单个错误的重试上限（${MAX_IDENTICAL_TOOL_FAILURES} 次），请调用 clarify 或改用其他策略。`);
+          throw Object.assign(
+            new Error(`${message} 已达到单个错误的重试上限（${MAX_IDENTICAL_TOOL_FAILURES} 次），已停止本轮修改以避免继续空转。`),
+            { terminalToolError: true }
+          );
         }
         throw new Error(message);
       }
@@ -474,15 +482,46 @@ export class ClineCodingAgentAdapter implements CodingAgentPort {
       }
     };
 
-    const trackNewSourceIds = (before: string, after: string) => {
+    const forgetNewSourceId = (sourceId: string) => {
+      if (!newSourceIds.delete(sourceId)) return;
+      if (declaredIntent) {
+        declaredIntent = {
+          ...declaredIntent,
+          sourceIds: declaredIntent.sourceIds.filter(candidate => candidate !== sourceId)
+        };
+      }
+    };
+
+    const trackSourceIdChanges = (before: string, after: string) => {
       const existing = sourceIdsIn(before);
+      const replacement = sourceIdsIn(after);
       let changed = false;
-      for (const sourceId of sourceIdsIn(after)) {
+      for (const sourceId of replacement) {
         if (existing.has(sourceId)) continue;
         registerNewSourceId(sourceId);
         changed = true;
       }
+      for (const sourceId of existing) {
+        if (replacement.has(sourceId) || !newSourceIds.has(sourceId)) continue;
+        forgetNewSourceId(sourceId);
+        changed = true;
+      }
       if (changed) spatialScopeValidated = false;
+    };
+
+    const reconcileNewSourceIds = async () => {
+      const removed: string[] = [];
+      for (const sourceId of [...newSourceIds]) {
+        try {
+          await workspace.inspectElement(sourceId);
+        } catch (error) {
+          const message = error instanceof Error ? error.message : String(error);
+          if (!message.includes(`源码中不存在元素 ${sourceId}`)) throw error;
+          forgetNewSourceId(sourceId);
+          removed.push(sourceId);
+        }
+      }
+      return removed;
     };
 
     const trackPositioningChange = (before: string, after: string) => {
@@ -738,7 +777,7 @@ export class ClineCodingAgentAdapter implements CodingAgentPort {
           async () => {
             requireIntentDeclared();
             const result = await workspace.replaceText(input.path, input.search, input.replace);
-            if (input.path === 'index.html') trackNewSourceIds(input.search, input.replace);
+            if (input.path === 'index.html') trackSourceIdChanges(input.search, input.replace);
             else trackPositioningChange(input.search, input.replace);
             return result;
           }
@@ -778,8 +817,8 @@ export class ClineCodingAgentAdapter implements CodingAgentPort {
             const result = await workspace.applyPatch(input.path, input.edits);
             if (input.path === 'index.html') {
               for (const edit of input.edits) {
-                if (edit.kind === 'replace') trackNewSourceIds(edit.search, edit.replace);
-                else trackNewSourceIds('', edit.text);
+                if (edit.kind === 'replace') trackSourceIdChanges(edit.search, edit.replace);
+                else trackSourceIdChanges('', edit.text);
               }
             } else {
               for (const edit of input.edits) {
@@ -806,7 +845,7 @@ export class ClineCodingAgentAdapter implements CodingAgentPort {
           async () => {
             requireIntentDeclared();
             const result = await workspace.replaceInElement(input.sourceId, input.search, input.replace);
-            trackNewSourceIds(input.search, input.replace);
+            trackSourceIdChanges(input.search, input.replace);
             return result;
           }
         )
@@ -1021,6 +1060,12 @@ export class ClineCodingAgentAdapter implements CodingAgentPort {
           input,
           context,
           async () => {
+            const removedSourceIds = await reconcileNewSourceIds();
+            const activeSourceIds = new Set(newSourceIds);
+            const omittedSourceIds = [...activeSourceIds].filter(sourceId => !input.createdSourceIds.includes(sourceId));
+            if (omittedSourceIds.length) {
+              throw new Error(`createdSourceIds 遗漏了仍存在的本轮新增元素：${omittedSourceIds.join(', ')}`);
+            }
             const selectedSourceId = turn.request.sourceId;
             if (input.scope === 'global' && declaredIntent?.layoutScope !== 'global') {
               throw new Error('当前已确认意图没有声明 global 布局范围；请围绕已确认容器定位，或在修改前 clarify');
@@ -1033,7 +1078,7 @@ export class ClineCodingAgentAdapter implements CodingAgentPort {
                   throw new Error(`容器 ${input.containerSourceId} 不在选中元素 ${selectedSourceId} 的祖先路径中；请使用选区语义祖先或最近公共父容器`);
                 }
               }
-              for (const sourceId of newSourceIds) {
+              for (const sourceId of activeSourceIds) {
                 const createdPath = ancestrySourceIds(await workspace.inspectElement(sourceId));
                 if (!createdPath.includes(input.containerSourceId)) {
                   throw new Error(`新增元素 ${sourceId} 不在声明的容器 ${input.containerSourceId} 内`);
@@ -1057,7 +1102,7 @@ export class ClineCodingAgentAdapter implements CodingAgentPort {
               }
             }
             spatialScopeValidated = true;
-            return `空间归属校验通过：scope=${input.scope}${input.containerSourceId ? `，container=${input.containerSourceId}` : ''}；${input.reason}`;
+            return `空间归属校验通过：scope=${input.scope}${input.containerSourceId ? `，container=${input.containerSourceId}` : ''}${removedSourceIds.length ? `；已忽略本轮随后删除的元素 ${removedSourceIds.join(', ')}` : ''}；${input.reason}`;
           }
         )
       }),
@@ -1210,7 +1255,7 @@ export class ClineCodingAgentAdapter implements CodingAgentPort {
       if (completion?.kind === 'completed') {
         response = {
           kind: 'completed',
-          summary: `${completion.summary}（${completion.validation}）`,
+          summary: `${completion.summary}（${completion.validation}；已完成源码规则校验，交互行为与视觉效果需在副本页面确认）`,
           revision: completion.revision,
           unchanged: completion.unchanged,
           modelCalls: checkpoint.modelCalls,

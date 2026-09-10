@@ -26,7 +26,8 @@ COPY apps/agent-service apps/agent-service
 COPY packages/agent-runtime packages/agent-runtime
 COPY packages/contracts packages/contracts
 
-RUN chmod -R 777 /opt/deployments \
+RUN pnpm --filter @ui-agent/agent-service package:extension \
+  && chmod -R 777 /opt/deployments \
   && mkdir -p /opt/deployments/data/source-workspaces /opt/deployments/data/logs
 
 EXPOSE 8787

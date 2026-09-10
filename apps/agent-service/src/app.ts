@@ -46,6 +46,8 @@ import {
   WORKSPACE_ARCHIVE_VERSION
 } from '@ui-agent/contracts';
 import { randomUUID } from 'node:crypto';
+import { existsSync, readFileSync } from 'node:fs';
+import { fileURLToPath } from 'node:url';
 import { Hono, type MiddlewareHandler } from 'hono';
 import { cors } from 'hono/cors';
 import { streamSSE } from 'hono/streaming';
@@ -71,6 +73,27 @@ export function createApp(
 ) {
   const publicBaseUrl = env.PUBLIC_BASE_URL?.trim().replace(/\/+$/, '');
   const publicUrl = (path: string, requestUrl: string) => new URL(path, publicBaseUrl ? `${publicBaseUrl}/` : requestUrl).toString();
+  const extensionReleaseDirectory = fileURLToPath(new URL('../extension-release/', import.meta.url));
+  const extensionReleaseManifestPath = `${extensionReleaseDirectory}/manifest.json`;
+  const extensionReleaseZipPath = `${extensionReleaseDirectory}/ui-agent-extension.zip`;
+  const extensionRelease = (() => {
+    if (!existsSync(extensionReleaseManifestPath) || !existsSync(extensionReleaseZipPath)) return undefined;
+    try {
+      const value = JSON.parse(readFileSync(extensionReleaseManifestPath, 'utf8')) as Record<string, unknown>;
+      if (typeof value.version !== 'string' || !/^\d+(?:\.\d+){0,3}$/.test(value.version)) return undefined;
+      return {
+        version: value.version,
+        ...(typeof value.releaseNotes === 'string' && value.releaseNotes.trim()
+          ? { releaseNotes: value.releaseNotes.trim() }
+          : {}),
+        ...(typeof value.publishedAt === 'string' && value.publishedAt.trim()
+          ? { publishedAt: value.publishedAt.trim() }
+          : {})
+      };
+    } catch {
+      return undefined;
+    }
+  })();
   const logStore = providedLogStore ?? new TurnLogStore({
     filePath: env.LOG_FILE ?? '.logs/agent-turns.jsonl',
     model: {
@@ -414,6 +437,24 @@ export function createApp(
       authReady: !authenticator.configurationError,
       workspaceIdentityIsolation: identityIsolation
     }))
+    .get('/v1/extension/latest', c => {
+      if (!extensionRelease) return c.body(null, 204);
+      return c.json({
+        ...extensionRelease,
+        downloadUrl: publicUrl('/v1/extension/download', c.req.url)
+      });
+    })
+    .get('/v1/extension/download', c => {
+      if (!extensionRelease || !existsSync(extensionReleaseZipPath)) {
+        return c.json({ code: 'EXTENSION_RELEASE_NOT_FOUND', message: '当前服务未包含插件更新包' }, 404);
+      }
+      const archive = readFileSync(extensionReleaseZipPath);
+      c.header('Content-Type', 'application/zip');
+      c.header('Content-Disposition', `attachment; filename="ui-agent-extension-${extensionRelease.version}.zip"`);
+      c.header('Content-Length', String(archive.byteLength));
+      c.header('Cache-Control', 'public, max-age=3600');
+      return c.body(new Uint8Array(archive).buffer as ArrayBuffer);
+    })
     .post('/v1/auth/installations', c => {
       if (authenticator.mode === 'installation' && authenticator.configurationError) {
         return c.json({ code: 'INSTALLATION_AUTH_MISCONFIGURED', message: authenticator.configurationError }, 503);

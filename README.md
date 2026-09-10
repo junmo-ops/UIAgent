@@ -159,6 +159,18 @@ WXT_PUBLIC_AGENT_SERVICE_URL=https://ui-agent.example.com pnpm --filter @ui-agen
 
 构建产物位于 `apps/extension/.output/chrome-mv3`。该服务地址会同时用于 API 请求、副本页面校验和精确的 Chrome 主机权限；安装这个构建产物的用户不需要在自己的电脑上启动 Agent Service。插件顶部会真实检测 `/health`，分别展示“连接中”“已连接”或“未连接”，网络失败时会提示实际服务地址，不再只显示 `Failed to fetch`。
 
+`build:extension` 会按当前版本生成 Chrome 插件文件，并把构建目录与版本清单同步到 Agent Service 的 `extension-release` 目录。Git 仓库不需要保存 ZIP；Docker 镜像构建时会用 Node.js 内置能力生成标准 ZIP，运行时下载接口只读取该文件，不引入新的 npm 包。正式发布使用 `release:extension`，它会自动增加 patch 版本；构建失败时自动恢复原版本：
+
+```bash
+# 自动执行 0.1.0 -> 0.1.1，并生成插件构建文件
+pnpm run release:extension -- "本次更新说明"
+
+# 导出并部署服务端，插件构建文件会自动包含在交付目录中
+pnpm run export:internal-service
+```
+
+如果构建插件前直接导出服务端，服务仍可正常部署，但更新接口返回 204，不展示更新提示。已安装插件会在打开时及每隔 6 小时检查一次；发现更高版本后会阻断插件主功能并要求下载更新包。更新时应覆盖原插件目录并在 `chrome://extensions` 点击“重新加载”，不要先卸载插件。
+
 远程服务至少需要持久化 `/data`，其中包含静态工作区与操作日志。当前安装身份适合公司内网受控试点：它提供浏览器安装级隔离，但不等同于员工账号登录；服务仍不应直接暴露到公共互联网。正式多端使用时再接入公司 SSO，并将安装身份下的工作区迁移给员工账号。
 
 ## 验证

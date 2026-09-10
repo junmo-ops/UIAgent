@@ -106,6 +106,9 @@ button, textarea { font: inherit; }
 .header-back.ant-btn:hover { color: #242424 !important; background: #f2f0ee !important; }
 .header-back .ui-icon { width: 13px; height: 13px; }
 
+.extension-update-notes { white-space: pre-wrap; color: #5f5a56; }
+.extension-update-steps { padding-left: 20px; color: #3f3b38; line-height: 1.8; }
+
 .demo-badge {
   padding: 3px 7px;
   color: #8b8885;
@@ -588,53 +591,6 @@ button, textarea { font: inherit; }
   font-size: 10px;
   line-height: 1.35;
 }
-
-.snapshot-width-setting {
-  width: 100%;
-  padding: 7px 1px 1px;
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 10px;
-}
-
-.snapshot-width-setting > div {
-  min-width: 0;
-  display: flex;
-  flex-direction: column;
-  gap: 2px;
-}
-
-.snapshot-width-setting strong { color: #5c5753; font-size: 10px; font-weight: 600; }
-.snapshot-width-setting span { color: #97928e; font-size: 10px; line-height: 1.35; }
-.snapshot-width-setting .ant-switch { flex: 0 0 auto; }
-
-.snapshot-transfer-actions {
-  width: 100%;
-  padding-top: 7px;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  gap: 4px;
-  border-top: 1px solid #eeecea;
-}
-
-.snapshot-transfer-actions .ant-btn {
-  height: 29px;
-  padding: 0 8px;
-  color: #716d69;
-  border-radius: 8px;
-  font-size: 10px;
-}
-
-.snapshot-transfer-actions .ant-btn:not(:disabled):hover {
-  color: #262422 !important;
-  background: #f0eeec !important;
-}
-
-.snapshot-transfer-actions .ui-icon { width: 13px; height: 13px; }
-.snapshot-transfer-actions > i { width: 1px; height: 14px; background: #dfdcd9; }
-.snapshot-file-input { display: none; }
 
 .composer-shell {
   min-height: 112px;

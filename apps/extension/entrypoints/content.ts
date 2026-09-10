@@ -219,22 +219,6 @@ export default defineContentScript({
         if (command.type === 'capturePageSnapshot') {
           return { ok: true, snapshot: captureStaticSnapshot(document.body, command.includeFrozenStyles === true) } satisfies ContentCommandResult;
         }
-        if (command.type === 'capturePageSnapshotAfterViewportReflow') {
-          // Side Panel removal changes CSS media queries and layout. Capture only
-          // after the browser has observed a stable viewport for several frames.
-          let stableFrames = 0;
-          let previousWidth = innerWidth;
-          const deadline = performance.now() + 1_000;
-          while (stableFrames < 3 && performance.now() < deadline) {
-            await new Promise<void>(resolve => requestAnimationFrame(() => resolve()));
-            if (innerWidth === previousWidth) stableFrames += 1;
-            else {
-              previousWidth = innerWidth;
-              stableFrames = 0;
-            }
-          }
-          return { ok: true, snapshot: captureStaticSnapshot(document.body, command.includeFrozenStyles === true) } satisfies ContentCommandResult;
-        }
         if (command.type === 'prepareScreenshot') { selection.hide(); return { ok: true } satisfies ContentCommandResult; }
         if (command.type === 'finishScreenshot') { selection.refresh(); return { ok: true } satisfies ContentCommandResult; }
         if (command.type === 'observeWorkspacePreview') {

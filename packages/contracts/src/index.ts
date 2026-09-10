@@ -683,8 +683,6 @@ export type ContentCommand =
   | { type: 'deactivateEditor' }
   | { type: 'startSelection' }
   | { type: 'capturePageSnapshot'; includeFrozenStyles?: boolean }
-  | { type: 'capturePageSnapshotAfterViewportReflow'; includeFrozenStyles?: boolean }
-  | { type: 'createWorkspaceFromFullViewport' }
   | { type: 'createWorkspaceFromVisibleViewport' }
   | { type: 'bindEditorTab'; tabId: number; previewUrl: string }
   | { type: 'reloadPreview' }

@@ -29,15 +29,15 @@
   },
   "files": {
     "index.js": {
-      "sha256": "43524ad7664a434afb2165071788169b7d164d089698d68b0c9aff073d85ecbb"
+      "sha256": "1b210da15b1013596bf0c88d272ba285e58ce05a0ba4480d58639efb89705011"
     },
     "index.d.ts": {
-      "sha256": "201f51d3758eaf78a77d2e793d401c81bb98d84d0f33332e7a2ed072afc44353"
+      "sha256": "418704ed7272993ea3328e0b97012596184d4c9e1ae93e2d8d61e5ff8b396181"
     },
     "UPSTREAM_NOTICE.md": {
-      "sha256": "c556b1c71ad188e0c99f0f845ed3fbf7b7cad549548f8368a117a0e0559de45a"
+      "sha256": "a9dffa301bc9bc30a8647ac8c8c6c2c402087a201bee895ff112defce2da1dbb"
     }
   },
   "checksumNote": "manifest.json is excluded to avoid a self-referential checksum.",
-  "localRevision": "2026-09-09-rate-limit-v10"
+  "localRevision": "2026-09-10-stall-guards-v12"
 }

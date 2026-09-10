@@ -1,5 +1,6 @@
 const ACTION_ATTRIBUTE = 'data-ui-agent-action';
 const TARGETS_ATTRIBUTE = 'data-ui-agent-targets';
+const CLOSE_TARGETS_ATTRIBUTE = 'data-ui-agent-close-targets';
 const GROUP_ATTRIBUTE = 'data-ui-agent-state-group';
 const VALUE_ATTRIBUTE = 'data-ui-agent-state-value';
 const WHEN_ATTRIBUTE = 'data-ui-agent-state-when';
@@ -48,14 +49,19 @@ export class ControlledInteractionRuntime {
 
   private closeLayer(control: HTMLElement): void {
     const targets = this.targets(control);
+    this.closeTargets(targets);
+    this.openLayers.delete(control);
+  }
+
+  private closeTargets(targets: HTMLElement[]): void {
     for (const target of targets) this.setVisible(target, false);
     for (const trigger of this.document.querySelectorAll<HTMLElement>(`[${TARGETS_ATTRIBUTE}]`)) {
       const triggerTargets = this.targets(trigger);
       if (triggerTargets.some(target => targets.includes(target))) {
         trigger.setAttribute('aria-expanded', String(triggerTargets.some(target => !target.hidden)));
+        if (!triggerTargets.some(target => !target.hidden)) this.openLayers.delete(trigger);
       }
     }
-    this.openLayers.delete(control);
   }
 
   private dismissOutside(target: Element): void {
@@ -82,20 +88,24 @@ export class ControlledInteractionRuntime {
 
   activate(control: HTMLElement): boolean {
     const action = control.getAttribute(ACTION_ATTRIBUTE) as ControlledAction | null;
-    if (action === 'toggle-checkbox') return this.toggleCheckbox(control);
-    if (action === 'set-radio') return this.setRadio(control);
-    if (action === 'set-state') return this.setState(control);
-    if (action !== 'toggle' && action !== 'show' && action !== 'hide') return false;
-    const targets = this.targets(control);
-    if (!targets.length) return false;
-    const makeVisible = action === 'show' || (action === 'toggle' && targets.some(target => target.hidden));
-    for (const target of targets) this.setVisible(target, makeVisible);
-    control.setAttribute('aria-expanded', String(makeVisible));
-    if (makeVisible && control.hasAttribute(DISMISS_ATTRIBUTE)) {
-      this.openLayers.delete(control);
-      this.openLayers.add(control);
-    } else this.openLayers.delete(control);
-    return true;
+    let activated = false;
+    if (action === 'toggle-checkbox') activated = this.toggleCheckbox(control);
+    else if (action === 'set-radio') activated = this.setRadio(control);
+    else if (action === 'set-state') activated = this.setState(control);
+    else if (action === 'toggle' || action === 'show' || action === 'hide') {
+      const targets = this.targets(control);
+      if (!targets.length) return false;
+      const makeVisible = action === 'show' || (action === 'toggle' && targets.some(target => target.hidden));
+      for (const target of targets) this.setVisible(target, makeVisible);
+      control.setAttribute('aria-expanded', String(makeVisible));
+      if (makeVisible && control.hasAttribute(DISMISS_ATTRIBUTE)) {
+        this.openLayers.delete(control);
+        this.openLayers.add(control);
+      } else this.openLayers.delete(control);
+      activated = true;
+    }
+    if (activated) this.closeTargets(this.targets(control, CLOSE_TARGETS_ATTRIBUTE));
+    return activated;
   }
 
   private toggleCheckbox(control: HTMLElement): boolean {
@@ -133,8 +143,8 @@ export class ControlledInteractionRuntime {
     return true;
   }
 
-  private targets(control: HTMLElement): HTMLElement[] {
-    const ids = (control.getAttribute(TARGETS_ATTRIBUTE) ?? '')
+  private targets(control: HTMLElement, attribute = TARGETS_ATTRIBUTE): HTMLElement[] {
+    const ids = (control.getAttribute(attribute) ?? '')
       .split(/\s+/)
       .map(value => safeToken(value))
       .filter((value): value is string => Boolean(value))

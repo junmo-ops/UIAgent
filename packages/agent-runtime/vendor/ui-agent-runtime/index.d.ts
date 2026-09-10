@@ -51,6 +51,7 @@ export interface AgentRunDiagnostics {
   maxOutputTokens?: number;
   requiredCompletionTool: boolean;
   continuationCount: number;
+  outputLimitRecoveryCount?: number;
   completionTool?: string;
   durationMs: number;
   status: string;
