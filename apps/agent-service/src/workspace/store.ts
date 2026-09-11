@@ -746,40 +746,165 @@ function sourceLayoutFacts(
   };
 }
 
-function cssRulesForClass(content: string, className: string): string[] {
-  const token = new RegExp(`(^|[^\\w-])\\.${escapeRegExp(className)}(?![\\w-])`);
-  const matches: string[] = [];
-  let ruleStart = 0;
-  let opening = -1;
-  let depth = 0;
+function cssRulesForClasses(
+  content: string,
+  classNames: readonly string[],
+  limitPerClass = Number.POSITIVE_INFINITY
+): Map<string, string[]> {
+  const names = [...new Set(classNames.filter(Boolean))];
+  const matches = new Map(names.map(name => [name, [] as string[]]));
+  if (!names.length) return matches;
+  const tokens = names.map(name => ({
+    name, pattern: new RegExp('\\.' + escapeRegExp(name) + '(?![\\w-]|\\\\)')
+  }));
+  const blocks: Array<{ opening: number; prelude: string }> = [];
+  let statementStart = 0;
   let quote: '"' | "'" | undefined;
-  let escaped = false;
+  let parentheses = 0;
+  let brackets = 0;
   for (let index = 0; index < content.length; index += 1) {
     const char = content[index]!;
+    if (char === '\\') { index += 1; continue; }
     if (quote) {
-      if (escaped) escaped = false;
-      else if (char === '\\') escaped = true;
-      else if (char === quote) quote = undefined;
+      if (char === quote || char === '\n' || char === '\r') quote = undefined;
       continue;
     }
-    if (char === '"' || char === "'") {
-      quote = char;
+    if (char === '"' || char === "'") { quote = char; continue; }
+    if (char === '/' && content[index + 1] === '*') {
+      const end = content.indexOf('*/', index + 2);
+      if (end < 0) break;
+      if (!content.slice(statementStart, index).trim()) statementStart = end + 2;
+      index = end + 1;
       continue;
     }
+    if (char === '(') { parentheses += 1; continue; }
+    if (char === ')') { parentheses = Math.max(0, parentheses - 1); continue; }
+    if (char === '[') { brackets += 1; continue; }
+    if (char === ']') { brackets = Math.max(0, brackets - 1); continue; }
+    if (parentheses || brackets) continue;
     if (char === '{') {
-      if (depth === 0) opening = index;
-      depth += 1;
-      continue;
+      blocks.push({ opening: index, prelude: content.slice(statementStart, index).trim() });
+      statementStart = index + 1;
+    } else if (char === ';') {
+      statementStart = index + 1;
+    } else if (char === '}') {
+      const block = blocks.pop();
+      if (block && block.prelude && !block.prelude.startsWith('@')) {
+        // Class-looking text in comments, strings and attribute values is not a class selector.
+        const selectorTokens = block.prelude.replace(/\/\*[\s\S]*?\*\/|"(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*'|\[(?:\\.|[^\]\\])*\]/g, '');
+        const matched = tokens.filter(token => (
+          matches.get(token.name)!.length < limitPerClass && token.pattern.test(selectorTokens)
+        ));
+        if (matched.length) {
+          // Preserve conditions, cascade layers and nesting parents.
+          const rule = blocks.map(parent => parent.prelude + '{').join('')
+            + block.prelude + content.slice(block.opening, index + 1)
+            + '}'.repeat(blocks.length);
+          for (const token of matched) matches.get(token.name)!.push(rule);
+        }
+      }
+      statementStart = index + 1;
     }
-    if (char !== '}' || depth === 0) continue;
-    depth -= 1;
-    if (depth !== 0 || opening < 0) continue;
-    const selector = content.slice(ruleStart, opening).trim();
-    if (token.test(selector)) matches.push(`${selector}${content.slice(opening, index + 1)}`);
-    ruleStart = index + 1;
-    opening = -1;
   }
   return matches;
+}
+
+function cssRulesForClass(content: string, className: string): string[] {
+  return cssRulesForClasses(content, [className]).get(className) ?? [];
+}
+
+// Do not cut a rule in the middle of a declaration or drop its closing braces.
+function boundedStyleEntries(entries: readonly string[], budget: number): string {
+  const kept: string[] = [];
+  let size = 0;
+  let omitted = 0;
+  for (const entry of entries) {
+    if (size + entry.length + 1 > budget - 160) { omitted += 1; continue; }
+    kept.push(entry);
+    size += entry.length + 1;
+  }
+  if (omitted) kept.push(
+    '[省略 ' + omitted + ' 条：超出输出预算，未截断规则；可缩小查询范围或读取对应样式文件]'
+  );
+  return kept.join('\n');
+}
+
+function elementClassNames(openingTag: string): string[] {
+  return [...new Set(
+    (/\bclass\s*=\s*["']([^"']+)["']/i.exec(openingTag)?.[1] ?? '')
+      .split(/\s+/)
+      .filter(Boolean)
+  )];
+}
+
+function antDesignComponentGuidance(tag: string, classNames: readonly string[]): string | undefined {
+  const standardEvidence = classNames.some(className => className === 'anticon' || className.startsWith('ant-'));
+  const componentFamilies = ['btn', 'checkbox', 'radio', 'input', 'select'] as const;
+  const compatibleFamilies = componentFamilies.flatMap(family => classNames
+    .map(className => new RegExp(`^(.*)-${family}$`).exec(className)?.[1])
+    .filter((prefix): prefix is string => Boolean(prefix))
+    .filter(prefix => classNames.some(className => className.startsWith(`${prefix}-${family}-`)))
+    .map(prefix => ({ prefix, family })));
+  const compatibleEvidence = compatibleFamilies.length > 0;
+  if (!standardEvidence && !compatibleEvidence) return undefined;
+
+  const evidence = standardEvidence
+    ? classNames.filter(className => className === 'anticon' || className.startsWith('ant-')).slice(0, 6)
+    : classNames.filter(className => compatibleFamilies.some(({ prefix, family }) => (
+        className.startsWith(`${prefix}-${family}`)
+      ))).slice(0, 6);
+  const versionNote = '版本未知；以当前页面实际 class、主题变量和覆盖规则为准。';
+  if (tag === 'button' || classNames.some(className => /(?:^|-)btn(?:-|$)/.test(className))) {
+    const iconOnly = classNames.some(className => /(?:^|-)btn-icon-only$/.test(className));
+    const baseClasses = classNames.filter(className => /(?:^|-)btn(?:$|-(?:default|primary|dashed|link|text))$/.test(className));
+    return [
+      `组件库线索: Ant Design${compatibleEvidence && !standardEvidence ? ' 兼容前缀' : ''}；证据 class=${JSON.stringify(evidence)}；${versionNote}`,
+      `组件类型: Button${iconOnly ? '（当前为 icon-only 形态）' : ''}。`,
+      `组件规范: 优先保留页面现有基础/类型 class${baseClasses.length ? ` ${JSON.stringify(baseClasses)}` : ''} 和主题；图标按钮改为文字按钮时通常移除 icon-only、固定正方形尺寸及零 padding 约束。除非用户明确要求，不自行切换 primary/default 类型；只检查当前元素实际命中的覆盖规则。`
+    ].join('\n');
+  }
+  if (classNames.some(className => /(?:^|-)checkbox(?:-|$)/.test(className))) {
+    return `组件库线索: Ant Design；证据 class=${JSON.stringify(evidence)}；${versionNote}\n组件类型: Checkbox。组件规范: 保留 input 与 wrapper/inner 的既有结构和状态 class，文案通常位于相邻 span；视觉调整优先复用当前主题规则。`;
+  }
+  if (classNames.some(className => /(?:^|-)radio(?:-|$)/.test(className))) {
+    return `组件库线索: Ant Design；证据 class=${JSON.stringify(evidence)}；${versionNote}\n组件类型: Radio。组件规范: 保留 input、inner 与 wrapper 的既有结构和状态 class，组内布局以实际容器为准。`;
+  }
+  if (tag === 'input' || classNames.some(className => /(?:^|-)input(?:-|$)/.test(className))) {
+    return `组件库线索: Ant Design；证据 class=${JSON.stringify(evidence)}；${versionNote}\n组件类型: Input。组件规范: 优先复用页面现有 input、affix-wrapper、size 和状态 class；placeholder 用属性修改，尺寸和前后缀结构以实际 DOM 为准。`;
+  }
+  if (classNames.some(className => /(?:^|-)select(?:-|$)/.test(className))) {
+    return `组件库线索: Ant Design；证据 class=${JSON.stringify(evidence)}；${versionNote}\n组件类型: Select。组件规范: 保留 selector、selection item、arrow 等既有结构；静态副本只表达界面状态，不补真实下拉业务逻辑。`;
+  }
+  return `组件库线索: Ant Design；证据 class=${JSON.stringify(evidence)}；${versionNote}`;
+}
+
+function relevantElementStyleContext(
+  tag: string,
+  openingTag: string,
+  sources: ReadonlyArray<{ path: string; content: string }>
+): string | undefined {
+  const classNames = elementClassNames(openingTag).slice(0, 24);
+  if (!classNames.length) return undefined;
+  const perClass = new Map<string, string[]>();
+  // Reserve the output budget for editable overrides before original rules.
+  for (const source of [...sources].sort((a, b) => Number(b.path === 'author-overrides.css') - Number(a.path === 'author-overrides.css'))) {
+    const sourceMatches = cssRulesForClasses(source.content, classNames, 2);
+    for (const [className, rules] of sourceMatches) {
+      if (!rules.length) continue;
+      const values = perClass.get(className) ?? [];
+      values.push(...rules.map(rule => `${source.path}: ${rule}`));
+      perClass.set(className, values);
+    }
+  }
+  const rules = [...perClass]
+    .flatMap(([className, values]) => values.map(value => `.${className} -> ${value}`))
+    .sort((a, b) => Number(b.includes('-> author-overrides.css:')) - Number(a.includes('-> author-overrides.css:')));
+  const componentGuidance = antDesignComponentGuidance(tag, classNames);
+  if (!rules.length && !componentGuidance) return undefined;
+  const boundedRules = boundedStyleEntries(rules, 4_000);
+  return [componentGuidance, rules.length ? `目标 class 的候选规则（覆盖层优先展示；条件与完整选择器仍需核对，不代表当前渲染已生效）:\n${boundedRules}` : undefined]
+    .filter(Boolean)
+    .join('\n');
 }
 
 function cssSnippetsForSymbol(content: string, symbol: string, limit = 6): string[] {
@@ -1786,6 +1911,7 @@ export class SourceWorkspaceStore {
     const original = this.readWorkspaceFiles(directory);
     let working: WorkspaceFiles = { ...original };
     const authorRuleMode = this.hasAuthorRuleCandidate(workspaceId);
+    const authorCssContent = authorRuleMode ? this.authorCss(workspaceId) ?? '' : '';
     const editableStylePath: 'snapshot.css' | 'author-overrides.css' = authorRuleMode
       ? 'author-overrides.css'
       : 'snapshot.css';
@@ -1833,7 +1959,7 @@ export class SourceWorkspaceStore {
       submissionMode: candidate ? 'candidate' : 'direct',
       listFiles: async () => [
         ...WORKSPACE_FILES.map(path => ({ path, chars: readableContent(path).length })),
-        ...(this.authorCss(workspaceId) ? [{ path: 'author.css', chars: this.authorCss(workspaceId)!.length }] : []),
+        ...(authorCssContent ? [{ path: 'author.css', chars: authorCssContent.length }] : []),
         ...(this.unreadableAuthorStyleSources(workspaceId).length
           ? [{ path: 'author-style-links.json', chars: JSON.stringify(this.unreadableAuthorStyleSources(workspaceId)).length }]
           : [])
@@ -1921,6 +2047,7 @@ export class SourceWorkspaceStore {
         const html = working['index.html'];
         const full = options.detail === 'full';
         const range = sourceElementRange(html, sourceId);
+        const openingTag = html.slice(range.start, findTagEnd(html, range.start) + 1);
         const ancestry = sourceElementAncestry(html, sourceId);
         const outline = JSON.parse(working['outline.json']) as {
           nodes: Array<{
@@ -1953,41 +2080,56 @@ export class SourceWorkspaceStore {
             full ? 'full' : 'context'
           ))
         };
+        const styleSources: Array<{ path: string; content: string }> = authorRuleMode
+          ? [
+              { path: 'author.css', content: authorCssContent },
+              { path: 'author-overrides.css', content: working['author-overrides.css'] }
+            ]
+          : [{ path: 'snapshot.css', content: working['snapshot.css'] }];
+        const styleContext = relevantElementStyleContext(range.tag, openingTag, styleSources);
         return [
           `元素 ${sourceId}：tag=${range.tag}，字符 ${range.start}-${range.end}`,
           `结构路径: ${ancestry.map(item => `${item.sourceId}<${item.tag}>`).join(' > ')}`,
           `布局上下文: ${JSON.stringify(layoutContext)}`,
+          ...(styleContext ? [`组件与样式上下文:\n${styleContext}`] : []),
           compactElementSource(html.slice(range.start, range.end), full ? 12_000 : 4_000)
         ].join('\n');
       },
       queryStyleSymbols: async symbols => {
         const sources: Array<{ path: string; content: string }> = authorRuleMode
           ? [
-              { path: 'author.css', content: this.authorCss(workspaceId) ?? '' },
+              { path: 'author.css', content: authorCssContent },
               { path: 'author-overrides.css', content: working['author-overrides.css'] }
             ]
           : [{ path: 'snapshot.css', content: working['snapshot.css'] }];
-        const sections = symbols.map(rawSymbol => {
+        const normalized = symbols.map(rawSymbol => {
           const symbol = rawSymbol.trim();
           if (!/^(?:\.?[a-zA-Z_][\w-]{0,119}|--[a-zA-Z_][\w-]{0,117})$/.test(symbol)) {
             throw new Error(`样式符号格式无效：${rawSymbol}`);
           }
-          const variable = symbol.startsWith('--');
-          const className = symbol.replace(/^\./, '');
-          const matches = sources.flatMap(source => {
+          return { symbol, variable: symbol.startsWith('--'), className: symbol.replace(/^\./, '') };
+        });
+        const classNames = normalized.filter(item => !item.variable).map(item => item.className);
+        const ruleIndexes = new Map(sources.map(source => [
+          source.path,
+          cssRulesForClasses(source.content, classNames, 4)
+        ]));
+        let matchedSymbols = 0;
+        const sections = normalized.flatMap(({ symbol, variable, className }) => {
+          const matches = [...sources].sort((a, b) => Number(b.path === 'author-overrides.css') - Number(a.path === 'author-overrides.css')).flatMap(source => {
             const values = variable
               ? cssSnippetsForSymbol(source.content, symbol, 4)
-              : cssRulesForClass(source.content, className).slice(0, 4);
-            return values.map(value => `${source.path}: ${value}`);
+              : ruleIndexes.get(source.path)?.get(className) ?? [];
+            return values.map(value => `${symbol} — ${source.path}: ${value}`);
           });
+          if (matches.length) matchedSymbols += 1;
           return matches.length
-            ? `${symbol}：\n${matches.join('\n')}`
-            : `${symbol}：未找到可读取的样式定义或引用`;
+            ? matches
+            : [`${symbol}：未提取到可读取的完整规则或引用（不代表原始 CSS 中不存在）`];
         });
-        const result = sections.join('\n\n---\n\n');
-        return result.length <= 4_000
-          ? result
-          : `[样式查询已按总预算截断] 原始 ${result.length} 字符，仅返回前 4000 字符。\n\n${result.slice(0, 4_000)}`;
+        sections.sort((a, b) => Number(b.includes('— author-overrides.css:')) - Number(a.includes('— author-overrides.css:')));
+        const header = `样式查询摘要: 请求 ${normalized.length} 个，命中 ${matchedSymbols} 个，未命中 ${normalized.length - matchedSymbols} 个。覆盖层优先展示；每个符号每个文件最多展示 4 条候选规则。\n\n`;
+        return header + boundedStyleEntries(sections, 4_000 - header.length);
       },
       readStyleRule: async rawClassName => {
         const className = rawClassName.replace(/^\./, '');
@@ -2000,7 +2142,7 @@ export class SourceWorkspaceStore {
         const stylePath = authorRuleMode ? 'author-overrides.css' : 'snapshot.css';
         const rules = cssRulesForClass(working[stylePath], className);
         if (!rules.length) throw new Error(`${stylePath} 中不存在 .${className} 规则`);
-        return `${stylePath} 中 .${className} 命中的 ${rules.length} 条规则（含组合选择器和伪类状态）：\n${rules.join('\n').slice(0, 16_000)}`;
+        return `${stylePath} 中 .${className} 命中的 ${rules.length} 条规则（含组合选择器和伪类状态）：\n${boundedStyleEntries(rules, 16_000)}`;
       },
       replaceText: async (path, search, replacement) => {
         this.assertEditablePath(path, editableStylePath);

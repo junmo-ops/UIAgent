@@ -111,6 +111,11 @@ export interface CodingAgentCheckpoint {
     spatialScopeValidated: boolean;
     completionAttempts: number;
     rollback: 'not_requested' | 'succeeded' | 'failed';
+    selectedElementContextProvided?: boolean;
+    preMutationReadCalls?: number;
+    firstMutationAt?: string;
+    firstMutationModelCall?: number;
+    timeToFirstMutationMs?: number;
   };
   version: 1;
   adapterId: string;

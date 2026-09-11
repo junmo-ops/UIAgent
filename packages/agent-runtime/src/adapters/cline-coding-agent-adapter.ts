@@ -46,7 +46,8 @@ const clineSourceRules = [
   '你是静态网页源码编辑 Agent，只使用本次提供的源码工具。页面用于 UI 示意，不实现真实接口或业务提交。',
   '输入已包含文件摘要；有 selectedElementContext 时直接使用，无需重复枚举文件、搜索或检查同一选中元素。没有目标上下文时先 query_workspace_structure，再按需 inspect_element。取得足够证据后立即修改，不要为了寻找更理想的 class、变量或示例继续扩展搜索。',
   'index.html 保存结构和文案。存在 author.css 或 author-style-links.json 时，视觉修改只写 author-overrides.css，author.css 仅供查询，snapshot.css 不可修改；否则视觉修改写 snapshot.css。outline.json 和 source-map.json 只读。',
-  'inspect_element 默认返回目标、祖先、同级、布局和局部源码；只有缺少完成当前修改的具体信息时才使用 full。样式优先 query_style_symbols，避免全文搜索大 CSS。',
+  'inspect_element 默认返回目标、祖先、同级、布局、局部源码、目标实际命中的样式规则，以及可识别时的组件库规范；只有缺少完成当前修改的具体信息时才使用 full。已有组件与样式上下文时直接据此修改，不要再次搜索组件基础样式；仅在明确缺少某条页面覆盖规则时使用 query_style_symbols，避免全文搜索大 CSS。',
+  '目标明确的单元素文案、属性或已有组件形态转换，应使用 selectedElementContext 在前两次模型决策内完成意图声明并开始写入；不要为了比较未被用户要求的视觉方案检索相邻示例。',
   '修改前只需确认目标、最近相关容器和必要的相邻元素。新增同类组件优先复用现有结构和 class；没有合适结构时再增加局部 HTML/CSS。修改行内样式时注意级联优先级，背景也可能由子元素或伪元素绘制。',
   '位置描述以用户明确容器为准，否则以 selectedSourceId 或最近语义祖先为锚点。相邻组件只扩展到最近公共父容器；用户未明确要求全局视口定位时不得新增 position:fixed。新增元素后调用 validate_spatial_scope。',
   '若多个方案会显著改变最终视觉结果，修改前调用 clarify；问题只询问源码无法确定的信息。已有澄清回复时结合 conversation 继续原需求。',
@@ -62,6 +63,7 @@ const DEFAULT_MAX_ITERATIONS = 45;
 const DEFAULT_MAX_OUTPUT_TOKENS = 8_192;
 const MAX_BATCH_INSPECTION_CHARS = 12_000;
 const MAX_BATCH_ELEMENT_CHARS = 4_000;
+const MAX_PRE_MUTATION_READS_WITH_SELECTED_CONTEXT = 4;
 const FINALIZATION_WINDOW = 3;
 const MAX_IDENTICAL_TOOL_FAILURES = 3;
 const MAX_READ_CALLS_PER_ACTION: Readonly<Record<string, number>> = {
@@ -83,6 +85,16 @@ const MUTATING_ACTIONS = new Set([
   'insert_element', 'wrap_element', 'unwrap_element', 'remove_element', 'reorder_children',
   'apply_dom_operations', 'move_element', 'clone_element'
 ]);
+
+function repeatedFailureGuidance(action: string, message: string): string {
+  if (message.startsWith('受控交互校验发现')) {
+    return '请按编号一次修正所有控件自身的交互属性，不要通过更换写入工具绕过校验；无法确定交互结构时调用 clarify';
+  }
+  if (action === 'validate_spatial_scope') {
+    return '请使用错误中列出的当前源码 sourceId 重新校验容器与新增元素，不要继续引用已删除或失效的 sourceId';
+  }
+  return '请停止当前策略；追加内容可改用 apply_patch 的 start/end，无法安全继续则调用 clarify';
+}
 
 export interface ClineAgentInstance {
   subscribe?(listener: (event: import('../../vendor/ui-agent-runtime/index.js').AgentRuntimeEvent) => void): () => void;
@@ -321,6 +333,10 @@ export class ClineCodingAgentAdapter implements CodingAgentPort {
     const changedPositioningClassNames = new Set<string>();
     const repeatedFailures = new Map<string, number>();
     const readActionCounts = new Map<string, number>();
+    let selectedElementContextAvailable = false;
+    let firstMutationAt: string | undefined;
+    let firstMutationModelCall: number | undefined;
+    let preMutationReadCalls = 0;
     let activeAgent: ClineAgentInstance | undefined;
     const throwIfCancelled = () => {
       if (signal?.aborted) throw new CodingAgentCancelledError();
@@ -427,6 +443,12 @@ export class ClineCodingAgentAdapter implements CodingAgentPort {
         ? `${action}:${(input as { path?: string }).path ?? ''}`
         : action;
       const actionLimit = MAX_READ_CALLS_PER_ACTION[action];
+      if (BUDGETED_READ_ACTIONS.has(action) && selectedElementContextAvailable && !firstMutationAt
+        && preMutationReadCalls >= MAX_PRE_MUTATION_READS_WITH_SELECTED_CONTEXT) {
+        const message = `[修改前读取预算] 已有 selectedElementContext，且修改前已补充读取 ${preMutationReadCalls} 次。请使用现有结构、组件规范和局部样式证据立即修改；若仍缺少会显著影响结果的信息，请调用 clarify。`;
+        record(action, input, context, message, undefined, true, 'blocked');
+        return message;
+      }
       if (readKey && completedReadResults.has(readKey)) {
         const message = '[重复读取已拦截] 当前源码版本的相同查询已经返回，请使用已有证据；修改源码后可重新检查。';
         record(action, input, context, message, undefined, true, 'blocked');
@@ -443,7 +465,12 @@ export class ClineCodingAgentAdapter implements CodingAgentPort {
       }
       try {
         const result = await operation();
+        if (BUDGETED_READ_ACTIONS.has(action) && !firstMutationAt) preMutationReadCalls += 1;
         if (MUTATING_ACTIONS.has(action)) {
+          if (!firstMutationAt) {
+            firstMutationAt = new Date().toISOString();
+            firstMutationModelCall = context.iteration;
+          }
           completedReadResults.clear();
           readActionCounts.clear();
           repeatedFailures.clear();
@@ -462,7 +489,7 @@ export class ClineCodingAgentAdapter implements CodingAgentPort {
         const repeated = (repeatedFailures.get(failureKey) ?? 0) + 1;
         repeatedFailures.set(failureKey, repeated);
         const message = repeated >= 2
-          ? `${baseMessage}。同一错误已重复 ${repeated} 次，请停止当前策略；追加内容请改用 apply_patch 的 start/end，无法安全继续则调用 clarify。`
+          ? `${baseMessage}。同一错误已重复 ${repeated} 次，${repeatedFailureGuidance(action, baseMessage)}。`
           : baseMessage;
         record(action, input, context, undefined, message);
         if (repeated >= MAX_IDENTICAL_TOOL_FAILURES) {
@@ -1206,6 +1233,7 @@ export class ClineCodingAgentAdapter implements CodingAgentPort {
       if (turn.request.sourceId) {
         try {
           selectedElementContext = await workspace.inspectElement(turn.request.sourceId, { detail: 'compact' });
+          selectedElementContextAvailable = true;
         } catch {
           // A stale selection should not prevent semantic lookup inside the workspace.
         }
@@ -1305,7 +1333,14 @@ export class ClineCodingAgentAdapter implements CodingAgentPort {
       lifecycle: {
         submissionMode: workspace.submissionMode ?? 'direct', intentDeclared, spatialScopeValidated,
         completionAttempts: steps.filter(step => step.action === 'finish').length,
-        rollback: rollbackStatus
+        rollback: rollbackStatus,
+        selectedElementContextProvided: selectedElementContextAvailable,
+        preMutationReadCalls,
+        ...(firstMutationAt ? {
+          firstMutationAt,
+          firstMutationModelCall,
+          timeToFirstMutationMs: Date.parse(firstMutationAt) - Date.parse(startedAt)
+        } : {})
       },
       status: response.kind === 'completed'
         || response.kind === 'draft'
