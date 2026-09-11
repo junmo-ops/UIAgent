@@ -864,16 +864,16 @@ function antDesignComponentGuidance(tag: string, classNames: readonly string[]):
     ].join('\n');
   }
   if (classNames.some(className => /(?:^|-)checkbox(?:-|$)/.test(className))) {
-    return `组件库线索: Ant Design；证据 class=${JSON.stringify(evidence)}；${versionNote}\n组件类型: Checkbox。组件规范: 保留 input 与 wrapper/inner 的既有结构和状态 class，文案通常位于相邻 span；视觉调整优先复用当前主题规则。`;
+    return `组件库线索: Ant Design；证据 class=${JSON.stringify(evidence)}；${versionNote}\n组件类型: Checkbox。仅调整外观时保留既有结构；新增简单勾选控件优先 input type="checkbox"，用 checked 声明默认状态并关联 label。原生勾选由浏览器处理，静态 wrapper/inner 的状态 class 不会因缺失的 React 自动同步；可用 :checked 等 CSS 表达视觉状态，不要重复绑定 toggle-checkbox。样式参考当前主题。`;
   }
   if (classNames.some(className => /(?:^|-)radio(?:-|$)/.test(className))) {
-    return `组件库线索: Ant Design；证据 class=${JSON.stringify(evidence)}；${versionNote}\n组件类型: Radio。组件规范: 保留 input、inner 与 wrapper 的既有结构和状态 class，组内布局以实际容器为准。`;
+    return `组件库线索: Ant Design；证据 class=${JSON.stringify(evidence)}；${versionNote}\n组件类型: Radio。仅调整外观时保留既有结构；新增简单单选组优先 input type="radio"，使用同组唯一 name、不同 value 和默认 checked。原生互斥选择由浏览器处理，视觉状态可用 :checked 表达，不依赖原站 React 更新 class，不重复绑定 set-radio。组内布局以实际容器和用户要求为准。`;
   }
   if (tag === 'input' || classNames.some(className => /(?:^|-)input(?:-|$)/.test(className))) {
     return `组件库线索: Ant Design；证据 class=${JSON.stringify(evidence)}；${versionNote}\n组件类型: Input。组件规范: 优先复用页面现有 input、affix-wrapper、size 和状态 class；placeholder 用属性修改，尺寸和前后缀结构以实际 DOM 为准。`;
   }
   if (classNames.some(className => /(?:^|-)select(?:-|$)/.test(className))) {
-    return `组件库线索: Ant Design；证据 class=${JSON.stringify(evidence)}；${versionNote}\n组件类型: Select。组件规范: 保留 selector、selection item、arrow 等既有结构；静态副本只表达界面状态，不补真实下拉业务逻辑。`;
+    return `组件库线索: Ant Design；证据 class=${JSON.stringify(evidence)}；${versionNote}\n组件类型: Select。仅调整既有控件外观时保留结构；新增可操作的简单单选下拉优先 select/option，以 selected 声明默认值，浏览器自动更新选中显示。复制 selector、selection item、arrow 的静态 DOM 不会带来 React 交互；参考当前页面尺寸和主题为原生控件设置样式，不直接套用模拟控件内部 class。复杂搜索、多选或业务联动另行确认，不默认搭建自定义浮层。`;
   }
   return `组件库线索: Ant Design；证据 class=${JSON.stringify(evidence)}；${versionNote}`;
 }

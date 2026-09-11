@@ -64,6 +64,10 @@ export interface AgentRunDiagnostics {
     inputMessageCount: number;
     availableTools?: string[];
     outputTextChars: number;
+    /** Effective per-call generation budget; smaller for output-stall recovery. */
+    outputBudget?: number;
+    toolChoice?: 'auto' | 'required';
+    recoveringOutputLimit?: boolean;
     reasoning?: string;
     reasoningTruncated?: boolean;
     firstOutputMs?: number;

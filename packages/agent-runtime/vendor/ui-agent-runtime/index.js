@@ -7,6 +7,11 @@ import { jsonSchema, streamText, stepCountIs } from 'ai';
 const asError = value => value instanceof Error ? value : new Error(String(value));
 const RATE_LIMIT_RETRY_LIMIT = 10;
 const RATE_LIMIT_DELAY_MS = 10_000;
+const OUTPUT_LIMIT_RECOVERY_BUDGET = 2_048;
+const outputStallError = () => Object.assign(
+  new Error('模型未能完成修改计划，已停止本轮修改；请重试。'),
+  { code: 'MODEL_OUTPUT_STALLED' }
+);
 const isOutputRateLimit = error => error?.statusCode === 433 &&
   /\bLAILGW0433\b/.test(`${error.responseBody ?? ''} ${error.message ?? ''}`);
 const retryDelay = error => {
@@ -76,7 +81,7 @@ export class Agent {
     let rateLimitRetries = 0;
     const usage = {};
     const runtimeStarted = Date.now();
-    const diagnostics = { version: 1, runtimeRevision: '2026-09-10-stall-guards-v12',
+    const diagnostics = { version: 1, runtimeRevision: '2026-09-11-bounded-recovery-v13',
       countingBasis: 'model decision rounds; rate-limit request retries are recorded separately per call',
       maxIterations: this.config.maxIterations ?? 12, maxOutputTokens: this.config.maxOutputTokens,
       requiredCompletionTool: this.config.completionPolicy?.requireCompletionTool === true,
@@ -145,8 +150,14 @@ export class Agent {
         iterations += 1;
         const callStarted = Date.now();
         const tools = runtimeTools();
+        const recoveringOutputLimit = outputLimitRecoveryStreak > 0;
+        const outputBudget = recoveringOutputLimit
+          ? Math.min(this.config.maxOutputTokens ?? OUTPUT_LIMIT_RECOVERY_BUDGET, OUTPUT_LIMIT_RECOVERY_BUDGET)
+          : this.config.maxOutputTokens;
+        const toolChoice = recoveringOutputLimit && Object.keys(tools).length ? 'required' : 'auto';
         currentCall = { modelCall: iterations, startedAt: new Date(callStarted).toISOString(),
-          status: 'running', inputMessageCount: messages.length, availableTools: Object.keys(tools), outputTextChars: 0, tools: [] };
+          status: 'running', inputMessageCount: messages.length, availableTools: Object.keys(tools), outputTextChars: 0, tools: [],
+          outputBudget, toolChoice, recoveringOutputLimit };
         diagnostics.calls.push(currentCall);
         this.emit({ type: 'model-call-updated', call: { modelCall: iterations, startedAt: currentCall.startedAt, status: 'running' } });
         let reasoning = '', reasoningTruncated = false;
@@ -156,7 +167,7 @@ export class Agent {
         for (;;) {
           try {
             stream = streamText({ model: provider.chatModel(this.config.modelId),
-              system: this.config.systemPrompt, messages, tools, maxOutputTokens: this.config.maxOutputTokens,
+              system: this.config.systemPrompt, messages, tools, maxOutputTokens: outputBudget, toolChoice,
               stopWhen: stepCountIs(1), abortSignal: controller.signal });
             for await (const event of stream.fullStream) {
               if (currentCall.firstOutputMs === undefined && ['text-delta', 'reasoning-delta', 'tool-call'].includes(event.type)) {
@@ -276,17 +287,20 @@ export class Agent {
           break;
         }
         if (['error', 'content-filter'].includes(finishReason)) throw new Error('Model stopped: ' + finishReason);
+        // A recovery attempt must make real progress. A rejected/invalid tool or
+        // plain text must not enter the generic empty-response continuation loop.
+        if (recoveringOutputLimit && !currentCall.tools.some(tool => tool.status === 'succeeded')) {
+          currentCall.continuationReason = 'output_limit_recovery_failed';
+          throw outputStallError();
+        }
         if (!currentCall.executedToolCallCount) {
           if (finishReason === 'length') {
-            if (outputLimitRecoveryStreak >= 1) {
-              throw new Error('模型连续两次达到单轮输出上限且没有执行任何工具，已停止本轮修改，避免继续空转；请缩小需求范围或稍后重试。');
-            }
             outputLimitRecoveryStreak++;
             outputLimitRecoveryCount++;
             diagnostics.outputLimitRecoveryCount = outputLimitRecoveryCount;
             diagnostics.continuationCount++;
             currentCall.continuationReason = 'output_limit_without_tool';
-            messages.push({ role: 'user', content: '刚才的输出达到单轮上限，且没有执行任何工具。不要重新规划、复述需求或输出长篇分析；下一轮必须只执行一个具体工具调用。若现有信息不足以安全修改，立即调用澄清工具。' });
+            messages.push({ role: 'user', content: '刚才达到输出上限但未执行工具。现在是一次短预算恢复：不要复述需求、比较方案或重写完整计划。若仍不能确定影响结果的位置、范围或交互要求，立即调用澄清工具，只问一个关键问题，不自行改写用户的位置要求。否则只调用一个能推进任务的工具；未声明意图时先声明，不跳过现有修改和校验规则。' });
             continue;
           }
           const attemptedToolWithoutExecution = calls + inputErrors > 0;
