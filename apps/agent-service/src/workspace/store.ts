@@ -257,12 +257,70 @@ function validateHtml(html: string): string {
   const unsafe = UNSAFE_HTML_RULES.find(rule => rule.pattern.test(html));
   if (unsafe) throw new Error(`源码包含脚本、事件、远程资源或其他不安全内容（检测到：${unsafe.label}）`);
   validateEmbeddedHtmlSafety(html);
+  validateReplicaComponents(html);
   validateTableStructure(html);
   validateControlledInteractions(html);
   if (html.length > MAX_STATIC_SNAPSHOT_HTML_CHARS) {
     throw new Error(`index.html 超过 ${Math.round(MAX_STATIC_SNAPSHOT_HTML_CHARS / 1_000_000)} MB 限制`);
   }
   return 'HTML 与安全规则校验通过';
+}
+
+function validateReplicaComponents(html: string): void {
+  const { document } = parseHTML(html);
+  const components = [...document.querySelectorAll('ui-agent-select')];
+  if (components.length > 50) throw new Error('单个副本最多允许 50 个局部组件');
+  const allowedAttributes = new Set([
+    'data-ui-source-id', 'id', 'class', 'style', 'title', 'role', 'aria-label',
+    'options', 'default-value', 'placeholder', 'size', 'disabled', 'allow-clear', 'show-search'
+  ]);
+  for (const component of components) {
+    if (component.children.length || component.textContent?.trim()) {
+      throw new Error('ui-agent-select 必须是空宿主，不能包含子元素或文本');
+    }
+    for (const attribute of [...component.attributes]) {
+      if (!allowedAttributes.has(attribute.name.toLowerCase())) {
+        throw new Error(`ui-agent-select 不支持属性 ${attribute.name}`);
+      }
+    }
+    const rawOptions = component.getAttribute('options');
+    if (!rawOptions) throw new Error('ui-agent-select 缺少 options 属性');
+    let options: unknown;
+    try {
+      options = JSON.parse(rawOptions);
+    } catch {
+      throw new Error('ui-agent-select 的 options 必须是合法 JSON');
+    }
+    if (!Array.isArray(options) || options.length < 1 || options.length > 100) {
+      throw new Error('ui-agent-select 的 options 必须包含 1-100 个选项');
+    }
+    const values = new Set<string>();
+    for (const [index, option] of options.entries()) {
+      if (!option || typeof option !== 'object') throw new Error(`ui-agent-select 第 ${index + 1} 个选项无效`);
+      const record = option as Record<string, unknown>;
+      if ((typeof record.value !== 'string' && typeof record.value !== 'number') || String(record.value).length > 200) {
+        throw new Error(`ui-agent-select 第 ${index + 1} 个选项的 value 无效`);
+      }
+      if (typeof record.label !== 'string' || !record.label.trim() || record.label.length > 200) {
+        throw new Error(`ui-agent-select 第 ${index + 1} 个选项的 label 无效`);
+      }
+      const value = String(record.value);
+      if (values.has(value)) throw new Error(`ui-agent-select 选项 value 重复：${value}`);
+      values.add(value);
+      const unknownKeys = Object.keys(record).filter(key => !['value', 'label', 'disabled'].includes(key));
+      if (unknownKeys.length || (record.disabled !== undefined && typeof record.disabled !== 'boolean')) {
+        throw new Error(`ui-agent-select 第 ${index + 1} 个选项包含不支持的配置`);
+      }
+    }
+    const defaultValue = component.getAttribute('default-value');
+    if (defaultValue !== null && !values.has(defaultValue)) {
+      throw new Error('ui-agent-select 的 default-value 必须对应一个选项 value');
+    }
+    const size = component.getAttribute('size');
+    if (size !== null && !['small', 'middle', 'large'].includes(size)) {
+      throw new Error('ui-agent-select 的 size 只能是 small、middle 或 large');
+    }
+  }
 }
 
 function validateCss(css: string): string {
@@ -873,7 +931,7 @@ function antDesignComponentGuidance(tag: string, classNames: readonly string[]):
     return `组件库线索: Ant Design；证据 class=${JSON.stringify(evidence)}；${versionNote}\n组件类型: Input。组件规范: 优先复用页面现有 input、affix-wrapper、size 和状态 class；placeholder 用属性修改，尺寸和前后缀结构以实际 DOM 为准。`;
   }
   if (classNames.some(className => /(?:^|-)select(?:-|$)/.test(className))) {
-    return `组件库线索: Ant Design；证据 class=${JSON.stringify(evidence)}；${versionNote}\n组件类型: Select。仅调整既有控件外观时保留结构；新增可操作的简单单选下拉优先 select/option，以 selected 声明默认值，浏览器自动更新选中显示。复制 selector、selection item、arrow 的静态 DOM 不会带来 React 交互；参考当前页面尺寸和主题为原生控件设置样式，不直接套用模拟控件内部 class。复杂搜索、多选或业务联动另行确认，不默认搭建自定义浮层。`;
+    return `组件库线索: Ant Design；证据 class=${JSON.stringify(evidence)}；${versionNote}\n组件类型: Select。仅调整既有控件外观时保留结构；新增简单单选下拉使用 ui-agent-select 局部组件，由系统提供真实 Ant Design 交互。模型只配置 options、default-value、placeholder、size、disabled、allow-clear、show-search 和 aria-label，并根据实际布局设置宿主尺寸与间距；不要复制 selector、selection item、arrow 的内部 DOM，也不要修改组件 Shadow DOM 或 Ant Design 内部 class。多选和业务联动当前不在试点范围内，应先 clarify。`;
   }
   return `组件库线索: Ant Design；证据 class=${JSON.stringify(evidence)}；${versionNote}`;
 }
@@ -1799,9 +1857,12 @@ export class SourceWorkspaceStore {
       style = `${orderedStyleLinks}\n<link rel="stylesheet" href="${candidateAssetPath}author-overrides.css${assetQuery}" data-ui-agent-author-overrides>`;
     }
     const localizedHtml = this.localizeSnapshotResources(html, authorResources);
+    const componentRuntime = /<ui-agent-select\b/i.test(localizedHtml)
+      ? `<script src="${workspaceAssetPath}replica-runtime.js${assetQuery}" defer data-ui-agent-replica-runtime="select-v1"></script>\n`
+      : '';
     return /<\/head>/i.test(localizedHtml)
-      ? localizedHtml.replace(/<\/head>/i, () => `${style}\n</head>`)
-      : localizedHtml.replace(/<body\b/i, () => `${style}\n<body`);
+      ? localizedHtml.replace(/<\/head>/i, () => `${style}\n${componentRuntime}</head>`)
+      : localizedHtml.replace(/<body\b/i, () => `${style}\n${componentRuntime}<body`);
   }
 
   conversation(workspaceId: string): CodingAgentConversationTurn[] {

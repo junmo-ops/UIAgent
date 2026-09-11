@@ -45,7 +45,7 @@ import {
   WORKSPACE_ARCHIVE_FORMAT,
   WORKSPACE_ARCHIVE_VERSION
 } from '@ui-agent/contracts';
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { existsSync, readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { Hono, type MiddlewareHandler } from 'hono';
@@ -74,6 +74,11 @@ export function createApp(
   const publicBaseUrl = env.PUBLIC_BASE_URL?.trim().replace(/\/+$/, '');
   const publicUrl = (path: string, requestUrl: string) => new URL(path, publicBaseUrl ? `${publicBaseUrl}/` : requestUrl).toString();
   const extensionReleaseDirectory = fileURLToPath(new URL('../extension-release/', import.meta.url));
+  const replicaRuntimePath = fileURLToPath(new URL('../replica-runtime/ui-agent-select.js', import.meta.url));
+  const replicaRuntime = existsSync(replicaRuntimePath) ? readFileSync(replicaRuntimePath) : undefined;
+  const replicaRuntimeEtag = replicaRuntime
+    ? `"${createHash('sha256').update(replicaRuntime).digest('hex').slice(0, 16)}"`
+    : undefined;
   const extensionReleaseManifestPath = `${extensionReleaseDirectory}/manifest.json`;
   const extensionReleaseZipPath = `${extensionReleaseDirectory}/ui-agent-extension.zip`;
   const extensionRelease = (() => {
@@ -435,7 +440,8 @@ export function createApp(
       assistantChatAdapter: assistantChat.adapterId,
       authMode: authenticator.mode ?? 'external',
       authReady: !authenticator.configurationError,
-      workspaceIdentityIsolation: identityIsolation
+      workspaceIdentityIsolation: identityIsolation,
+      replicaSelectRuntimeReady: Boolean(replicaRuntime)
     }))
     .get('/v1/extension/latest', c => {
       if (!extensionRelease) return c.body(null, 204);
@@ -853,6 +859,16 @@ export function createApp(
         return c.text('覆盖样式不可用', 404);
       }
     })
+    .get('/workspaces/:workspaceId/replica-runtime.js', c => {
+      if (!workspaceStore.get(c.req.param('workspaceId'))) return c.text('静态源码副本不存在', 404);
+      if (!replicaRuntime || !replicaRuntimeEtag) return c.text('副本组件运行时尚未构建', 503);
+      if (c.req.header('If-None-Match') === replicaRuntimeEtag) return c.body(null, 304);
+      c.header('Content-Type', 'text/javascript; charset=utf-8');
+      c.header('X-Content-Type-Options', 'nosniff');
+      c.header('Cache-Control', 'private, no-cache');
+      c.header('ETag', replicaRuntimeEtag);
+      return c.body(new Uint8Array(replicaRuntime).buffer as ArrayBuffer);
+    })
     .get('/workspaces/:workspaceId/author-sheets/:sheetIndex', c => {
       try {
         const previewToken = c.req.query('preview_token');
@@ -934,7 +950,7 @@ export function createApp(
         c.header('X-UI-Agent-Candidate', candidate);
         c.header('X-UI-Agent-Candidate-Label', candidate === 'B' ? 'author-rules-overlay' : 'frozen-computed-style');
         const externalSources = ' http: https:';
-        c.header('Content-Security-Policy', `default-src 'none'; style-src 'self' 'unsafe-inline'${externalSources}; img-src 'self' data: blob:${externalSources}; font-src 'self' data:${externalSources}; connect-src 'none'; script-src 'none'; form-action 'none'; frame-src 'none'; object-src 'none'; base-uri 'none'`);
+        c.header('Content-Security-Policy', `default-src 'none'; style-src 'self' 'unsafe-inline'${externalSources}; img-src 'self' data: blob:${externalSources}; font-src 'self' data:${externalSources}; connect-src 'none'; script-src 'self'; form-action 'none'; frame-src 'none'; object-src 'none'; base-uri 'none'`);
         c.header('X-Content-Type-Options', 'nosniff');
         c.header('Referrer-Policy', 'no-referrer');
         c.header('Cache-Control', 'no-store');
@@ -983,7 +999,7 @@ export function createApp(
         const externalSources = ' http: https:';
         c.header('X-UI-Agent-Candidate', manifest.renderMode);
         c.header('X-UI-Agent-Document-Ref', `${candidateId}:${candidateVersion}`);
-        c.header('Content-Security-Policy', `default-src 'none'; style-src 'self' 'unsafe-inline'${externalSources}; img-src 'self' data: blob:${externalSources}; font-src 'self' data:${externalSources}; connect-src 'none'; script-src 'none'; form-action 'none'; frame-src 'none'; object-src 'none'; base-uri 'none'`);
+        c.header('Content-Security-Policy', `default-src 'none'; style-src 'self' 'unsafe-inline'${externalSources}; img-src 'self' data: blob:${externalSources}; font-src 'self' data:${externalSources}; connect-src 'none'; script-src 'self'; form-action 'none'; frame-src 'none'; object-src 'none'; base-uri 'none'`);
         c.header('X-Content-Type-Options', 'nosniff');
         c.header('Referrer-Policy', 'no-referrer');
         c.header('Cache-Control', 'no-store');

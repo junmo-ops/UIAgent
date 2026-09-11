@@ -130,6 +130,28 @@ importers:
         specifier: ^5.9.0
         version: 5.9.3
 
+  packages/replica-component-runtime:
+    dependencies:
+      '@ant-design/cssinjs':
+        specifier: 2.1.2
+        version: 2.1.2(react-dom@19.2.7(react@19.2.7))(react@19.2.7)
+      antd:
+        specifier: 6.5.1
+        version: 6.5.1(react-dom@19.2.7(react@19.2.7))(react@19.2.7)
+      react:
+        specifier: 19.2.7
+        version: 19.2.7
+      react-dom:
+        specifier: 19.2.7
+        version: 19.2.7(react@19.2.7)
+    devDependencies:
+      esbuild:
+        specifier: 0.28.1
+        version: 0.28.1
+      typescript:
+        specifier: ^5.9.0
+        version: 5.9.3
+
 packages:
 
   '@1natsu/wait-element@4.2.0':

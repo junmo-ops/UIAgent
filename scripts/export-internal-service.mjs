@@ -8,6 +8,7 @@ const outputArgument = process.argv[2] === '--' ? process.argv[3] : process.argv
 const internalNpmRegistry = 'http://central.jaf.cmbchina.cn/artifactory/api/npm/group-npm/';
 const deploymentPnpmVersion = '10.33.0';
 const servicePaths = ['apps/agent-service', 'packages/agent-runtime', 'packages/contracts'];
+const replicaRuntimeArtifact = resolve(projectRoot, 'apps/agent-service/replica-runtime/ui-agent-select.js');
 // Validate before creating output. Export never invokes a package manager/network.
 const deploymentLockfile = internalServiceLockfile(
   readFileSync(resolve(projectRoot, 'pnpm-lock.yaml'), 'utf8'),
@@ -16,6 +17,10 @@ const deploymentLockfile = internalServiceLockfile(
 
 if (!outputArgument) {
   throw new Error('请指定交付目录，例如：pnpm export:internal-service -- ../ui-agent-service');
+}
+
+if (!existsSync(replicaRuntimeArtifact)) {
+  throw new Error('缺少副本 Select 运行产物，请先执行 pnpm run build:replica-runtime');
 }
 
 const outputDirectory = resolve(projectRoot, outputArgument);
@@ -136,6 +141,7 @@ if (existsSync(exportedExtensionManifestPath) && existsSync(exportedExtensionFil
 writeFileSync(resolve(outputDirectory, 'README.md'), `# UI Agent Service - Internal Deployment Source\n\n该目录由 UIAgent 主仓库自动生成，是独立的服务端部署工程。它不携带插件源码、Demo、测试或开发依赖；Dockerfile 是唯一的构建入口。\n\n## 本地调试\n\n\`\`\`bash\nnpx --yes pnpm@${deploymentPnpmVersion} install\ncp apps/agent-service/.env.example apps/agent-service/.env\nnpx --yes pnpm@${deploymentPnpmVersion} dev\n\`\`\`\n\n使用 \`npx pnpm@${deploymentPnpmVersion}\` 可避免本机全局 pnpm 或 Corepack 版本干扰。\n\n## 内部流水线\n\n- 构建引擎：Node.js 22.9.0\n- 自动化编译脚本：\`test -f Dockerfile && test -f pnpm-lock.yaml\`\n- 容器制品发布步骤：使用根目录 \`Dockerfile\` 构建并发布镜像\n- 不要在流水线宿主机执行 \`pnpm install\`、\`tsc\` 或测试命令\n\nDockerfile 使用行内 npm 制品库安装固定的 \`pnpm@${deploymentPnpmVersion}\` 与运行时依赖；不会使用 Corepack。\n\n## 服务单元\n\n配置监听端口 \`8787\`、HTTP 健康检查路径 \`/health\`，并通过平台环境变量注入模型、鉴权、CORS 等配置。\n\n## 插件更新包\n\n${exportedExtensionVersion ? `当前交付包内置 Chrome 插件 v${exportedExtensionVersion} 的构建文件。Git 仓库不保存 ZIP；Docker 镜像构建时生成 ZIP，运行中的服务通过 \`/v1/extension/latest\` 提供版本信息，并通过 \`/v1/extension/download\` 直接返回该文件。` : '当前交付包未包含插件构建文件，插件更新检查会保持关闭；如需发布插件更新，请先在主仓库执行 `pnpm run build:extension` 后重新导出。'}\n\n环境文件、密钥、日志和工作区数据均不应提交。每次修改主仓库的服务端依赖后，请重新执行导出命令生成新的部署仓库。\n`);
 
 appendFileSync(resolve(outputDirectory, 'README.md'), '\n## 导出与依赖预检\n\n导出是离线操作，复用主仓库锁文件的精确版本，不访问 npm 源。未引用的底层包元数据保留，不会额外安装前端依赖。只有行内预检和流水线安装需要网络；导出成功不代表锁定版本在行内可下载。依赖变更后请更新主仓库锁文件，并在行内执行 `npm run check:internal-deploy`（主仓库命令）。\n');
+appendFileSync(resolve(outputDirectory, 'README.md'), '\n## 副本局部组件\n\n交付包已包含预构建的 Ant Design Select 浏览器运行产物。服务端只提供静态 JS，不会在行内安装 React 或 Ant Design 运行依赖。健康检查中的 `replicaSelectRuntimeReady` 应为 `true`。\n');
 console.log(`已离线生成内部服务端独立部署包：${outputDirectory}`);
 console.log(exportedExtensionVersion
   ? `已包含 Chrome 插件构建文件 v${exportedExtensionVersion}，Docker 镜像构建时将生成 ZIP`
