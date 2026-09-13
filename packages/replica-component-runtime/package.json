@@ -4,7 +4,8 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "build": "node ../../scripts/build-replica-runtime.mjs"
+    "build": "node ../../scripts/build-replica-runtime.mjs",
+    "typecheck": "tsc --noEmit"
   },
   "dependencies": {
     "@ant-design/cssinjs": "2.1.2",
@@ -13,6 +14,8 @@
     "react-dom": "19.2.7"
   },
   "devDependencies": {
+    "@types/react": "^19.1.0",
+    "@types/react-dom": "^19.1.0",
     "esbuild": "0.28.1",
     "typescript": "^5.9.0"
   }

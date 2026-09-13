@@ -76,8 +76,8 @@ class InstallationTokenAuthenticator implements Authenticator {
     if (previewClaims?.kind !== 'preview' || !previewClaims.workspaceId) return undefined;
     const previewBasePath = `/workspaces/${previewClaims.workspaceId}/`;
     const previewPath = url.pathname.slice(previewBasePath.length);
-    const candidatePreviewPath = /^candidates\/[0-9a-f-]{36}\/versions\/\d+\/(?:preview|author-overrides\.css)$/i.test(previewPath);
-    if (!candidatePreviewPath && !['preview', 'author.css', 'author-overrides.css', 'replica-runtime.js'].includes(previewPath) && !previewPath.startsWith('assets/') && !previewPath.startsWith('author-sheets/')) return undefined;
+    const candidatePreviewPath = /^candidates\/[0-9a-f-]{36}\/versions\/\d+\/(?:preview|author-overrides\.css|module\.js)$/i.test(previewPath);
+    if (!candidatePreviewPath && !['preview', 'author.css', 'author-overrides.css', 'replica-runtime.js', 'module.js'].includes(previewPath) && !previewPath.startsWith('assets/') && !previewPath.startsWith('author-sheets/')) return undefined;
     return this.principal(previewClaims);
   }
 

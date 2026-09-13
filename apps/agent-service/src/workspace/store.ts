@@ -10,6 +10,7 @@ import {
 } from 'node:fs';
 import { basename, dirname, resolve, sep } from 'node:path';
 import { createHash, randomUUID } from 'node:crypto';
+import { Script } from 'node:vm';
 import { parseHTML } from 'linkedom';
 import { type CodingAgentConversationTurn, type CodingWorkspaceTools } from '@ui-agent/agent-runtime';
 import {
@@ -46,7 +47,7 @@ import { validateControlledInteractions } from './interactions';
 import { analyzeStaticVisibility, staticVisibilityIssueKey } from './visibility';
 import { diagnoseSnapshotPackage, type SnapshotDiagnostics } from './snapshot-diagnostics';
 
-const WORKSPACE_FILES = ['index.html', 'snapshot.css', 'author-overrides.css', 'outline.json', 'source-map.json'] as const;
+const WORKSPACE_FILES = ['index.html', 'snapshot.css', 'author-overrides.css', 'module.js', 'outline.json', 'source-map.json'] as const;
 type WorkspaceFile = typeof WORKSPACE_FILES[number];
 type WorkspaceFiles = Record<WorkspaceFile, string>;
 type CapturedLayoutIndex = NonNullable<StaticSnapshot['layoutIndex']>;
@@ -268,58 +269,69 @@ function validateHtml(html: string): string {
 
 function validateReplicaComponents(html: string): void {
   const { document } = parseHTML(html);
-  const components = [...document.querySelectorAll('ui-agent-select')];
+  const components = [...document.querySelectorAll('ui-agent-module')];
   if (components.length > 50) throw new Error('单个副本最多允许 50 个局部组件');
-  const allowedAttributes = new Set([
-    'data-ui-source-id', 'id', 'class', 'style', 'title', 'role', 'aria-label',
-    'options', 'default-value', 'placeholder', 'size', 'disabled', 'allow-clear', 'show-search'
+  const commonAttributes = new Set([
+    'data-ui-source-id', 'data-ui-agent-source-rect', 'data-ui-agent-captured-layout',
+    'data-ui-agent-action', 'data-ui-agent-targets', 'data-ui-agent-close-targets',
+    'data-ui-agent-state-group', 'data-ui-agent-state-value', 'data-ui-agent-state-when',
+    'data-ui-agent-active-class', 'data-ui-agent-dismiss', 'data-ui-component', 'data-testid',
+    'id', 'class', 'style', 'title', 'role', 'aria-label', 'hidden', 'tabindex'
   ]);
   for (const component of components) {
     if (component.children.length || component.textContent?.trim()) {
-      throw new Error('ui-agent-select 必须是空宿主，不能包含子元素或文本');
+      throw new Error(`${component.localName} 必须是空宿主，不能包含子元素或文本`);
     }
     for (const attribute of [...component.attributes]) {
-      if (!allowedAttributes.has(attribute.name.toLowerCase())) {
-        throw new Error(`ui-agent-select 不支持属性 ${attribute.name}`);
+      const name = attribute.name.toLowerCase();
+      const supported = commonAttributes.has(name)
+        || /^aria-[a-z][a-z-]*$/.test(name)
+        || name === 'module';
+      if (!supported) {
+        throw new Error(`${component.localName} 不支持属性 ${attribute.name}`);
       }
     }
-    const rawOptions = component.getAttribute('options');
-    if (!rawOptions) throw new Error('ui-agent-select 缺少 options 属性');
-    let options: unknown;
-    try {
-      options = JSON.parse(rawOptions);
-    } catch {
-      throw new Error('ui-agent-select 的 options 必须是合法 JSON');
+    const moduleName = component.getAttribute('module')?.trim();
+    if (!moduleName) throw new Error('ui-agent-module 缺少 module 属性');
+    if (!/^[a-z][a-z0-9-]{0,79}$/.test(moduleName)) {
+      throw new Error('ui-agent-module 的 module 必须是小写字母开头、仅含小写字母/数字/连字符的稳定名称');
     }
-    if (!Array.isArray(options) || options.length < 1 || options.length > 100) {
-      throw new Error('ui-agent-select 的 options 必须包含 1-100 个选项');
+  }
+  for (const element of [...document.querySelectorAll('*')]) {
+    if (element.localName.startsWith('ui-agent-') && element.localName !== 'ui-agent-module') {
+      throw new Error(`不支持的局部组件宿主 ${element.localName}`);
     }
-    const values = new Set<string>();
-    for (const [index, option] of options.entries()) {
-      if (!option || typeof option !== 'object') throw new Error(`ui-agent-select 第 ${index + 1} 个选项无效`);
-      const record = option as Record<string, unknown>;
-      if ((typeof record.value !== 'string' && typeof record.value !== 'number') || String(record.value).length > 200) {
-        throw new Error(`ui-agent-select 第 ${index + 1} 个选项的 value 无效`);
-      }
-      if (typeof record.label !== 'string' || !record.label.trim() || record.label.length > 200) {
-        throw new Error(`ui-agent-select 第 ${index + 1} 个选项的 label 无效`);
-      }
-      const value = String(record.value);
-      if (values.has(value)) throw new Error(`ui-agent-select 选项 value 重复：${value}`);
-      values.add(value);
-      const unknownKeys = Object.keys(record).filter(key => !['value', 'label', 'disabled'].includes(key));
-      if (unknownKeys.length || (record.disabled !== undefined && typeof record.disabled !== 'boolean')) {
-        throw new Error(`ui-agent-select 第 ${index + 1} 个选项包含不支持的配置`);
-      }
-    }
-    const defaultValue = component.getAttribute('default-value');
-    if (defaultValue !== null && !values.has(defaultValue)) {
-      throw new Error('ui-agent-select 的 default-value 必须对应一个选项 value');
-    }
-    const size = component.getAttribute('size');
-    if (size !== null && !['small', 'middle', 'large'].includes(size)) {
-      throw new Error('ui-agent-select 的 size 只能是 small、middle 或 large');
-    }
+  }
+}
+
+function validateModuleJavaScript(source: string): string {
+  if (source.length > 500_000) throw new Error('module.js 超过 500 KB 限制');
+  if (!source.trim()) return 'module.js 为空';
+  try {
+    // Syntax validation only. Generated code is never evaluated by the service;
+    // The shared browser runtime mounts it directly into the replica document.
+    new Script(source, { filename: 'module.js' });
+  } catch (error) {
+    throw new Error(`module.js 语法无效：${error instanceof Error ? error.message : '未知语法错误'}`);
+  }
+  return 'module.js 语法校验通过';
+}
+
+function validateModuleBindings(html: string, source: string): void {
+  const { document } = parseHTML(html);
+  const requested = new Set(
+    [...document.querySelectorAll('ui-agent-module')]
+      .map(element => element.getAttribute('module')?.trim())
+      .filter((name): name is string => Boolean(name))
+  );
+  if (!requested.size) return;
+  const definitions = new Set(
+    [...source.matchAll(/\bUIAgent\s*\.\s*define\s*\(\s*(['"])([a-z][a-z0-9-]{0,79})\1\s*,/g)]
+      .map(match => match[2]!)
+  );
+  const missing = [...requested].filter(name => !definitions.has(name));
+  if (missing.length) {
+    throw new Error(`module.js 未定义宿主引用的模块：${missing.join('、')}。请使用 UIAgent.define(name, factory) 注册`);
   }
 }
 
@@ -911,7 +923,7 @@ function antDesignComponentGuidance(tag: string, classNames: readonly string[]):
     : classNames.filter(className => compatibleFamilies.some(({ prefix, family }) => (
         className.startsWith(`${prefix}-${family}`)
       ))).slice(0, 6);
-  const versionNote = '版本未知；以当前页面实际 class、主题变量和覆盖规则为准。';
+  const versionNote = '以下线索供修改既有内容、明确复制或风格复用时参考；无明确风格复用要求的新建模块默认使用 ui-agent-module，不据此检索主题。原页面版本未知。';
   if (tag === 'button' || classNames.some(className => /(?:^|-)btn(?:-|$)/.test(className))) {
     const iconOnly = classNames.some(className => /(?:^|-)btn-icon-only$/.test(className));
     const baseClasses = classNames.filter(className => /(?:^|-)btn(?:$|-(?:default|primary|dashed|link|text))$/.test(className));
@@ -922,16 +934,16 @@ function antDesignComponentGuidance(tag: string, classNames: readonly string[]):
     ].join('\n');
   }
   if (classNames.some(className => /(?:^|-)checkbox(?:-|$)/.test(className))) {
-    return `组件库线索: Ant Design；证据 class=${JSON.stringify(evidence)}；${versionNote}\n组件类型: Checkbox。仅调整外观时保留既有结构；新增简单勾选控件优先 input type="checkbox"，用 checked 声明默认状态并关联 label。原生勾选由浏览器处理，静态 wrapper/inner 的状态 class 不会因缺失的 React 自动同步；可用 :checked 等 CSS 表达视觉状态，不要重复绑定 toggle-checkbox。样式参考当前主题。`;
+    return `组件库线索: Ant Design；证据 class=${JSON.stringify(evidence)}；${versionNote}\n组件类型: Checkbox。仅调整外观时保留既有结构；默认新建所需勾选能力若不在模块协议中，应先 clarify；明确风格复用时根据实际结构及所需交互判断，不能把静态复制视为功能恢复。原生勾选由浏览器处理，静态 wrapper/inner 的状态 class 不会因缺失的 React 自动同步；可用 :checked 等 CSS 表达视觉状态，不要重复绑定 toggle-checkbox。样式参考当前主题。`;
   }
   if (classNames.some(className => /(?:^|-)radio(?:-|$)/.test(className))) {
-    return `组件库线索: Ant Design；证据 class=${JSON.stringify(evidence)}；${versionNote}\n组件类型: Radio。仅调整外观时保留既有结构；新增简单单选组优先 input type="radio"，使用同组唯一 name、不同 value 和默认 checked。原生互斥选择由浏览器处理，视觉状态可用 :checked 表达，不依赖原站 React 更新 class，不重复绑定 set-radio。组内布局以实际容器和用户要求为准。`;
+    return `组件库线索: Ant Design；证据 class=${JSON.stringify(evidence)}；${versionNote}\n组件类型: Radio。仅调整外观时保留既有结构；默认新建所需单选组能力若不在模块协议中，应先 clarify；明确风格复用时根据实际结构及所需交互判断，不能把静态复制视为功能恢复。原生互斥选择由浏览器处理，视觉状态可用 :checked 表达，不依赖原站 React 更新 class，不重复绑定 set-radio。组内布局以实际容器和用户要求为准。`;
   }
   if (tag === 'input' || classNames.some(className => /(?:^|-)input(?:-|$)/.test(className))) {
-    return `组件库线索: Ant Design；证据 class=${JSON.stringify(evidence)}；${versionNote}\n组件类型: Input。组件规范: 优先复用页面现有 input、affix-wrapper、size 和状态 class；placeholder 用属性修改，尺寸和前后缀结构以实际 DOM 为准。`;
+    return `组件库线索: Ant Design；证据 class=${JSON.stringify(evidence)}；${versionNote}\n组件类型: Input。既有控件修改规范: 保留页面现有 input、affix-wrapper、size 和状态 class；placeholder 用属性修改，尺寸和前后缀结构以实际 DOM 为准。`;
   }
   if (classNames.some(className => /(?:^|-)select(?:-|$)/.test(className))) {
-    return `组件库线索: Ant Design；证据 class=${JSON.stringify(evidence)}；${versionNote}\n组件类型: Select。仅调整既有控件外观时保留结构；新增简单单选下拉使用 ui-agent-select 局部组件，由系统提供真实 Ant Design 交互。模型只配置 options、default-value、placeholder、size、disabled、allow-clear、show-search 和 aria-label，并根据实际布局设置宿主尺寸与间距；不要复制 selector、selection item、arrow 的内部 DOM，也不要修改组件 Shadow DOM 或 Ant Design 内部 class。多选和业务联动当前不在试点范围内，应先 clarify。`;
+    return `组件库线索: Ant Design；证据 class=${JSON.stringify(evidence)}；${versionNote}\n组件类型: Select。仅调整既有控件外观时保留结构；无明确风格复用要求的新建下拉或复合区域使用 ui-agent-module；明确复制或风格复用时按组件选型规则决定实现。采用 ui-agent-module 时，在 module.js 中直接组合平台提供的 React 与 Ant Design 组件，并根据实际布局设置宿主位置；不要复制 selector、selection item、arrow 的内部 DOM，也不要修改React 管理的 DOM 或 Ant Design 内部 class。真实业务联动应先 clarify。`;
   }
   return `组件库线索: Ant Design；证据 class=${JSON.stringify(evidence)}；${versionNote}`;
 }
@@ -1033,9 +1045,11 @@ export class SourceWorkspaceStore {
       // B keeps captured author rules immutable. User/agent visual edits live
       // in this versioned layer so they can be undone without mutating capture.
       'author-overrides.css': snapshot.authorOverrides ?? '',
+      'module.js': snapshot.moduleJavaScript ?? '',
       'outline.json': indexes.outline,
       'source-map.json': indexes.sourceMap
     };
+    this.validateWorkspaceFiles(files);
     this.writeWorkspaceFiles(directory, files);
     this.writeWorkspaceFiles(initialRevision, files);
     this.atomicWrite(resolve(directory, LAYOUT_INDEX_FILE), JSON.stringify(layoutIndex));
@@ -1378,6 +1392,7 @@ export class SourceWorkspaceStore {
     const authorCapture = this.authorStyleCapture(workspaceId);
     const authorSheets = this.authorStyleSheets(workspaceId);
     const authorOverrides = this.readOptionalFile(resolve(directory, 'author-overrides.css')) ?? '';
+    const moduleJavaScript = this.readOptionalFile(resolve(directory, 'module.js')) ?? '';
     return {
       protocolVersion: PROTOCOL_VERSION,
       title: manifest.title,
@@ -1401,6 +1416,7 @@ export class SourceWorkspaceStore {
         authorStyleSources: authorCapture?.sources ?? authorResources.map(resource => resource.sourceUrl).filter((value, index, values) => values.indexOf(value) === index)
       } : {}),
       ...(authorOverrides ? { authorOverrides } : {}),
+      ...(moduleJavaScript ? { moduleJavaScript } : {}),
       layoutIndex: this.capturedLayoutIndex(workspaceId, html),
       viewport: manifest.viewport ?? { width: 1440, height: 900 }
     };
@@ -1560,6 +1576,20 @@ export class SourceWorkspaceStore {
     if (css === undefined) return undefined;
     validateCss(css);
     return css;
+  }
+
+  moduleJavaScript(workspaceId: string): string | undefined {
+    if (!this.get(workspaceId)) return undefined;
+    return this.readOptionalFile(resolve(this.workspacePath(workspaceId), 'module.js')) ?? '';
+  }
+
+  candidateModuleJavaScript(workspaceId: string, candidateId: string, candidateVersion: number): string | undefined {
+    const manifest = this.candidate(workspaceId, candidateId, candidateVersion);
+    if (!manifest || manifest.status !== 'active') return undefined;
+    return this.readOptionalFile(resolve(
+      this.workspacePath(workspaceId),
+      'candidates', candidateId, 'versions', String(candidateVersion).padStart(3, '0'), 'module.js'
+    )) ?? '';
   }
 
   recordCandidateObservation(input: unknown): CandidateObservation {
@@ -1829,6 +1859,8 @@ export class SourceWorkspaceStore {
     validateHtml(html);
     if (css) validateCss(css);
     if (authorOverrides) validateCss(authorOverrides);
+    validateModuleJavaScript(files['module.js']);
+    validateModuleBindings(html, files['module.js']);
     let previewCss = css;
     let style = `<style data-ui-agent-workspace-styles data-ui-agent-candidate="A">\n${previewCss}\n</style>`;
     if (candidate === 'B') {
@@ -1857,8 +1889,8 @@ export class SourceWorkspaceStore {
       style = `${orderedStyleLinks}\n<link rel="stylesheet" href="${candidateAssetPath}author-overrides.css${assetQuery}" data-ui-agent-author-overrides>`;
     }
     const localizedHtml = this.localizeSnapshotResources(html, authorResources);
-    const componentRuntime = /<ui-agent-select\b/i.test(localizedHtml)
-      ? `<script src="${workspaceAssetPath}replica-runtime.js${assetQuery}" defer data-ui-agent-replica-runtime="select-v1"></script>\n`
+    const componentRuntime = /<ui-agent-module\b/i.test(localizedHtml)
+      ? `<script src="${workspaceAssetPath}replica-runtime.js${assetQuery}" defer data-ui-agent-replica-runtime="module-v2"></script>\n<script src="${candidateAssetPath}module.js${assetQuery}" defer data-ui-agent-module-source></script>\n`
       : '';
     return /<\/head>/i.test(localizedHtml)
       ? localizedHtml.replace(/<\/head>/i, () => `${style}\n${componentRuntime}</head>`)
@@ -1991,6 +2023,8 @@ export class SourceWorkspaceStore {
     const validateWorking = () => {
       validateHtml(working['index.html']);
       validateCss(working[editableStylePath]);
+      validateModuleJavaScript(working['module.js']);
+      validateModuleBindings(working['index.html'], working['module.js']);
       const newVisibilityIssues = authorRuleMode ? [] : analyzeStaticVisibility(
         working['index.html'],
         working['snapshot.css']
@@ -2207,7 +2241,7 @@ export class SourceWorkspaceStore {
       },
       replaceText: async (path, search, replacement) => {
         this.assertEditablePath(path, editableStylePath);
-        const file = path as Extract<WorkspaceFile, 'index.html' | 'snapshot.css' | 'author-overrides.css'>;
+        const file = path as Extract<WorkspaceFile, 'index.html' | 'snapshot.css' | 'author-overrides.css' | 'module.js'>;
         const content = working[file];
         const occurrences = countOccurrences(content, search);
         if (occurrences !== 1) {
@@ -2220,6 +2254,9 @@ export class SourceWorkspaceStore {
           validateHtml(next);
           working[file] = next;
           refreshIndexes();
+        } else if (file === 'module.js') {
+          validateModuleJavaScript(next);
+          working[file] = next;
         } else {
           validateCss(next);
           working[file] = next;
@@ -2229,7 +2266,7 @@ export class SourceWorkspaceStore {
       applyPatch: async (path, edits) => {
         this.assertEditablePath(path, editableStylePath);
         if (edits.length < 1 || edits.length > 20) throw new Error('Patch 必须包含 1-20 个编辑操作');
-        const file = path as Extract<WorkspaceFile, 'index.html' | 'snapshot.css' | 'author-overrides.css'>;
+        const file = path as Extract<WorkspaceFile, 'index.html' | 'snapshot.css' | 'author-overrides.css' | 'module.js'>;
         let next = working[file];
         for (const [index, edit] of edits.entries()) {
           if (edit.kind === 'replace') {
@@ -2272,6 +2309,9 @@ export class SourceWorkspaceStore {
           validateHtml(next);
           working[file] = next;
           refreshIndexes();
+        } else if (file === 'module.js') {
+          validateModuleJavaScript(next);
+          working[file] = next;
         } else {
           validateCss(next);
           working[file] = next;
@@ -2556,7 +2596,8 @@ export class SourceWorkspaceStore {
       },
       validate: async () => validateWorking(),
       commit: async (summary, options = {}) => {
-        if (working['index.html'] === original['index.html'] && working[editableStylePath] === original[editableStylePath]) {
+        if (working['index.html'] === original['index.html'] && working[editableStylePath] === original[editableStylePath]
+          && working['module.js'] === original['module.js']) {
           if (!options.allowNoChanges) throw new Error('Agent 没有对静态源码产生修改');
           validateWorking();
           const revision = this.readManifest(workspaceDirectory).revision;
@@ -2646,8 +2687,8 @@ export class SourceWorkspaceStore {
   }
 
   private assertEditablePath(path: string, editableStylePath: 'snapshot.css' | 'author-overrides.css') {
-    if (path !== 'index.html' && path !== editableStylePath) {
-      throw new Error(`源码 Agent 当前只能修改 index.html 或 ${editableStylePath}，拒绝路径 ${path}`);
+    if (path !== 'index.html' && path !== editableStylePath && path !== 'module.js') {
+      throw new Error(`源码 Agent 当前只能修改 index.html、module.js 或 ${editableStylePath}，拒绝路径 ${path}`);
     }
   }
 
@@ -2665,6 +2706,7 @@ export class SourceWorkspaceStore {
       'index.html': html,
       'snapshot.css': css,
       'author-overrides.css': this.readOptionalFile(resolve(directory, 'author-overrides.css')) ?? '',
+      'module.js': this.readOptionalFile(resolve(directory, 'module.js')) ?? '',
       'outline.json': this.readOptionalFile(resolve(directory, 'outline.json')) ?? generated.outline,
       'source-map.json': this.readOptionalFile(resolve(directory, 'source-map.json')) ?? generated.sourceMap
     };
@@ -2694,6 +2736,8 @@ export class SourceWorkspaceStore {
     validateHtml(files['index.html']);
     validateCss(files['snapshot.css']);
     validateCss(files['author-overrides.css']);
+    validateModuleJavaScript(files['module.js']);
+    validateModuleBindings(files['index.html'], files['module.js']);
     JSON.parse(files['outline.json']);
     JSON.parse(files['source-map.json']);
   }

@@ -6,7 +6,7 @@ import { fileURLToPath, pathToFileURL } from 'node:url';
 const projectRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const runtimeRoot = resolve(projectRoot, 'packages/replica-component-runtime');
 const entryPoint = resolve(runtimeRoot, 'src/index.tsx');
-const outputFile = resolve(projectRoot, 'apps/agent-service/replica-runtime/ui-agent-select.js');
+const outputFile = resolve(projectRoot, 'apps/agent-service/replica-runtime/ui-agent-module.js');
 const runtimeRequire = createRequire(resolve(runtimeRoot, 'package.json'));
 
 async function loadEsbuild() {

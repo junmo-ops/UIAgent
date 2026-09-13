@@ -74,7 +74,7 @@ export function createApp(
   const publicBaseUrl = env.PUBLIC_BASE_URL?.trim().replace(/\/+$/, '');
   const publicUrl = (path: string, requestUrl: string) => new URL(path, publicBaseUrl ? `${publicBaseUrl}/` : requestUrl).toString();
   const extensionReleaseDirectory = fileURLToPath(new URL('../extension-release/', import.meta.url));
-  const replicaRuntimePath = fileURLToPath(new URL('../replica-runtime/ui-agent-select.js', import.meta.url));
+  const replicaRuntimePath = fileURLToPath(new URL('../replica-runtime/ui-agent-module.js', import.meta.url));
   const replicaRuntime = existsSync(replicaRuntimePath) ? readFileSync(replicaRuntimePath) : undefined;
   const replicaRuntimeEtag = replicaRuntime
     ? `"${createHash('sha256').update(replicaRuntime).digest('hex').slice(0, 16)}"`
@@ -441,7 +441,7 @@ export function createApp(
       authMode: authenticator.mode ?? 'external',
       authReady: !authenticator.configurationError,
       workspaceIdentityIsolation: identityIsolation,
-      replicaSelectRuntimeReady: Boolean(replicaRuntime)
+      replicaComponentRuntimeReady: Boolean(replicaRuntime),
     }))
     .get('/v1/extension/latest', c => {
       if (!extensionRelease) return c.body(null, 204);
@@ -869,6 +869,14 @@ export function createApp(
       c.header('ETag', replicaRuntimeEtag);
       return c.body(new Uint8Array(replicaRuntime).buffer as ArrayBuffer);
     })
+    .get('/workspaces/:workspaceId/module.js', c => {
+      const source = workspaceStore.moduleJavaScript(c.req.param('workspaceId'));
+      if (source === undefined) return c.text('局部模块源码不可用', 404);
+      c.header('Content-Type', 'text/javascript; charset=utf-8');
+      c.header('X-Content-Type-Options', 'nosniff');
+      c.header('Cache-Control', 'no-store');
+      return c.body(source);
+    })
     .get('/workspaces/:workspaceId/author-sheets/:sheetIndex', c => {
       try {
         const previewToken = c.req.query('preview_token');
@@ -977,6 +985,16 @@ export function createApp(
       } catch {
         return c.text('候选覆盖样式不可用', 404);
       }
+    })
+    .get('/workspaces/:workspaceId/candidates/:candidateId/versions/:candidateVersion/module.js', c => {
+      const source = workspaceStore.candidateModuleJavaScript(
+        c.req.param('workspaceId'), c.req.param('candidateId'), Number(c.req.param('candidateVersion'))
+      );
+      if (source === undefined) return c.text('候选局部模块源码不可用', 404);
+      c.header('Content-Type', 'text/javascript; charset=utf-8');
+      c.header('X-Content-Type-Options', 'nosniff');
+      c.header('Cache-Control', 'no-store');
+      return c.body(source);
     })
     .get('/workspaces/:workspaceId/candidates/:candidateId/versions/:candidateVersion/preview', c => {
       try {

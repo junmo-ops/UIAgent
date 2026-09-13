@@ -48,7 +48,7 @@ const clineSourceRules = [
   'index.html 保存结构和文案。存在 author.css 或 author-style-links.json 时，视觉修改只写 author-overrides.css，author.css 仅供查询，snapshot.css 不可修改；否则视觉修改写 snapshot.css。outline.json 和 source-map.json 只读。',
   'inspect_element 默认返回目标、祖先、同级、布局、局部源码、目标实际命中的样式规则，以及可识别时的组件库规范；只有缺少完成当前修改的具体信息时才使用 full。已有组件与样式上下文时直接据此修改，不要再次搜索组件基础样式；仅在明确缺少某条页面覆盖规则时使用 query_style_symbols，避免全文搜索大 CSS。',
   '目标明确的单元素文案、属性或已有组件形态转换，应使用 selectedElementContext 在前两次模型决策内完成意图声明并开始写入；不要为了比较未被用户要求的视觉方案检索相邻示例。',
-  '修改前只需确认目标、最近相关容器和必要的相邻元素。新增同类组件优先复用现有结构和 class；没有合适结构时再增加局部 HTML/CSS。修改行内样式时注意级联优先级，背景也可能由子元素或伪元素绘制。',
+  '修改前只需确认目标、最近相关容器和必要的相邻元素。按组件选型规则区分新建、复制、修改、重做及用户视觉要求；默认新建不检索主题，明确风格复用时只读取相关参照。修改行内样式时注意级联优先级，背景也可能由子元素或伪元素绘制。',
   '位置描述以用户明确容器为准，否则以 selectedSourceId 或最近语义祖先为锚点。相邻组件只扩展到最近公共父容器；用户未明确要求全局视口定位时不得新增 position:fixed。新增元素后调用 validate_spatial_scope。',
   '若多个方案会显著改变最终视觉结果，修改前调用 clarify；问题只询问源码无法确定的信息。已有澄清回复时结合 conversation 继续原需求。',
   '首次写入前调用一次 declare_intent，简洁列出目标、相关 sourceId、需要浏览器验证的约束和布局范围。新增 sourceId 会由系统自动加入验证范围。',
@@ -793,7 +793,7 @@ export class ClineCodingAgentAdapter implements CodingAgentPort {
         name: 'replace_text',
         description: '在允许写入的源码文件中执行一次精确替换。search 必须来自最近读取的原文。',
         inputSchema: objectSchema({
-          path: stringProperty('只允许 index.html，以及当前模式的样式文件：原始规则模式为 author-overrides.css，冻结模式为 snapshot.css。'),
+          path: stringProperty('只允许 index.html、module.js，以及当前模式的样式文件：原始规则模式为 author-overrides.css，冻结模式为 snapshot.css。'),
           search: stringProperty('要替换的精确原文，应当足够唯一。'),
           replace: stringProperty('替换后的源码。')
         }, ['path', 'search', 'replace']),
@@ -805,7 +805,7 @@ export class ClineCodingAgentAdapter implements CodingAgentPort {
             requireIntentDeclared();
             const result = await workspace.replaceText(input.path, input.search, input.replace);
             if (input.path === 'index.html') trackSourceIdChanges(input.search, input.replace);
-            else trackPositioningChange(input.search, input.replace);
+            else if (input.path !== 'module.js') trackPositioningChange(input.search, input.replace);
             return result;
           }
         )
@@ -818,9 +818,9 @@ export class ClineCodingAgentAdapter implements CodingAgentPort {
         >;
       }, string>({
         name: 'apply_patch',
-        description: '原子应用一组受控源码编辑。支持精确替换，以及在文件开头、末尾或唯一锚点前后插入；适合追加 CSS。',
+        description: '原子应用一组受控源码编辑。支持精确替换，以及在文件开头、末尾或唯一锚点前后插入；适合编写 module.js 或追加 CSS。',
         inputSchema: objectSchema({
-          path: stringProperty('只允许 index.html，以及当前模式的样式文件：原始规则模式为 author-overrides.css，冻结模式为 snapshot.css。'),
+          path: stringProperty('只允许 index.html、module.js，以及当前模式的样式文件：原始规则模式为 author-overrides.css，冻结模式为 snapshot.css。'),
           edits: {
             type: 'array',
             minItems: 1,
@@ -847,7 +847,7 @@ export class ClineCodingAgentAdapter implements CodingAgentPort {
                 if (edit.kind === 'replace') trackSourceIdChanges(edit.search, edit.replace);
                 else trackSourceIdChanges('', edit.text);
               }
-            } else {
+            } else if (input.path !== 'module.js') {
               for (const edit of input.edits) {
                 if (edit.kind === 'replace') trackPositioningChange(edit.search, edit.replace);
                 else trackPositioningChange('', edit.text);
