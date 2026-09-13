@@ -793,7 +793,7 @@ export class ClineCodingAgentAdapter implements CodingAgentPort {
         name: 'replace_text',
         description: '在允许写入的源码文件中执行一次精确替换。search 必须来自最近读取的原文。',
         inputSchema: objectSchema({
-          path: stringProperty('只允许 index.html、module.js，以及当前模式的样式文件：原始规则模式为 author-overrides.css，冻结模式为 snapshot.css。'),
+          path: stringProperty('只允许 index.html、module.jsx，以及当前模式的样式文件：原始规则模式为 author-overrides.css，冻结模式为 snapshot.css。module.js 是平台编译产物。'),
           search: stringProperty('要替换的精确原文，应当足够唯一。'),
           replace: stringProperty('替换后的源码。')
         }, ['path', 'search', 'replace']),
@@ -805,7 +805,7 @@ export class ClineCodingAgentAdapter implements CodingAgentPort {
             requireIntentDeclared();
             const result = await workspace.replaceText(input.path, input.search, input.replace);
             if (input.path === 'index.html') trackSourceIdChanges(input.search, input.replace);
-            else if (input.path !== 'module.js') trackPositioningChange(input.search, input.replace);
+            else if (input.path !== 'module.jsx') trackPositioningChange(input.search, input.replace);
             return result;
           }
         )
@@ -818,9 +818,9 @@ export class ClineCodingAgentAdapter implements CodingAgentPort {
         >;
       }, string>({
         name: 'apply_patch',
-        description: '原子应用一组受控源码编辑。支持精确替换，以及在文件开头、末尾或唯一锚点前后插入；适合编写 module.js 或追加 CSS。',
+        description: '原子应用一组受控源码编辑。支持精确替换，以及在文件开头、末尾或唯一锚点前后插入；适合编写 module.jsx 或追加 CSS。',
         inputSchema: objectSchema({
-          path: stringProperty('只允许 index.html、module.js，以及当前模式的样式文件：原始规则模式为 author-overrides.css，冻结模式为 snapshot.css。'),
+          path: stringProperty('只允许 index.html、module.jsx，以及当前模式的样式文件：原始规则模式为 author-overrides.css，冻结模式为 snapshot.css。module.js 是平台编译产物。'),
           edits: {
             type: 'array',
             minItems: 1,
@@ -847,7 +847,7 @@ export class ClineCodingAgentAdapter implements CodingAgentPort {
                 if (edit.kind === 'replace') trackSourceIdChanges(edit.search, edit.replace);
                 else trackSourceIdChanges('', edit.text);
               }
-            } else if (input.path !== 'module.js') {
+            } else if (input.path !== 'module.jsx') {
               for (const edit of input.edits) {
                 if (edit.kind === 'replace') trackPositioningChange(edit.search, edit.replace);
                 else trackPositioningChange('', edit.text);

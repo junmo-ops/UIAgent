@@ -11,6 +11,7 @@ import {
 import { basename, dirname, resolve, sep } from 'node:path';
 import { createHash, randomUUID } from 'node:crypto';
 import { Script } from 'node:vm';
+import { transformSync } from 'esbuild';
 import { parseHTML } from 'linkedom';
 import { type CodingAgentConversationTurn, type CodingWorkspaceTools } from '@ui-agent/agent-runtime';
 import {
@@ -47,7 +48,8 @@ import { validateControlledInteractions } from './interactions';
 import { analyzeStaticVisibility, staticVisibilityIssueKey } from './visibility';
 import { diagnoseSnapshotPackage, type SnapshotDiagnostics } from './snapshot-diagnostics';
 
-const WORKSPACE_FILES = ['index.html', 'snapshot.css', 'author-overrides.css', 'module.js', 'outline.json', 'source-map.json'] as const;
+const WORKSPACE_FILES = ['index.html', 'snapshot.css', 'author-overrides.css', 'module.jsx', 'module.js', 'outline.json', 'source-map.json'] as const;
+const AGENT_WORKSPACE_FILES = WORKSPACE_FILES.filter(path => path !== 'module.js');
 type WorkspaceFile = typeof WORKSPACE_FILES[number];
 type WorkspaceFiles = Record<WorkspaceFile, string>;
 type CapturedLayoutIndex = NonNullable<StaticSnapshot['layoutIndex']>;
@@ -305,7 +307,7 @@ function validateReplicaComponents(html: string): void {
 }
 
 function validateModuleJavaScript(source: string): string {
-  if (source.length > 500_000) throw new Error('module.js 超过 500 KB 限制');
+  if (source.length > 1_000_000) throw new Error('module.js 超过 1 MB 限制');
   if (!source.trim()) return 'module.js 为空';
   try {
     // Syntax validation only. Generated code is never evaluated by the service;
@@ -315,6 +317,35 @@ function validateModuleJavaScript(source: string): string {
     throw new Error(`module.js 语法无效：${error instanceof Error ? error.message : '未知语法错误'}`);
   }
   return 'module.js 语法校验通过';
+}
+
+function compileModuleSource(source: string): string {
+  if (source.length > 500_000) throw new Error('module.jsx 超过 500 KB 限制');
+  if (!source.trim()) return '';
+  try {
+    const result = transformSync(source, {
+      loader: 'jsx',
+      sourcefile: 'module.jsx',
+      target: 'chrome120',
+      format: 'iife',
+      jsx: 'transform',
+      jsxFactory: 'React.createElement',
+      jsxFragment: 'React.Fragment',
+      legalComments: 'none',
+      charset: 'utf8'
+    });
+    if (result.code.length > 1_000_000) throw new Error('编译产物超过 1 MB 限制');
+    return result.code;
+  } catch (error) {
+    const failure = error as { errors?: Array<{ text?: string; location?: { line?: number; column?: number } | null }> };
+    const diagnostic = failure.errors?.slice(0, 5).map(item => {
+      const location = item.location?.line
+        ? `module.jsx:${item.location.line}:${(item.location.column ?? 0) + 1}`
+        : 'module.jsx';
+      return `${location} ${item.text ?? '编译失败'}`;
+    }).join('；');
+    throw new Error(`module.jsx 编译失败：${diagnostic || (error instanceof Error ? error.message : '未知错误')}`);
+  }
 }
 
 function validateModuleBindings(html: string, source: string): void {
@@ -331,7 +362,7 @@ function validateModuleBindings(html: string, source: string): void {
   );
   const missing = [...requested].filter(name => !definitions.has(name));
   if (missing.length) {
-    throw new Error(`module.js 未定义宿主引用的模块：${missing.join('、')}。请使用 UIAgent.define(name, factory) 注册`);
+    throw new Error(`module.jsx 未定义宿主引用的模块：${missing.join('、')}。请使用 UIAgent.define(name, factory) 注册`);
   }
 }
 
@@ -943,7 +974,7 @@ function antDesignComponentGuidance(tag: string, classNames: readonly string[]):
     return `组件库线索: Ant Design；证据 class=${JSON.stringify(evidence)}；${versionNote}\n组件类型: Input。既有控件修改规范: 保留页面现有 input、affix-wrapper、size 和状态 class；placeholder 用属性修改，尺寸和前后缀结构以实际 DOM 为准。`;
   }
   if (classNames.some(className => /(?:^|-)select(?:-|$)/.test(className))) {
-    return `组件库线索: Ant Design；证据 class=${JSON.stringify(evidence)}；${versionNote}\n组件类型: Select。仅调整既有控件外观时保留结构；无明确风格复用要求的新建下拉或复合区域使用 ui-agent-module；明确复制或风格复用时按组件选型规则决定实现。采用 ui-agent-module 时，在 module.js 中直接组合平台提供的 React 与 Ant Design 组件，并根据实际布局设置宿主位置；不要复制 selector、selection item、arrow 的内部 DOM，也不要修改React 管理的 DOM 或 Ant Design 内部 class。真实业务联动应先 clarify。`;
+    return `组件库线索: Ant Design；证据 class=${JSON.stringify(evidence)}；${versionNote}\n组件类型: Select。仅调整既有控件外观时保留结构；无明确风格复用要求的新建下拉或复合区域使用 ui-agent-module；明确复制或风格复用时按组件选型规则决定实现。采用 ui-agent-module 时，在 module.jsx 中直接组合平台提供的 React 与 Ant Design 组件，并根据实际布局设置宿主位置；不要复制 selector、selection item、arrow 的内部 DOM，也不要修改 React 管理的 DOM 或 Ant Design 内部 class。真实业务联动应先 clarify。`;
   }
   return `组件库线索: Ant Design；证据 class=${JSON.stringify(evidence)}；${versionNote}`;
 }
@@ -1039,13 +1070,16 @@ export class SourceWorkspaceStore {
     const extractedLayout = extractCapturedLayoutIndex(compiled.html);
     const layoutIndex = { ...extractedLayout.layoutIndex, ...(snapshot.layoutIndex ?? {}) };
     const indexes = refreshWorkspaceIndexes(extractedLayout.html);
+    const moduleSource = snapshot.moduleSource ?? snapshot.moduleJavaScript ?? '';
+    const moduleJavaScript = compileModuleSource(moduleSource);
     const files: WorkspaceFiles = {
       'index.html': extractedLayout.html,
       'snapshot.css': this.frozenStyleVariantEnabled ? compiled.css : '',
       // B keeps captured author rules immutable. User/agent visual edits live
       // in this versioned layer so they can be undone without mutating capture.
       'author-overrides.css': snapshot.authorOverrides ?? '',
-      'module.js': snapshot.moduleJavaScript ?? '',
+      'module.jsx': moduleSource,
+      'module.js': moduleJavaScript,
       'outline.json': indexes.outline,
       'source-map.json': indexes.sourceMap
     };
@@ -1392,6 +1426,9 @@ export class SourceWorkspaceStore {
     const authorCapture = this.authorStyleCapture(workspaceId);
     const authorSheets = this.authorStyleSheets(workspaceId);
     const authorOverrides = this.readOptionalFile(resolve(directory, 'author-overrides.css')) ?? '';
+    const moduleSource = this.readOptionalFile(resolve(directory, 'module.jsx'))
+      ?? this.readOptionalFile(resolve(directory, 'module.js'))
+      ?? '';
     const moduleJavaScript = this.readOptionalFile(resolve(directory, 'module.js')) ?? '';
     return {
       protocolVersion: PROTOCOL_VERSION,
@@ -1416,6 +1453,7 @@ export class SourceWorkspaceStore {
         authorStyleSources: authorCapture?.sources ?? authorResources.map(resource => resource.sourceUrl).filter((value, index, values) => values.indexOf(value) === index)
       } : {}),
       ...(authorOverrides ? { authorOverrides } : {}),
+      ...(moduleSource ? { moduleSource } : {}),
       ...(moduleJavaScript ? { moduleJavaScript } : {}),
       layoutIndex: this.capturedLayoutIndex(workspaceId, html),
       viewport: manifest.viewport ?? { width: 1440, height: 900 }
@@ -1580,16 +1618,22 @@ export class SourceWorkspaceStore {
 
   moduleJavaScript(workspaceId: string): string | undefined {
     if (!this.get(workspaceId)) return undefined;
-    return this.readOptionalFile(resolve(this.workspacePath(workspaceId), 'module.js')) ?? '';
+    const directory = this.workspacePath(workspaceId);
+    const compiled = this.readOptionalFile(resolve(directory, 'module.js'));
+    if (compiled !== undefined) return compiled;
+    return compileModuleSource(this.readOptionalFile(resolve(directory, 'module.jsx')) ?? '');
   }
 
   candidateModuleJavaScript(workspaceId: string, candidateId: string, candidateVersion: number): string | undefined {
     const manifest = this.candidate(workspaceId, candidateId, candidateVersion);
     if (!manifest || manifest.status !== 'active') return undefined;
-    return this.readOptionalFile(resolve(
+    const directory = resolve(
       this.workspacePath(workspaceId),
-      'candidates', candidateId, 'versions', String(candidateVersion).padStart(3, '0'), 'module.js'
-    )) ?? '';
+      'candidates', candidateId, 'versions', String(candidateVersion).padStart(3, '0')
+    );
+    const compiled = this.readOptionalFile(resolve(directory, 'module.js'));
+    if (compiled !== undefined) return compiled;
+    return compileModuleSource(this.readOptionalFile(resolve(directory, 'module.jsx')) ?? '');
   }
 
   recordCandidateObservation(input: unknown): CandidateObservation {
@@ -1860,7 +1904,7 @@ export class SourceWorkspaceStore {
     if (css) validateCss(css);
     if (authorOverrides) validateCss(authorOverrides);
     validateModuleJavaScript(files['module.js']);
-    validateModuleBindings(html, files['module.js']);
+    validateModuleBindings(html, files['module.jsx']);
     let previewCss = css;
     let style = `<style data-ui-agent-workspace-styles data-ui-agent-candidate="A">\n${previewCss}\n</style>`;
     if (candidate === 'B') {
@@ -2023,8 +2067,9 @@ export class SourceWorkspaceStore {
     const validateWorking = () => {
       validateHtml(working['index.html']);
       validateCss(working[editableStylePath]);
+      compileModuleSource(working['module.jsx']);
       validateModuleJavaScript(working['module.js']);
-      validateModuleBindings(working['index.html'], working['module.js']);
+      validateModuleBindings(working['index.html'], working['module.jsx']);
       const newVisibilityIssues = authorRuleMode ? [] : analyzeStaticVisibility(
         working['index.html'],
         working['snapshot.css']
@@ -2044,6 +2089,7 @@ export class SourceWorkspaceStore {
     const readableContent = (path: string): string => {
       if (path === 'author.css' && this.authorCss(workspaceId)) return this.authorCss(workspaceId)!;
       if (path === 'author-style-links.json' && authorRuleMode) return JSON.stringify(this.unreadableAuthorStyleSources(workspaceId), null, 2);
+      if (path === 'module.js') throw new Error('module.js 是平台编译产物，请读取并修改 module.jsx');
       this.assertReadablePath(path);
       const content = working[path as WorkspaceFile];
       return path === 'index.html' ? extractCapturedLayoutIndex(content).html : content;
@@ -2053,7 +2099,7 @@ export class SourceWorkspaceStore {
     toolset = {
       submissionMode: candidate ? 'candidate' : 'direct',
       listFiles: async () => [
-        ...WORKSPACE_FILES.map(path => ({ path, chars: readableContent(path).length })),
+        ...AGENT_WORKSPACE_FILES.map(path => ({ path, chars: readableContent(path).length })),
         ...(authorCssContent ? [{ path: 'author.css', chars: authorCssContent.length }] : []),
         ...(this.unreadableAuthorStyleSources(workspaceId).length
           ? [{ path: 'author-style-links.json', chars: JSON.stringify(this.unreadableAuthorStyleSources(workspaceId)).length }]
@@ -2241,7 +2287,7 @@ export class SourceWorkspaceStore {
       },
       replaceText: async (path, search, replacement) => {
         this.assertEditablePath(path, editableStylePath);
-        const file = path as Extract<WorkspaceFile, 'index.html' | 'snapshot.css' | 'author-overrides.css' | 'module.js'>;
+        const file = path as Extract<WorkspaceFile, 'index.html' | 'snapshot.css' | 'author-overrides.css' | 'module.jsx'>;
         const content = working[file];
         const occurrences = countOccurrences(content, search);
         if (occurrences !== 1) {
@@ -2254,9 +2300,10 @@ export class SourceWorkspaceStore {
           validateHtml(next);
           working[file] = next;
           refreshIndexes();
-        } else if (file === 'module.js') {
-          validateModuleJavaScript(next);
+        } else if (file === 'module.jsx') {
+          const compiled = compileModuleSource(next);
           working[file] = next;
+          working['module.js'] = compiled;
         } else {
           validateCss(next);
           working[file] = next;
@@ -2266,7 +2313,7 @@ export class SourceWorkspaceStore {
       applyPatch: async (path, edits) => {
         this.assertEditablePath(path, editableStylePath);
         if (edits.length < 1 || edits.length > 20) throw new Error('Patch 必须包含 1-20 个编辑操作');
-        const file = path as Extract<WorkspaceFile, 'index.html' | 'snapshot.css' | 'author-overrides.css' | 'module.js'>;
+        const file = path as Extract<WorkspaceFile, 'index.html' | 'snapshot.css' | 'author-overrides.css' | 'module.jsx'>;
         let next = working[file];
         for (const [index, edit] of edits.entries()) {
           if (edit.kind === 'replace') {
@@ -2309,9 +2356,10 @@ export class SourceWorkspaceStore {
           validateHtml(next);
           working[file] = next;
           refreshIndexes();
-        } else if (file === 'module.js') {
-          validateModuleJavaScript(next);
+        } else if (file === 'module.jsx') {
+          const compiled = compileModuleSource(next);
           working[file] = next;
+          working['module.js'] = compiled;
         } else {
           validateCss(next);
           working[file] = next;
@@ -2597,7 +2645,7 @@ export class SourceWorkspaceStore {
       validate: async () => validateWorking(),
       commit: async (summary, options = {}) => {
         if (working['index.html'] === original['index.html'] && working[editableStylePath] === original[editableStylePath]
-          && working['module.js'] === original['module.js']) {
+          && working['module.jsx'] === original['module.jsx']) {
           if (!options.allowNoChanges) throw new Error('Agent 没有对静态源码产生修改');
           validateWorking();
           const revision = this.readManifest(workspaceDirectory).revision;
@@ -2687,8 +2735,8 @@ export class SourceWorkspaceStore {
   }
 
   private assertEditablePath(path: string, editableStylePath: 'snapshot.css' | 'author-overrides.css') {
-    if (path !== 'index.html' && path !== editableStylePath && path !== 'module.js') {
-      throw new Error(`源码 Agent 当前只能修改 index.html、module.js 或 ${editableStylePath}，拒绝路径 ${path}`);
+    if (path !== 'index.html' && path !== editableStylePath && path !== 'module.jsx') {
+      throw new Error(`源码 Agent 当前只能修改 index.html、module.jsx 或 ${editableStylePath}，拒绝路径 ${path}`);
     }
   }
 
@@ -2702,11 +2750,14 @@ export class SourceWorkspaceStore {
     const html = readFileSync(resolve(directory, 'index.html'), 'utf8');
     const css = this.readOptionalFile(resolve(directory, 'snapshot.css')) ?? '';
     const generated = refreshWorkspaceIndexes(html);
+    const storedJavaScript = this.readOptionalFile(resolve(directory, 'module.js')) ?? '';
+    const moduleSource = this.readOptionalFile(resolve(directory, 'module.jsx')) ?? storedJavaScript;
     return {
       'index.html': html,
       'snapshot.css': css,
       'author-overrides.css': this.readOptionalFile(resolve(directory, 'author-overrides.css')) ?? '',
-      'module.js': this.readOptionalFile(resolve(directory, 'module.js')) ?? '',
+      'module.jsx': moduleSource,
+      'module.js': storedJavaScript || compileModuleSource(moduleSource),
       'outline.json': this.readOptionalFile(resolve(directory, 'outline.json')) ?? generated.outline,
       'source-map.json': this.readOptionalFile(resolve(directory, 'source-map.json')) ?? generated.sourceMap
     };
@@ -2736,8 +2787,9 @@ export class SourceWorkspaceStore {
     validateHtml(files['index.html']);
     validateCss(files['snapshot.css']);
     validateCss(files['author-overrides.css']);
+    compileModuleSource(files['module.jsx']);
     validateModuleJavaScript(files['module.js']);
-    validateModuleBindings(files['index.html'], files['module.js']);
+    validateModuleBindings(files['index.html'], files['module.jsx']);
     JSON.parse(files['outline.json']);
     JSON.parse(files['source-map.json']);
   }
