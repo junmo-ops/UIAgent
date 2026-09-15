@@ -48,7 +48,7 @@ const clineSourceRules = [
   'index.html 保存结构和文案。存在 author.css 或 author-style-links.json 时，视觉修改只写 author-overrides.css，author.css 仅供查询，snapshot.css 不可修改；否则视觉修改写 snapshot.css。outline.json 和 source-map.json 只读。',
   'inspect_element 默认返回目标、祖先、同级、布局、局部源码、目标实际命中的样式规则，以及可识别时的组件库规范；只有缺少完成当前修改的具体信息时才使用 full。已有组件与样式上下文时直接据此修改，不要再次搜索组件基础样式；仅在明确缺少某条页面覆盖规则时使用 query_style_symbols，避免全文搜索大 CSS。',
   '目标明确的单元素文案、属性或已有组件形态转换，应使用 selectedElementContext 在前两次模型决策内完成意图声明并开始写入；不要为了比较未被用户要求的视觉方案检索相邻示例。',
-  '修改前只需确认目标、最近相关容器和必要的相邻元素。按组件选型规则区分新建、复制、修改、重做及用户视觉要求；默认新建不检索主题，明确风格复用时只读取相关参照。修改行内样式时注意级联优先级，背景也可能由子元素或伪元素绘制。',
+  '修改前只需确认目标、最近相关容器和必要的相邻元素。复制原样保留原结构，小改保留现有实现；新增、重做、改变控件类型或组合交互统一使用 Ant Design 局部模块。只读取必要布局证据，明确风格要求时只读取相关参照。修改行内样式时注意级联优先级，背景也可能由子元素或伪元素绘制。',
   '位置描述以用户明确容器为准，否则以 selectedSourceId 或最近语义祖先为锚点。相邻组件只扩展到最近公共父容器；用户未明确要求全局视口定位时不得新增 position:fixed。新增元素后调用 validate_spatial_scope。',
   '若多个方案会显著改变最终视觉结果，修改前调用 clarify；问题只询问源码无法确定的信息。已有澄清回复时结合 conversation 继续原需求。',
   '首次写入前调用一次 declare_intent，简洁列出目标、相关 sourceId、需要浏览器验证的约束和布局范围。新增 sourceId 会由系统自动加入验证范围。',
@@ -327,6 +327,7 @@ export class ClineCodingAgentAdapter implements CodingAgentPort {
     let rollbackStatus: 'not_requested' | 'succeeded' | 'failed' = 'not_requested';
     const newSourceIds = new Set<string>();
     let spatialScopeValidated = false;
+    let originalSelectedPath: string[] = [];
     let introducedFixedPosition = false;
     let intentDeclared = false;
     let declaredIntent: import('@ui-agent/contracts').WorkspaceIntent | undefined;
@@ -806,6 +807,7 @@ export class ClineCodingAgentAdapter implements CodingAgentPort {
             const result = await workspace.replaceText(input.path, input.search, input.replace);
             if (input.path === 'index.html') trackSourceIdChanges(input.search, input.replace);
             else if (input.path !== 'module.jsx') trackPositioningChange(input.search, input.replace);
+            if (input.path === 'index.html') trackCreatedSourceIdsFromResult(result);
             return result;
           }
         )
@@ -847,6 +849,7 @@ export class ClineCodingAgentAdapter implements CodingAgentPort {
                 if (edit.kind === 'replace') trackSourceIdChanges(edit.search, edit.replace);
                 else trackSourceIdChanges('', edit.text);
               }
+              trackCreatedSourceIdsFromResult(result);
             } else if (input.path !== 'module.jsx') {
               for (const edit of input.edits) {
                 if (edit.kind === 'replace') trackPositioningChange(edit.search, edit.replace);
@@ -873,6 +876,7 @@ export class ClineCodingAgentAdapter implements CodingAgentPort {
             requireIntentDeclared();
             const result = await workspace.replaceInElement(input.sourceId, input.search, input.replace);
             trackSourceIdChanges(input.search, input.replace);
+            trackCreatedSourceIdsFromResult(result);
             return result;
           }
         )
@@ -1100,7 +1104,17 @@ export class ClineCodingAgentAdapter implements CodingAgentPort {
             if (input.scope !== 'global') {
               if (!input.containerSourceId) throw new Error('非全局定位必须提供 containerSourceId');
               if (input.scope === 'selected-context' && selectedSourceId) {
-                const selectedPath = ancestrySourceIds(await workspace.inspectElement(selectedSourceId));
+                let selectedPath: string[];
+                try {
+                  selectedPath = ancestrySourceIds(await workspace.inspectElement(selectedSourceId));
+                } catch (error) {
+                  if (!(error instanceof Error) || !error.message.includes(`源码中不存在元素 ${selectedSourceId}`)
+                    || !originalSelectedPath.length) throw error;
+                  selectedPath = originalSelectedPath;
+                }
+                // The selected node may have been replaced, but the claimed
+                // container must still exist and contain the new nodes.
+                await workspace.inspectElement(input.containerSourceId);
                 if (!selectedPath.includes(input.containerSourceId)) {
                   throw new Error(`容器 ${input.containerSourceId} 不在选中元素 ${selectedSourceId} 的祖先路径中；请使用选区语义祖先或最近公共父容器`);
                 }
@@ -1233,6 +1247,7 @@ export class ClineCodingAgentAdapter implements CodingAgentPort {
       if (turn.request.sourceId) {
         try {
           selectedElementContext = await workspace.inspectElement(turn.request.sourceId, { detail: 'compact' });
+          originalSelectedPath = ancestrySourceIds(selectedElementContext);
           selectedElementContextAvailable = true;
         } catch {
           // A stale selection should not prevent semantic lookup inside the workspace.

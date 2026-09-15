@@ -954,27 +954,27 @@ function antDesignComponentGuidance(tag: string, classNames: readonly string[]):
     : classNames.filter(className => compatibleFamilies.some(({ prefix, family }) => (
         className.startsWith(`${prefix}-${family}`)
       ))).slice(0, 6);
-  const versionNote = '以下线索供修改既有内容、明确复制或风格复用时参考；无明确风格复用要求的新建模块默认使用 ui-agent-module，不据此检索主题。原页面版本未知。';
+  const versionNote = '以下原站线索仅供保留既有实现的小改或原样复制参考；新增、重做、改变控件类型或组合交互必须使用 ui-agent-module 中真正的 Ant Design 组件。风格一致要求不改变该实现选择。原页面版本未知。';
   if (tag === 'button' || classNames.some(className => /(?:^|-)btn(?:-|$)/.test(className))) {
     const iconOnly = classNames.some(className => /(?:^|-)btn-icon-only$/.test(className));
     const baseClasses = classNames.filter(className => /(?:^|-)btn(?:$|-(?:default|primary|dashed|link|text))$/.test(className));
     return [
       `组件库线索: Ant Design${compatibleEvidence && !standardEvidence ? ' 兼容前缀' : ''}；证据 class=${JSON.stringify(evidence)}；${versionNote}`,
       `组件类型: Button${iconOnly ? '（当前为 icon-only 形态）' : ''}。`,
-      `组件规范: 优先保留页面现有基础/类型 class${baseClasses.length ? ` ${JSON.stringify(baseClasses)}` : ''} 和主题；图标按钮改为文字按钮时通常移除 icon-only、固定正方形尺寸及零 padding 约束。除非用户明确要求，不自行切换 primary/default 类型；只检查当前元素实际命中的覆盖规则。`
+      `既有按钮小改规范（不适用于重做或组合交互）: 保留页面现有基础/类型 class${baseClasses.length ? ` ${JSON.stringify(baseClasses)}` : ''} 和主题；图标按钮改为文字按钮时通常移除 icon-only、固定正方形尺寸及零 padding 约束。除非用户明确要求，不自行切换 primary/default 类型；只检查当前元素实际命中的覆盖规则。`
     ].join('\n');
   }
   if (classNames.some(className => /(?:^|-)checkbox(?:-|$)/.test(className))) {
-    return `组件库线索: Ant Design；证据 class=${JSON.stringify(evidence)}；${versionNote}\n组件类型: Checkbox。仅调整外观时保留既有结构；默认新建所需勾选能力若不在模块协议中，应先 clarify；明确风格复用时根据实际结构及所需交互判断，不能把静态复制视为功能恢复。原生勾选由浏览器处理，静态 wrapper/inner 的状态 class 不会因缺失的 React 自动同步；可用 :checked 等 CSS 表达视觉状态，不要重复绑定 toggle-checkbox。样式参考当前主题。`;
+    return `组件库线索: Ant Design；证据 class=${JSON.stringify(evidence)}；${versionNote}\n组件类型: Checkbox。仅调整外观时保留既有结构；新增或重做勾选使用 module.jsx 中的 antd.Checkbox，不能把静态复制视为功能恢复。原生勾选由浏览器处理，静态 wrapper/inner 的状态 class 不会因缺失的 React 自动同步；可用 :checked 等 CSS 表达视觉状态，不要重复绑定 toggle-checkbox。样式参考当前主题。`;
   }
   if (classNames.some(className => /(?:^|-)radio(?:-|$)/.test(className))) {
-    return `组件库线索: Ant Design；证据 class=${JSON.stringify(evidence)}；${versionNote}\n组件类型: Radio。仅调整外观时保留既有结构；默认新建所需单选组能力若不在模块协议中，应先 clarify；明确风格复用时根据实际结构及所需交互判断，不能把静态复制视为功能恢复。原生互斥选择由浏览器处理，视觉状态可用 :checked 表达，不依赖原站 React 更新 class，不重复绑定 set-radio。组内布局以实际容器和用户要求为准。`;
+    return `组件库线索: Ant Design；证据 class=${JSON.stringify(evidence)}；${versionNote}\n组件类型: Radio。仅调整外观时保留既有结构；新增或重做单选使用 module.jsx 中的 antd.Radio/Radio.Group，不能把静态复制视为功能恢复。原生互斥选择由浏览器处理，视觉状态可用 :checked 表达，不依赖原站 React 更新 class，不重复绑定 set-radio。组内布局以实际容器和用户要求为准。`;
   }
   if (tag === 'input' || classNames.some(className => /(?:^|-)input(?:-|$)/.test(className))) {
     return `组件库线索: Ant Design；证据 class=${JSON.stringify(evidence)}；${versionNote}\n组件类型: Input。既有控件修改规范: 保留页面现有 input、affix-wrapper、size 和状态 class；placeholder 用属性修改，尺寸和前后缀结构以实际 DOM 为准。`;
   }
   if (classNames.some(className => /(?:^|-)select(?:-|$)/.test(className))) {
-    return `组件库线索: Ant Design；证据 class=${JSON.stringify(evidence)}；${versionNote}\n组件类型: Select。仅调整既有控件外观时保留结构；无明确风格复用要求的新建下拉或复合区域使用 ui-agent-module；明确复制或风格复用时按组件选型规则决定实现。采用 ui-agent-module 时，在 module.jsx 中直接组合平台提供的 React 与 Ant Design 组件，并根据实际布局设置宿主位置；不要复制 selector、selection item、arrow 的内部 DOM，也不要修改 React 管理的 DOM 或 Ant Design 内部 class。真实业务联动应先 clarify。`;
+    return `组件库线索: Ant Design；证据 class=${JSON.stringify(evidence)}；${versionNote}\n组件类型: Select。仅调整既有控件外观时保留结构；新增或重做下拉及组合交互使用 ui-agent-module 中的 antd.Select，不用原生 select 或手写浮层替代；明确原样复制时保留原结构。采用 ui-agent-module 时，在 module.jsx 中直接组合平台提供的 React 与 Ant Design 组件，并根据实际布局设置宿主位置；不要复制 selector、selection item、arrow 的内部 DOM，也不要修改 React 管理的 DOM 或 Ant Design 内部 class。真实业务联动应先 clarify。`;
   }
   return `组件库线索: Ant Design；证据 class=${JSON.stringify(evidence)}；${versionNote}`;
 }
@@ -2059,6 +2059,86 @@ export class SourceWorkspaceStore {
       ? new Set<string>()
       : new Set(analyzeStaticVisibility(initial['index.html'], initial['snapshot.css']).map(staticVisibilityIssueKey));
     let closed = false;
+    const writeHtml = (html: string): string => {
+      validateHtml(html);
+      const elementFingerprint = (element: Element): string => {
+        let anchor = 'document';
+        let parent = element.parentElement;
+        while (parent) {
+          const sourceId = parent.getAttribute('data-ui-source-id');
+          if (sourceId) {
+            anchor = sourceId;
+            break;
+          }
+          parent = parent.parentElement;
+        }
+        const attributes = [...element.attributes]
+          .filter(attribute => ![
+            'data-ui-source-id',
+            'data-ui-agent-source-rect',
+            'data-ui-agent-captured-layout'
+          ].includes(attribute.name.toLowerCase()))
+          .map(attribute => `${attribute.name.toLowerCase()}=${attribute.value}`)
+          .sort()
+          .join('|');
+        const descendantIds = [...element.querySelectorAll('[data-ui-source-id]')]
+          .map(descendant => descendant.getAttribute('data-ui-source-id'))
+          .filter((value): value is string => Boolean(value));
+        const boundaryIds = descendantIds.length > 4
+          ? [...descendantIds.slice(0, 2), ...descendantIds.slice(-2)]
+          : descendantIds;
+        const ownText = [...element.childNodes]
+          .filter(node => node.nodeType === 3)
+          .map(node => node.textContent ?? '')
+          .join(' ')
+          .replace(/\s+/g, ' ')
+          .trim()
+          .slice(0, 120);
+        return [anchor, element.localName, attributes, boundaryIds.join(','), ownText].join('::');
+      };
+      const previousDocument = parseHTML(working['index.html']).document;
+      const previousMissing = new Map<string, number>();
+      for (const element of [...previousDocument.querySelectorAll('body *:not([data-ui-source-id])')]) {
+        const fingerprint = elementFingerprint(element);
+        previousMissing.set(fingerprint, (previousMissing.get(fingerprint) ?? 0) + 1);
+      }
+      const { document } = parseHTML(html);
+      const seen = new Set<string>();
+      let nextId = Math.max(nextSourceNumber(original['index.html']), nextSourceNumber(working['index.html']), nextSourceNumber(html));
+      const assigned = new Set<Element>();
+      for (const element of [...document.querySelectorAll('body *')]) {
+        const id = element.getAttribute('data-ui-source-id');
+        if (id && seen.has(id)) throw new Error(`源码存在重复 sourceId：${id}，请保留原元素 ID，新增元素省略 ID 由平台生成`);
+        if (id) seen.add(id);
+        else {
+          const fingerprint = elementFingerprint(element);
+          const previousCount = previousMissing.get(fingerprint) ?? 0;
+          if (previousCount > 0) {
+            previousMissing.set(fingerprint, previousCount - 1);
+            continue;
+          }
+          const createdId = `source-${nextId++}`;
+          element.setAttribute('data-ui-source-id', createdId);
+          seen.add(createdId);
+          assigned.add(element);
+        }
+      }
+      const next = assigned.size ? document.toString() : html;
+      validateHtml(next);
+      const indexes = refreshWorkspaceIndexes(next);
+      const roots = [...assigned].filter(element => {
+        let parent = element.parentElement;
+        while (parent) {
+          if (assigned.has(parent)) return false;
+          parent = parent.parentElement;
+        }
+        return true;
+      }).map(element => element.getAttribute('data-ui-source-id'));
+      working['index.html'] = next;
+      working['outline.json'] = indexes.outline;
+      working['source-map.json'] = indexes.sourceMap;
+      return roots.length ? `；已补齐 sourceId，新增顶层元素：${roots.join(', ')}；字符位置可能变化，请以当前源码为准` : '';
+    };
     const refreshIndexes = () => {
       const indexes = refreshWorkspaceIndexes(working['index.html']);
       working['outline.json'] = indexes.outline;
@@ -2296,10 +2376,9 @@ export class SourceWorkspaceStore {
             : `替换原文出现 ${occurrences} 次，请提供更完整的唯一上下文`);
         }
         const next = content.replace(search, replacement);
+        let identityResult = '';
         if (file === 'index.html') {
-          validateHtml(next);
-          working[file] = next;
-          refreshIndexes();
+          identityResult = writeHtml(next);
         } else if (file === 'module.jsx') {
           const compiled = compileModuleSource(next);
           working[file] = next;
@@ -2308,7 +2387,7 @@ export class SourceWorkspaceStore {
           validateCss(next);
           working[file] = next;
         }
-        return `替换成功；${file} 当前 ${next.length} 字符；工作区校验通过`;
+        return `替换成功；${file} 当前 ${working[file].length} 字符；工作区校验通过${identityResult}`;
       },
       applyPatch: async (path, edits) => {
         this.assertEditablePath(path, editableStylePath);
@@ -2352,10 +2431,9 @@ export class SourceWorkspaceStore {
             : anchorIndex + edit.anchor.length;
           next = `${next.slice(0, insertionIndex)}${edit.text}${next.slice(insertionIndex)}`;
         }
+        let identityResult = '';
         if (file === 'index.html') {
-          validateHtml(next);
-          working[file] = next;
-          refreshIndexes();
+          identityResult = writeHtml(next);
         } else if (file === 'module.jsx') {
           const compiled = compileModuleSource(next);
           working[file] = next;
@@ -2364,7 +2442,7 @@ export class SourceWorkspaceStore {
           validateCss(next);
           working[file] = next;
         }
-        return `Patch 成功应用 ${edits.length} 项；${file} 当前 ${next.length} 字符；工作区校验通过`;
+        return `Patch 成功应用 ${edits.length} 项；${file} 当前 ${working[file].length} 字符；工作区校验通过${identityResult}`;
       },
       replaceInElement: async (sourceId, search, replacement) => {
         const html = working['index.html'];
@@ -2378,10 +2456,8 @@ export class SourceWorkspaceStore {
         }
         const updatedElement = outerHtml.replace(search, replacement);
         const next = `${html.slice(0, range.start)}${updatedElement}${html.slice(range.end)}`;
-        validateHtml(next);
-        working['index.html'] = next;
-        refreshIndexes();
-        return `元素 ${sourceId} 内替换成功；HTML 与安全规则校验通过`;
+        const identityResult = writeHtml(next);
+        return `元素 ${sourceId} 内替换成功；HTML 与安全规则校验通过${identityResult}`;
       },
       setElementText: async (sourceId, text) => {
         const html = working['index.html'];
