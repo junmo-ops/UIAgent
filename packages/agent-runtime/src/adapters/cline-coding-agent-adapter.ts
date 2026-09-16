@@ -25,7 +25,7 @@ import {
   type GeometryVerificationInput,
   type GeometryVerificationResult
 } from '../core/coding-agent-port';
-import { CONTROLLED_INTERACTION_INSTRUCTIONS } from '../source-editing/controlled-interaction-instructions';
+import { INTERACTION_INSTRUCTIONS } from '../source-editing/interaction-instructions';
 
 const objectSchema = (
   properties: Record<string, unknown>,
@@ -102,7 +102,7 @@ const clineSourceRules = [
   '首次写入前调用一次 declare_intent，简洁列出目标、相关 sourceId、需要浏览器验证的约束和布局范围。涉及交互时必须明确初始状态、触发动作、出现内容、是否占据布局、结束状态和节点身份策略。declare_intent 是方案决策边界；成功后按已声明方案执行，只有工具返回新的冲突证据时才调整，不重新比较组件或交互方案。新增 sourceId 会由系统自动加入验证范围。',
   '文本、属性、插入、完整元素替换、移动、删除和批量操作使用对应结构化工具；完整替换已有元素使用 replace_element，元素内部精确替换才使用 replace_in_element，文件级精确替换必须基于已读取原文，追加 CSS 使用 apply_patch。相关修改尽量在同一轮并行调用或用批量工具完成。',
   '不得添加 script、事件属性、远程资源、接口请求、表单 action 或 javascript: URL。',
-  CONTROLLED_INTERACTION_INSTRUCTIONS,
+  INTERACTION_INSTRUCTIONS,
   '修改完成后直接调用 finish；finish 会执行工作区校验。新增元素仍须先完成空间归属校验。源码和捕获布局不能证明真实渲染结果，不得声称已经通过浏览器验证。无需修改时提供源码证据并使用 already_satisfied。',
   '没有调用 finish 或 clarify，本轮不算完成。保持推理和工具说明简洁，不做无关重构。'
 ].join('\n');
@@ -134,10 +134,7 @@ const MUTATING_ACTIONS = new Set([
   'apply_dom_operations', 'move_element', 'clone_element'
 ]);
 
-function repeatedFailureGuidance(action: string, message: string): string {
-  if (message.startsWith('受控交互校验发现')) {
-    return '请按编号一次修正所有控件自身的交互属性，不要通过更换写入工具绕过校验；无法确定交互结构时调用 clarify';
-  }
+function repeatedFailureGuidance(action: string): string {
   if (action === 'validate_spatial_scope') {
     return '请使用错误中列出的当前源码 sourceId 重新校验容器与新增元素，不要继续引用已删除或失效的 sourceId';
   }
@@ -538,7 +535,7 @@ export class ClineCodingAgentAdapter implements CodingAgentPort {
         const repeated = (repeatedFailures.get(failureKey) ?? 0) + 1;
         repeatedFailures.set(failureKey, repeated);
         const message = repeated >= 2
-          ? `${baseMessage}。同一错误已重复 ${repeated} 次，${repeatedFailureGuidance(action, baseMessage)}。`
+          ? `${baseMessage}。同一错误已重复 ${repeated} 次，${repeatedFailureGuidance(action)}。`
           : baseMessage;
         record(action, input, context, undefined, message);
         if (repeated >= MAX_IDENTICAL_TOOL_FAILURES) {

@@ -18,12 +18,6 @@ const BLOCKED_TAGS = new Set([
   'STYLE', 'LINK', 'META', 'TEMPLATE'
 ]);
 const URL_ATTRIBUTES = new Set(['href', 'src', 'srcset', 'action', 'formaction', 'poster', 'xlink:href']);
-const CONTROLLED_INTERACTION_ATTRIBUTES = new Set([
-  'data-ui-agent-dismiss',
-  'data-ui-agent-action', 'data-ui-agent-targets', 'data-ui-agent-state-group',
-  'data-ui-agent-state-value', 'data-ui-agent-state-when', 'data-ui-agent-active-class',
-  'data-ui-agent-state-active'
-]);
 
 function escapeHtml(value: string): string {
   return value
@@ -197,10 +191,6 @@ function sanitizeElement(source: Element, clone: Element, registry: StyleRegistr
   for (const attribute of [...clone.attributes]) {
     const name = attribute.name.toLowerCase();
     const value = attribute.value.trim();
-    if (CONTROLLED_INTERACTION_ATTRIBUTES.has(name)) {
-      clone.removeAttribute(attribute.name);
-      continue;
-    }
     if (name.startsWith('on') || name === 'srcdoc' || name === 'http-equiv') {
       clone.removeAttribute(attribute.name);
       continue;

@@ -1,6 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
-  portableSnapshotPackageSchema,
   sourceWorkspaceCreatedSchema,
   workspaceArchiveSchema,
   workspaceListResponseSchema,
@@ -144,13 +143,8 @@ export function WorkspaceManagerApp() {
   const importWorkspace = async (file: File) => {
     setTransferBusy(true);
     try {
-      const raw = file.name.toLowerCase().endsWith('.zip')
-        ? parseWorkspaceArchiveZip(new Uint8Array(await file.arrayBuffer()))
-        : JSON.parse(await file.text());
-      const archive = workspaceArchiveSchema.safeParse(raw);
-      const packages = archive.success
-        ? archive.data.workspaces
-        : [portableSnapshotPackageSchema.parse(raw)];
+      const archive = parseWorkspaceArchiveZip(new Uint8Array(await file.arrayBuffer()));
+      const packages = archive.workspaces;
       let importedCount = 0;
       const failures: string[] = [];
       // The service lists workspaces by updatedAt descending. Import in the
@@ -213,7 +207,7 @@ export function WorkspaceManagerApp() {
         {status === 'active' && <div className="workspace-transfer-actions">
           <button disabled={transferBusy || loading || !data?.total} onClick={() => void exportAllWorkspaces()}>导出全部</button>
           <button disabled={transferBusy || loading} onClick={() => importFileRef.current?.click()}>导入备份</button>
-          <input ref={importFileRef} hidden type="file" accept=".zip,.json,application/zip,application/json" onChange={event => {
+          <input ref={importFileRef} hidden type="file" accept=".zip,application/zip" onChange={event => {
             const file = event.target.files?.[0];
             if (file) void importWorkspace(file);
           }} />

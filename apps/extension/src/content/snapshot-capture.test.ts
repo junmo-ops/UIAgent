@@ -60,7 +60,7 @@ describe('captureStaticSnapshot', () => {
 
   it('freezes live form state, removes active behavior, and records external resources', () => {
     const document = installDom(`<!doctype html><html><head><title>订单页</title></head><body>
-      <section id="filters" onclick="submitOrder()" data-ui-agent-action="toggle" data-ui-agent-targets="source-9" style="display:flex;gap:12px;cursor:url(data:image/png;base64,eA==),url(https://cdn.example.test/cursor.cur),auto">
+      <section id="filters" onclick="submitOrder()" style="display:flex;gap:12px;cursor:url(data:image/png;base64,eA==),url(https://cdn.example.test/cursor.cur),auto">
         <form action="https://api.example.test/submit">
           <input value="旧值">
           <textarea>旧备注</textarea>
@@ -108,7 +108,6 @@ describe('captureStaticSnapshot', () => {
     expect(snapshot.html).not.toMatch(/\ssrc="https?:/i);
     expect(snapshot.html).not.toMatch(/\saction=/i);
     expect(snapshot.html).not.toMatch(/\shttp-equiv=/i);
-    expect(snapshot.html).not.toContain('data-ui-agent-action');
   });
 
   it('captures the current page body as a valid editable root and removes editor overlays', () => {

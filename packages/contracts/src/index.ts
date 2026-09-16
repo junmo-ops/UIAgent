@@ -74,9 +74,7 @@ export const staticSnapshotSchema = z.object({
   authorStyleSources: z.array(z.string().url()).max(500).optional(),
   /** Versioned B-mode visual changes carried by an exported workspace. */
   authorOverrides: z.string().max(10_000_000).optional(),
-  /** Versioned local React modules mounted directly into the replica document. */
-  moduleJavaScript: z.string().max(1_000_000).optional(),
-  /** Editable JSX source used to produce moduleJavaScript. */
+  /** Editable JSX source; the service generates the browser artifact on import. */
   moduleSource: z.string().max(500_000).optional(),
   /** Capture-time geometry/style facts, indexed separately so Agent source reads stay compact. */
   layoutIndex: z.record(z.string().min(1).max(100), z.object({

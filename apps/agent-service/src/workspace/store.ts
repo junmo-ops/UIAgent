@@ -44,7 +44,6 @@ import {
   type WorkspaceChatEntry
 } from '@ui-agent/contracts';
 import { compileSourceWorkspace, refreshWorkspaceIndexes } from './compiler';
-import { validateControlledInteractions } from './interactions';
 import { analyzeStaticVisibility, staticVisibilityIssueKey } from './visibility';
 import { diagnoseSnapshotPackage, type SnapshotDiagnostics } from './snapshot-diagnostics';
 
@@ -262,7 +261,6 @@ function validateHtml(html: string): string {
   validateEmbeddedHtmlSafety(html);
   validateReplicaComponents(html);
   validateTableStructure(html);
-  validateControlledInteractions(html);
   if (html.length > MAX_STATIC_SNAPSHOT_HTML_CHARS) {
     throw new Error(`index.html 超过 ${Math.round(MAX_STATIC_SNAPSHOT_HTML_CHARS / 1_000_000)} MB 限制`);
   }
@@ -275,9 +273,7 @@ function validateReplicaComponents(html: string): void {
   if (components.length > 50) throw new Error('单个副本最多允许 50 个局部组件');
   const commonAttributes = new Set([
     'data-ui-source-id', 'data-ui-agent-source-rect', 'data-ui-agent-captured-layout',
-    'data-ui-agent-action', 'data-ui-agent-targets', 'data-ui-agent-close-targets',
-    'data-ui-agent-state-group', 'data-ui-agent-state-value', 'data-ui-agent-state-when',
-    'data-ui-agent-active-class', 'data-ui-agent-dismiss', 'data-ui-component', 'data-testid',
+    'data-ui-component', 'data-testid',
     'id', 'class', 'style', 'title', 'role', 'aria-label', 'hidden', 'tabindex'
   ]);
   for (const component of components) {
@@ -965,10 +961,10 @@ function antDesignComponentGuidance(tag: string, classNames: readonly string[]):
     ].join('\n');
   }
   if (classNames.some(className => /(?:^|-)checkbox(?:-|$)/.test(className))) {
-    return `组件库线索: Ant Design；证据 class=${JSON.stringify(evidence)}；${versionNote}\n组件类型: Checkbox。仅调整外观时保留既有结构；新增或重做勾选使用 module.jsx 中的 antd.Checkbox，不能把静态复制视为功能恢复。原生勾选由浏览器处理，静态 wrapper/inner 的状态 class 不会因缺失的 React 自动同步；可用 :checked 等 CSS 表达视觉状态，不要重复绑定 toggle-checkbox。样式参考当前主题。`;
+    return `组件库线索: Ant Design；证据 class=${JSON.stringify(evidence)}；${versionNote}\n组件类型: Checkbox。仅调整外观时保留既有结构；新增或重做勾选使用 module.jsx 中的 antd.Checkbox，不能把静态复制视为功能恢复。原生勾选由浏览器处理，静态 wrapper/inner 的状态 class 不会因缺失的 React 自动同步；可用 :checked 等 CSS 表达视觉状态，不要重复绑定事件拦截原生勾选。样式参考当前主题。`;
   }
   if (classNames.some(className => /(?:^|-)radio(?:-|$)/.test(className))) {
-    return `组件库线索: Ant Design；证据 class=${JSON.stringify(evidence)}；${versionNote}\n组件类型: Radio。仅调整外观时保留既有结构；新增或重做单选使用 module.jsx 中的 antd.Radio/Radio.Group，不能把静态复制视为功能恢复。原生互斥选择由浏览器处理，视觉状态可用 :checked 表达，不依赖原站 React 更新 class，不重复绑定 set-radio。组内布局以实际容器和用户要求为准。`;
+    return `组件库线索: Ant Design；证据 class=${JSON.stringify(evidence)}；${versionNote}\n组件类型: Radio。仅调整外观时保留既有结构；新增或重做单选使用 module.jsx 中的 antd.Radio/Radio.Group，不能把静态复制视为功能恢复。原生互斥选择由浏览器处理，视觉状态可用 :checked 表达，不依赖原站 React 更新 class，不重复绑定事件拦截原生选择。组内布局以实际容器和用户要求为准。`;
   }
   if (tag === 'input' || classNames.some(className => /(?:^|-)input(?:-|$)/.test(className))) {
     return `组件库线索: Ant Design；证据 class=${JSON.stringify(evidence)}；${versionNote}\n组件类型: Input。既有控件修改规范: 保留页面现有 input、affix-wrapper、size 和状态 class；placeholder 用属性修改，尺寸和前后缀结构以实际 DOM 为准。`;
@@ -1070,7 +1066,7 @@ export class SourceWorkspaceStore {
     const extractedLayout = extractCapturedLayoutIndex(compiled.html);
     const layoutIndex = { ...extractedLayout.layoutIndex, ...(snapshot.layoutIndex ?? {}) };
     const indexes = refreshWorkspaceIndexes(extractedLayout.html);
-    const moduleSource = snapshot.moduleSource ?? snapshot.moduleJavaScript ?? '';
+    const moduleSource = snapshot.moduleSource ?? '';
     const moduleJavaScript = compileModuleSource(moduleSource);
     const files: WorkspaceFiles = {
       'index.html': extractedLayout.html,
@@ -1426,10 +1422,7 @@ export class SourceWorkspaceStore {
     const authorCapture = this.authorStyleCapture(workspaceId);
     const authorSheets = this.authorStyleSheets(workspaceId);
     const authorOverrides = this.readOptionalFile(resolve(directory, 'author-overrides.css')) ?? '';
-    const moduleSource = this.readOptionalFile(resolve(directory, 'module.jsx'))
-      ?? this.readOptionalFile(resolve(directory, 'module.js'))
-      ?? '';
-    const moduleJavaScript = this.readOptionalFile(resolve(directory, 'module.js')) ?? '';
+    const moduleSource = readFileSync(resolve(directory, 'module.jsx'), 'utf8');
     return {
       protocolVersion: PROTOCOL_VERSION,
       title: manifest.title,
@@ -1454,8 +1447,7 @@ export class SourceWorkspaceStore {
       } : {}),
       ...(authorOverrides ? { authorOverrides } : {}),
       ...(moduleSource ? { moduleSource } : {}),
-      ...(moduleJavaScript ? { moduleJavaScript } : {}),
-      layoutIndex: this.capturedLayoutIndex(workspaceId, html),
+      layoutIndex: this.capturedLayoutIndex(workspaceId),
       viewport: manifest.viewport ?? { width: 1440, height: 900 }
     };
   }
@@ -1619,9 +1611,7 @@ export class SourceWorkspaceStore {
   moduleJavaScript(workspaceId: string): string | undefined {
     if (!this.get(workspaceId)) return undefined;
     const directory = this.workspacePath(workspaceId);
-    const compiled = this.readOptionalFile(resolve(directory, 'module.js'));
-    if (compiled !== undefined) return compiled;
-    return compileModuleSource(this.readOptionalFile(resolve(directory, 'module.jsx')) ?? '');
+    return readFileSync(resolve(directory, 'module.js'), 'utf8');
   }
 
   candidateModuleJavaScript(workspaceId: string, candidateId: string, candidateVersion: number): string | undefined {
@@ -1631,9 +1621,7 @@ export class SourceWorkspaceStore {
       this.workspacePath(workspaceId),
       'candidates', candidateId, 'versions', String(candidateVersion).padStart(3, '0')
     );
-    const compiled = this.readOptionalFile(resolve(directory, 'module.js'));
-    if (compiled !== undefined) return compiled;
-    return compileModuleSource(this.readOptionalFile(resolve(directory, 'module.jsx')) ?? '');
+    return readFileSync(resolve(directory, 'module.js'), 'utf8');
   }
 
   recordCandidateObservation(input: unknown): CandidateObservation {
@@ -2147,7 +2135,8 @@ export class SourceWorkspaceStore {
     const validateWorking = () => {
       validateHtml(working['index.html']);
       validateCss(working[editableStylePath]);
-      compileModuleSource(working['module.jsx']);
+      // JSX is compiled atomically by the source-edit tools; validation does
+      // not need to recompile unchanged source on both validate and commit.
       validateModuleJavaScript(working['module.js']);
       validateModuleBindings(working['index.html'], working['module.jsx']);
       const newVisibilityIssues = authorRuleMode ? [] : analyzeStaticVisibility(
@@ -2284,7 +2273,7 @@ export class SourceWorkspaceStore {
         const siblingIds = (parent?.childrenSourceIds ?? [])
           .filter(candidate => candidate !== sourceId)
           .slice(0, 12);
-        const layoutIndex = this.capturedLayoutIndex(workspaceId, html);
+        const layoutIndex = this.capturedLayoutIndex(workspaceId);
         const layoutContext = {
           target: sourceLayoutFacts(html, working['snapshot.css'], layoutIndex, sourceId, full ? 'full' : 'target'),
           children: (node?.childrenSourceIds ?? []).slice(0, full ? 8 : 6).map(child => sourceLayoutFacts(html, working['snapshot.css'], layoutIndex, child, full ? 'full' : 'context')),
@@ -2850,28 +2839,21 @@ export class SourceWorkspaceStore {
     const html = readFileSync(resolve(directory, 'index.html'), 'utf8');
     const css = this.readOptionalFile(resolve(directory, 'snapshot.css')) ?? '';
     const generated = refreshWorkspaceIndexes(html);
-    const storedJavaScript = this.readOptionalFile(resolve(directory, 'module.js')) ?? '';
-    const moduleSource = this.readOptionalFile(resolve(directory, 'module.jsx')) ?? storedJavaScript;
+    const moduleSource = readFileSync(resolve(directory, 'module.jsx'), 'utf8');
     return {
       'index.html': html,
       'snapshot.css': css,
       'author-overrides.css': this.readOptionalFile(resolve(directory, 'author-overrides.css')) ?? '',
       'module.jsx': moduleSource,
-      'module.js': storedJavaScript || compileModuleSource(moduleSource),
+      'module.js': readFileSync(resolve(directory, 'module.js'), 'utf8'),
       'outline.json': this.readOptionalFile(resolve(directory, 'outline.json')) ?? generated.outline,
       'source-map.json': this.readOptionalFile(resolve(directory, 'source-map.json')) ?? generated.sourceMap
     };
   }
 
-  private capturedLayoutIndex(workspaceId: string, html: string): CapturedLayoutIndex {
-    const stored = this.readOptionalFile(resolve(this.workspacePath(workspaceId), LAYOUT_INDEX_FILE));
-    if (stored) {
-      try {
-        const parsed = staticSnapshotSchema.shape.layoutIndex.safeParse(JSON.parse(stored));
-        if (parsed.success) return parsed.data ?? {};
-      } catch { /* Fall through to legacy inline metadata. */ }
-    }
-    return extractCapturedLayoutIndex(html).layoutIndex;
+  private capturedLayoutIndex(workspaceId: string): CapturedLayoutIndex {
+    const stored = readFileSync(resolve(this.workspacePath(workspaceId), LAYOUT_INDEX_FILE), 'utf8');
+    return staticSnapshotSchema.shape.layoutIndex.parse(JSON.parse(stored)) ?? {};
   }
 
   private writeWorkspaceFiles(directory: string, files: WorkspaceFiles, atomic = false): void {

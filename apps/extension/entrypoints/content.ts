@@ -1,7 +1,6 @@
 import type { ContentCommandResult, DocumentRef } from '@ui-agent/contracts';
 import { selectionTarget } from '../src/content/selection-target';
 import { captureStaticSnapshot } from '../src/content/snapshot-capture';
-import { ControlledInteractionRuntime } from '../src/content/controlled-interactions';
 import { SelectionOverlay } from '../src/content/selection-overlay';
 import { onMessage, sendMessage } from '../src/messaging';
 
@@ -169,10 +168,6 @@ export default defineContentScript({
   matches: [...new Set([...localContentMatches, configuredServiceMatch])],
   main() {
     const selection = new SelectionOverlay();
-    const interactions = document.body.hasAttribute('data-ui-agent-static-snapshot')
-      ? new ControlledInteractionRuntime(document)
-      : undefined;
-    interactions?.mount();
     let selecting = false;
     let editorLeaseTimer: ReturnType<typeof setTimeout> | undefined;
 

@@ -29,8 +29,4 @@ describe('selectionTarget', () => {
     expect(selectionTarget(document.querySelector('span'))?.getAttribute('data-testid')).toBe('copy');
   });
 
-  it('promotes declarative interaction content to its trigger element', () => {
-    const document = installDom('<div data-ui-agent-action="toggle" data-ui-agent-targets="source-2"><span>展开</span></div>');
-    expect(selectionTarget(document.querySelector('span'))?.getAttribute('data-ui-agent-action')).toBe('toggle');
-  });
 });
