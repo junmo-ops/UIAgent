@@ -26,6 +26,7 @@ import {
   type GeometryVerificationResult
 } from '../core/coding-agent-port';
 import { INTERACTION_INSTRUCTIONS } from '../source-editing/interaction-instructions';
+import { toolCallStatistics } from '../core/tool-call-statistics';
 
 const objectSchema = (
   properties: Record<string, unknown>,
@@ -42,6 +43,22 @@ const stringProperty = (description: string): Record<string, unknown> => ({
   description
 });
 
+const INTERACTION_BEHAVIOR_FIELDS = [
+  'initialState', 'trigger', 'result', 'layoutBehavior', 'completionBehavior', 'nodeIdentity'
+] as const;
+
+function interactionPlanSchema(properties: Record<string, Record<string, unknown>>): Record<string, unknown> {
+  const fields = Object.fromEntries(Object.entries(properties).map(([name, schema]) => [
+    name, schema.type === 'string' ? { ...schema, minLength: 1 } : schema
+  ]));
+  return {
+    anyOf: [
+      objectSchema({ ...fields, mode: { ...fields.mode, enum: ['none', 'preserve-existing'] } }, ['mode']),
+      objectSchema({ ...fields, mode: { ...fields.mode, enum: ['local-demo'] } }, ['mode', ...INTERACTION_BEHAVIOR_FIELDS])
+    ]
+  };
+}
+
 function createTool<TInput, TOutput>(config: AgentTool<TInput, TOutput>): AgentTool<TInput, TOutput> {
   const validateRequiredFields = (
     schema: Record<string, unknown>,
@@ -49,6 +66,24 @@ function createTool<TInput, TOutput>(config: AgentTool<TInput, TOutput>): AgentT
     path: string,
     issues: string[]
   ): void => {
+    if (Array.isArray(schema.anyOf)) {
+      const branches = schema.anyOf as Record<string, unknown>[];
+      const branchIssues = branches.map(branch => {
+        const errors: string[] = [];
+        validateRequiredFields(branch, value, path, errors);
+        return errors;
+      });
+      if (branchIssues.some(errors => errors.length === 0)) return;
+      issues.push(`${path}: ${branchIssues.map(errors => errors.join('、')).join('；或 ')}`);
+      return;
+    }
+    if (Array.isArray(schema.enum) && !schema.enum.includes(value)) {
+      issues.push(`${path} 应为 ${schema.enum.join(' / ')}`);
+    }
+    if (schema.type === 'string' && (typeof value !== 'string'
+      || (typeof schema.minLength === 'number' && value.length < schema.minLength))) {
+      issues.push(`${path} 应为满足长度要求的字符串`);
+    }
     if (schema.type === 'object') {
       if (!value || typeof value !== 'object' || Array.isArray(value)) {
         issues.push(`${path || 'input'} 应为对象`);
@@ -83,7 +118,7 @@ function createTool<TInput, TOutput>(config: AgentTool<TInput, TOutput>): AgentT
       const issues: string[] = [];
       validateRequiredFields(config.inputSchema, input, '', issues);
       if (issues.length) {
-        throw new Error(`[工具参数校验] ${config.name} 缺少或错误的必填参数：${issues.join('、')}；本次未执行`);
+        throw Object.assign(new Error(`[工具参数校验] ${config.name} 缺少或错误的必填参数：${issues.join('、')}；本次未执行`), { name: 'ToolInputValidationError' });
       }
       return config.execute(input, context);
     }
@@ -100,7 +135,7 @@ const clineSourceRules = [
   '位置描述以用户明确容器为准，否则以 selectedSourceId 或最近语义祖先为锚点。相邻组件只扩展到最近公共父容器；用户未明确要求全局视口定位时不得新增 position:fixed。新增元素后调用 validate_spatial_scope。',
   '若多个方案会显著改变最终视觉结果，修改前调用 clarify；问题只询问源码无法确定的信息。已有澄清回复时结合 conversation 继续原需求。保留 button、input 等语义表示最终渲染标签和可访问行为保持一致，不等于必须保留原 sourceId 或原 DOM 节点；只有用户明确要求保留节点身份时才按原节点修改。',
   '首次写入前调用一次 declare_intent，简洁列出目标、相关 sourceId、需要浏览器验证的约束和布局范围。涉及交互时必须明确初始状态、触发动作、出现内容、是否占据布局、结束状态和节点身份策略。declare_intent 是方案决策边界；成功后按已声明方案执行，只有工具返回新的冲突证据时才调整，不重新比较组件或交互方案。新增 sourceId 会由系统自动加入验证范围。',
-  '文本、属性、插入、完整元素替换、移动、删除和批量操作使用对应结构化工具；完整替换已有元素使用 replace_element，元素内部精确替换才使用 replace_in_element，文件级精确替换必须基于已读取原文，追加 CSS 使用 apply_patch。相关修改尽量在同一轮并行调用或用批量工具完成。',
+  '已明确实际文本承载元素时优先 set_element_text；含图标或其他子结构的父控件不能直接清空，应定位文字子元素，不确定时再 inspect。属性、插入、完整元素替换、移动、删除和批量操作使用对应结构化工具；完整替换已有元素使用 replace_element，元素内部精确替换才使用 replace_in_element，search 必须来自已读取的原始源码，禁止根据 compactHtml、domText 或结构摘要拼接 HTML，文件级精确替换必须基于已读取原文，追加 CSS 使用 apply_patch。相关修改尽量在同一轮并行调用或用批量工具完成。',
   '不得添加 script、事件属性、远程资源、接口请求、表单 action 或 javascript: URL。',
   INTERACTION_INSTRUCTIONS,
   '修改完成后直接调用 finish；finish 会执行工作区校验。新增元素仍须先完成空间归属校验。源码和捕获布局不能证明真实渲染结果，不得声称已经通过浏览器验证。无需修改时提供源码证据并使用 already_satisfied。',
@@ -427,7 +462,6 @@ export class ClineCodingAgentAdapter implements CodingAgentPort {
       context: AgentToolContext,
       result?: string,
       error?: string,
-      countAsTool = true,
       outcome?: 'blocked'
     ) => {
       const timestamp = new Date().toISOString();
@@ -447,7 +481,7 @@ export class ClineCodingAgentAdapter implements CodingAgentPort {
       checkpoint = {
         ...checkpoint,
         modelCalls: Math.max(checkpoint.modelCalls, context.iteration),
-        toolCalls: checkpoint.toolCalls + (countAsTool ? 1 : 0),
+        toolCalls: checkpoint.toolCalls + 1,
         stepCount: steps.length,
         lastAction: action,
         updatedAt: timestamp
@@ -479,7 +513,7 @@ export class ClineCodingAgentAdapter implements CodingAgentPort {
       if (BUDGETED_READ_ACTIONS.has(action) && !['inspect_element', 'inspect_elements'].includes(action)
         && context.iteration >= finalizationStartsAt) {
         const message = `[运行预算] 当前第 ${context.iteration}/${this.maxIterations} 轮，已进入最后 ${FINALIZATION_WINDOW} 轮，停止继续读取。若修改已完成，请立即调用 finish；若关键信息仍不足，请调用 clarify。`;
-        record(action, input, context, message, undefined, true, 'blocked');
+        record(action, input, context, message, undefined, 'blocked');
         return message;
       }
       const readKey = BUDGETED_READ_ACTIONS.has(action)
@@ -492,12 +526,12 @@ export class ClineCodingAgentAdapter implements CodingAgentPort {
       if (BUDGETED_READ_ACTIONS.has(action) && selectedElementContextAvailable && !firstMutationAt
         && preMutationReadCalls >= MAX_PRE_MUTATION_READS_WITH_SELECTED_CONTEXT) {
         const message = `[修改前读取预算] 已有 selectedElementContext，且修改前已补充读取 ${preMutationReadCalls} 次。请使用现有结构、组件规范和局部样式证据立即修改；若仍缺少会显著影响结果的信息，请调用 clarify。`;
-        record(action, input, context, message, undefined, true, 'blocked');
+        record(action, input, context, message, undefined, 'blocked');
         return message;
       }
       if (readKey && completedReadResults.has(readKey)) {
         const message = '[重复读取已拦截] 当前源码版本的相同查询已经返回，请使用已有证据；修改源码后可重新检查。';
-        record(action, input, context, message, undefined, true, 'blocked');
+        record(action, input, context, message, undefined, 'blocked');
         return message;
       }
       if (actionLimit) {
@@ -505,7 +539,7 @@ export class ClineCodingAgentAdapter implements CodingAgentPort {
         readActionCounts.set(budgetKey, actionCount);
         if (actionCount > actionLimit) {
           const message = `[读取预算] ${action} 已调用 ${actionCount} 次，超过本轮上限 ${actionLimit} 次。请停止继续检索，使用已有上下文完成修改和校验；若信息不足则调用 clarify。`;
-          record(action, input, context, message, undefined, true, 'blocked');
+          record(action, input, context, message, undefined, 'blocked');
           return message;
         }
       }
@@ -643,10 +677,10 @@ export class ClineCodingAgentAdapter implements CodingAgentPort {
         layoutScope?: 'selected-context' | 'explicit-container' | 'global';
       }, string>({
         name: 'declare_intent',
-        description: '首次写入前简洁声明已确定的实现方案和浏览器需要验证的事实。涉及交互时完整填写 interactionPlan；有关键歧义时改用 clarify。声明成功后直接按该方案执行。',
+        description: '首次写入前简洁声明目标、范围和保持约束。none / preserve-existing 只需 interactionPlan.mode，无需虚构触发或结束行为；local-demo 必须完整描述新增或改变的交互。有关键歧义时 clarify。声明成功后直接执行。',
         inputSchema: objectSchema({
           summary: stringProperty('准备实现的明确目标。'),
-          interactionPlan: objectSchema({
+          interactionPlan: interactionPlanSchema({
             mode: {
               type: 'string',
               enum: ['none', 'preserve-existing', 'local-demo'],
@@ -666,7 +700,7 @@ export class ClineCodingAgentAdapter implements CodingAgentPort {
               enum: ['preserve-source-node', 'preserve-semantic-role', 'replace-node'],
               description: '保留原 sourceId 节点、只保留最终标签和可访问语义，或允许替换节点。'
             }
-          }, ['mode']),
+          }),
           relevantSourceIds: {
             type: 'array', maxItems: 12,
             items: stringProperty('与本次目标相关的 sourceId。')
@@ -692,19 +726,6 @@ export class ClineCodingAgentAdapter implements CodingAgentPort {
           context,
           async () => {
             const interactionPlan = input.interactionPlan;
-            if (interactionPlan.mode !== 'none') {
-              const missingBehavior = [
-                ['initialState', interactionPlan.initialState],
-                ['trigger', interactionPlan.trigger],
-                ['result', interactionPlan.result],
-                ['layoutBehavior', interactionPlan.layoutBehavior],
-                ['completionBehavior', interactionPlan.completionBehavior],
-                ['nodeIdentity', interactionPlan.nodeIdentity]
-              ].filter(([, value]) => !value).map(([name]) => name);
-              if (missingBehavior.length) {
-                throw new Error(`declare_intent 的交互方案缺少：${missingBehavior.join('、')}；请先确定完整行为，存在关键歧义时调用 clarify`);
-              }
-            }
             const sourceIds = [...new Set([
               ...(turn.request.sourceId ? [turn.request.sourceId] : []),
               ...(input.relevantSourceIds ?? []),
@@ -712,7 +733,9 @@ export class ClineCodingAgentAdapter implements CodingAgentPort {
             ])];
             const interactionConstraint = interactionPlan.mode === 'none'
               ? undefined
-              : `交互方案：初始=${interactionPlan.initialState}；触发=${interactionPlan.trigger}；结果=${interactionPlan.result}；布局=${interactionPlan.layoutBehavior}；结束=${interactionPlan.completionBehavior}；节点=${interactionPlan.nodeIdentity}`;
+              : interactionPlan.mode === 'preserve-existing'
+                ? '保留既有交互；本轮只执行声明的修改目标和约束'
+                : `交互方案：初始=${interactionPlan.initialState}；触发=${interactionPlan.trigger}；结果=${interactionPlan.result}；布局=${interactionPlan.layoutBehavior}；结束=${interactionPlan.completionBehavior}；节点=${interactionPlan.nodeIdentity}`;
             const constraints = [...new Set([
               ...(input.visualConstraints?.length ? input.visualConstraints : [input.summary]),
               ...(interactionConstraint ? [interactionConstraint] : [])
@@ -957,7 +980,7 @@ export class ClineCodingAgentAdapter implements CodingAgentPort {
       }),
       createTool<{ sourceId: string; search: string; replace: string }, string>({
         name: 'replace_in_element',
-        description: '把精确替换限制在指定 sourceId 元素内部，适合修改已选元素的文案或属性。',
+        description: '仅用于基于已读取原始源码的元素内部精确替换。纯文本、属性修改优先使用 set_element_text / set_element_attributes；禁止从 compactHtml 或结构摘要拼接 search。',
         inputSchema: objectSchema({
           sourceId: stringProperty('目标元素的 data-ui-source-id。'),
           search: stringProperty('元素内部刚刚读取到的精确原文。'),
@@ -998,7 +1021,7 @@ export class ClineCodingAgentAdapter implements CodingAgentPort {
       }),
       createTool<{ sourceId: string; text: string }, string>({
         name: 'set_element_text',
-        description: '设置元素的完整纯文本内容；文本会安全转义，原有子元素会被移除。',
+        description: '已定位纯文本承载元素时优先使用，无需构造原文匹配。文本会安全转义，原有子元素会被移除；应选择实际文字子元素，不能误删父控件中的图标或其他结构。无法确定目标结构时先 inspect。',
         inputSchema: objectSchema({
           sourceId: stringProperty('目标元素 sourceId。'),
           text: stringProperty('新的完整纯文本。')
@@ -1307,11 +1330,11 @@ export class ClineCodingAgentAdapter implements CodingAgentPort {
               ? { kind: 'draft', summary, validation, candidate: commit.candidate, intent: declaredIntent! }
               : { kind: 'completed', summary, validation, revision: commit.revision, unchanged: !commit.changed };
             const result = `${summary}（${validation}；revision=${commit.revision}${commit.changed ? '' : '；未创建新版本'}）`;
-            record('finish', input, context, result, undefined, false);
+            record('finish', input, context, result);
             return result;
           } catch (error) {
             const message = error instanceof Error ? error.message : String(error);
-            record('finish', input, context, undefined, message, false);
+            record('finish', input, context, undefined, message);
             throw error;
           }
         }
@@ -1347,7 +1370,7 @@ export class ClineCodingAgentAdapter implements CodingAgentPort {
             ...(input.options && { options: input.options }),
             allowFreeText: input.options ? input.allowFreeText ?? true : true
           };
-          record('clarify', input, context, input.question, undefined, false);
+          record('clarify', input, context, input.question);
           return input.question;
         }
       })
@@ -1407,6 +1430,7 @@ export class ClineCodingAgentAdapter implements CodingAgentPort {
       checkpoint = {
         ...checkpoint,
         modelCalls: Math.max(checkpoint.modelCalls, result.iterations),
+        toolCalls: toolCallStatistics(result.diagnostics, steps).attempted,
         ...(result.diagnostics ? { runtime: result.diagnostics } : {})
       };
       throwIfCancelled();

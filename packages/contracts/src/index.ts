@@ -323,6 +323,10 @@ export const sourceTurnRequestSchema = z.object({
   turnId: z.string().min(1),
   traceId: z.string().min(1),
   instruction: z.string().min(1).max(10_000),
+  /** User text before assistant routing or clarification-context expansion. */
+  originalInstruction: z.string().min(1).max(10_000).optional(),
+  /** Trace of the assistant request that produced this editing instruction. */
+  assistantTraceId: z.string().min(1).optional(),
   sourceId: z.string().min(1).max(100).optional(),
   replyToClarificationId: z.string().uuid().optional(),
   clarificationOptionId: z.string().min(1).max(100).optional()

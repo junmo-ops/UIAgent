@@ -425,7 +425,7 @@ export function SidePanelApp() {
         sourceWorkspace,
         finalOutcome.targetScope === 'selection' ? selection?.selected.sourceId : undefined,
         turnId,
-        { replyToClarificationId, clarificationOptionId }
+        { replyToClarificationId, clarificationOptionId, originalInstruction: text, assistantTraceId: request.traceId }
       );
     } catch (error) {
       fail(error);
@@ -546,7 +546,7 @@ export function SidePanelApp() {
     workspace: ActiveWorkspace,
     sourceId?: string,
     turnId = crypto.randomUUID(),
-    clarificationReply: Pick<SourceTurnRequest, 'replyToClarificationId' | 'clarificationOptionId'> = {}
+    requestContext: Pick<SourceTurnRequest, 'replyToClarificationId' | 'clarificationOptionId' | 'originalInstruction' | 'assistantTraceId'> = {}
   ) => {
     setSnapshotBusy(true);
     let settled = false;
@@ -570,7 +570,7 @@ export function SidePanelApp() {
         traceId: crypto.randomUUID(),
         instruction: text,
         sourceId,
-        ...clarificationReply
+        ...requestContext
       });
       setSourceProgress({
         workspaceId: workspace.workspaceId,

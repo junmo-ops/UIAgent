@@ -1,5 +1,6 @@
 import { appendFileSync, existsSync, mkdirSync, readFileSync, renameSync, statSync, writeFileSync } from 'node:fs';
 import { dirname, resolve } from 'node:path';
+import { toolCallStatistics, type ToolCallStatistics } from '@ui-agent/agent-runtime';
 import type {
   CandidatePublishResult,
   CandidateRepair,
@@ -26,6 +27,7 @@ export interface TurnLogEntry {
   sourceWorkspaceId?: string;
   codingAgent?: { adapterId: string; checkpoint: CodingAgentCheckpoint };
   sourceSteps?: CodingAgentStep[];
+  toolStatistics?: ToolCallStatistics;
   candidateValidation?: {
     validation: ValidationRecord;
     publication?: CandidatePublishResult;
@@ -44,6 +46,9 @@ export interface TurnLogSummary {
   turnId: string;
   traceId: string;
   instruction: string;
+  originalInstruction?: string;
+  assistantTraceId?: string;
+  toolStatistics?: ToolCallStatistics;
   resultKind?: string;
   durationMs?: number;
   error?: string;
@@ -93,6 +98,9 @@ export class TurnLogStore {
       turnId: entry.request.turnId,
       traceId: entry.request.traceId,
       instruction: entry.request.instruction,
+      originalInstruction: entry.request.originalInstruction,
+      assistantTraceId: entry.request.assistantTraceId,
+      toolStatistics: entry.toolStatistics,
       resultKind: entry.result?.kind,
       durationMs: entry.durationMs,
       error: entry.error,
@@ -126,6 +134,7 @@ export class TurnLogStore {
       sourceWorkspaceId: workspaceId,
       codingAgent,
       sourceSteps,
+      toolStatistics: toolCallStatistics(codingAgent?.checkpoint.runtime, sourceSteps),
       durationMs,
       ...(response.kind === 'failed' ? { error: response.message } : {})
     }) as TurnLogEntry;

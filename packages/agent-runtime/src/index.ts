@@ -1,4 +1,5 @@
 export * from './core/coding-agent-port';
+export * from './core/tool-call-statistics';
 export * from './core/assistant-router-port';
 export * from './core/assistant-chat-port';
 export * from './source-editing/interaction-instructions';
