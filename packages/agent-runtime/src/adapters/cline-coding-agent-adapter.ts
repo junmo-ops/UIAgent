@@ -1,6 +1,6 @@
 import {
   Agent,
-  createTool,
+  createTool as createRuntimeTool,
   type AgentRunResult,
   type AgentTool,
   type AgentToolContext
@@ -42,17 +42,65 @@ const stringProperty = (description: string): Record<string, unknown> => ({
   description
 });
 
+function createTool<TInput, TOutput>(config: AgentTool<TInput, TOutput>): AgentTool<TInput, TOutput> {
+  const validateRequiredFields = (
+    schema: Record<string, unknown>,
+    value: unknown,
+    path: string,
+    issues: string[]
+  ): void => {
+    if (schema.type === 'object') {
+      if (!value || typeof value !== 'object' || Array.isArray(value)) {
+        issues.push(`${path || 'input'} 应为对象`);
+        return;
+      }
+      const record = value as Record<string, unknown>;
+      for (const key of (schema.required as string[] | undefined) ?? []) {
+        if (!Object.prototype.hasOwnProperty.call(record, key) || record[key] === undefined || record[key] === null) {
+          issues.push(path ? `${path}.${key}` : key);
+        }
+      }
+      const properties = schema.properties as Record<string, Record<string, unknown>> | undefined;
+      for (const [key, propertySchema] of Object.entries(properties ?? {})) {
+        if (record[key] !== undefined && record[key] !== null) {
+          validateRequiredFields(propertySchema, record[key], path ? `${path}.${key}` : key, issues);
+        }
+      }
+      return;
+    }
+    if (schema.type === 'array') {
+      if (!Array.isArray(value)) {
+        issues.push(`${path} 应为数组`);
+        return;
+      }
+      const itemSchema = schema.items as Record<string, unknown> | undefined;
+      if (itemSchema) value.forEach((item, index) => validateRequiredFields(itemSchema, item, `${path}[${index}]`, issues));
+    }
+  };
+  return createRuntimeTool({
+    ...config,
+    execute: (input, context) => {
+      const issues: string[] = [];
+      validateRequiredFields(config.inputSchema, input, '', issues);
+      if (issues.length) {
+        throw new Error(`[工具参数校验] ${config.name} 缺少或错误的必填参数：${issues.join('、')}；本次未执行`);
+      }
+      return config.execute(input, context);
+    }
+  });
+}
+
 const clineSourceRules = [
   '你是静态网页源码编辑 Agent，只使用本次提供的源码工具。页面用于 UI 示意，不实现真实接口或业务提交。',
   '输入已包含文件摘要；有 selectedElementContext 时直接使用，无需重复枚举文件、搜索或检查同一选中元素。没有目标上下文时先 query_workspace_structure，再按需 inspect_element。取得足够证据后立即修改，不要为了寻找更理想的 class、变量或示例继续扩展搜索。',
   'index.html 保存结构和文案。存在 author.css 或 author-style-links.json 时，视觉修改只写 author-overrides.css，author.css 仅供查询，snapshot.css 不可修改；否则视觉修改写 snapshot.css。outline.json 和 source-map.json 只读。',
   'inspect_element 默认返回目标、祖先、同级、布局、局部源码、目标实际命中的样式规则，以及可识别时的组件库规范；只有缺少完成当前修改的具体信息时才使用 full。已有组件与样式上下文时直接据此修改，不要再次搜索组件基础样式；仅在明确缺少某条页面覆盖规则时使用 query_style_symbols，避免全文搜索大 CSS。',
-  '目标明确的单元素文案、属性或已有组件形态转换，应使用 selectedElementContext 在前两次模型决策内完成意图声明并开始写入；不要为了比较未被用户要求的视觉方案检索相邻示例。',
+  '目标明确且已有 selectedElementContext 时，不重复读取选中元素源码。完整替换选中元素使用 replace_element，无需复制原元素整段 HTML；应在前两次模型决策内完成意图声明并开始写入。不要为了比较未被用户要求的视觉方案检索相邻示例。',
   '修改前只需确认目标、最近相关容器和必要的相邻元素。复制原样保留原结构，小改保留现有实现；新增、重做、改变控件类型或组合交互统一使用 Ant Design 局部模块。只读取必要布局证据，明确风格要求时只读取相关参照。修改行内样式时注意级联优先级，背景也可能由子元素或伪元素绘制。',
   '位置描述以用户明确容器为准，否则以 selectedSourceId 或最近语义祖先为锚点。相邻组件只扩展到最近公共父容器；用户未明确要求全局视口定位时不得新增 position:fixed。新增元素后调用 validate_spatial_scope。',
-  '若多个方案会显著改变最终视觉结果，修改前调用 clarify；问题只询问源码无法确定的信息。已有澄清回复时结合 conversation 继续原需求。',
-  '首次写入前调用一次 declare_intent，简洁列出目标、相关 sourceId、需要浏览器验证的约束和布局范围。新增 sourceId 会由系统自动加入验证范围。',
-  '文本、属性、插入、移动、删除和批量操作使用对应结构化工具；精确替换必须基于已读取原文，追加 CSS 使用 apply_patch。相关修改尽量在同一轮并行调用或用批量工具完成。',
+  '若多个方案会显著改变最终视觉结果，修改前调用 clarify；问题只询问源码无法确定的信息。已有澄清回复时结合 conversation 继续原需求。保留 button、input 等语义表示最终渲染标签和可访问行为保持一致，不等于必须保留原 sourceId 或原 DOM 节点；只有用户明确要求保留节点身份时才按原节点修改。',
+  '首次写入前调用一次 declare_intent，简洁列出目标、相关 sourceId、需要浏览器验证的约束和布局范围。涉及交互时必须明确初始状态、触发动作、出现内容、是否占据布局、结束状态和节点身份策略。declare_intent 是方案决策边界；成功后按已声明方案执行，只有工具返回新的冲突证据时才调整，不重新比较组件或交互方案。新增 sourceId 会由系统自动加入验证范围。',
+  '文本、属性、插入、完整元素替换、移动、删除和批量操作使用对应结构化工具；完整替换已有元素使用 replace_element，元素内部精确替换才使用 replace_in_element，文件级精确替换必须基于已读取原文，追加 CSS 使用 apply_patch。相关修改尽量在同一轮并行调用或用批量工具完成。',
   '不得添加 script、事件属性、远程资源、接口请求、表单 action 或 javascript: URL。',
   CONTROLLED_INTERACTION_INSTRUCTIONS,
   '修改完成后直接调用 finish；finish 会执行工作区校验。新增元素仍须先完成空间归属校验。源码和捕获布局不能证明真实渲染结果，不得声称已经通过浏览器验证。无需修改时提供源码证据并使用 already_satisfied。',
@@ -81,7 +129,7 @@ const BUDGETED_READ_ACTIONS = new Set([
   'query_style_symbols', 'read_style_rule', 'read_style_rules'
 ]);
 const MUTATING_ACTIONS = new Set([
-  'replace_text', 'apply_patch', 'replace_in_element', 'set_element_text', 'set_element_attributes',
+  'replace_text', 'apply_patch', 'replace_in_element', 'replace_element', 'set_element_text', 'set_element_attributes',
   'insert_element', 'wrap_element', 'unwrap_element', 'remove_element', 'reorder_children',
   'apply_dom_operations', 'move_element', 'clone_element'
 ]);
@@ -582,6 +630,15 @@ export class ClineCodingAgentAdapter implements CodingAgentPort {
     const tools: AgentTool<any, any>[] = [
       createTool<{
         summary: string;
+        interactionPlan: {
+          mode: 'none' | 'preserve-existing' | 'local-demo';
+          initialState?: string;
+          trigger?: string;
+          result?: string;
+          layoutBehavior?: 'unchanged' | 'overlay' | 'in-flow';
+          completionBehavior?: string;
+          nodeIdentity?: 'preserve-source-node' | 'preserve-semantic-role' | 'replace-node';
+        };
         relevantSourceIds?: string[];
         verificationSourceIds?: string[];
         visualConstraints?: string[];
@@ -589,9 +646,30 @@ export class ClineCodingAgentAdapter implements CodingAgentPort {
         layoutScope?: 'selected-context' | 'explicit-container' | 'global';
       }, string>({
         name: 'declare_intent',
-        description: '首次写入前简洁声明目标和浏览器需要验证的事实；有关键歧义时改用 clarify。',
+        description: '首次写入前简洁声明已确定的实现方案和浏览器需要验证的事实。涉及交互时完整填写 interactionPlan；有关键歧义时改用 clarify。声明成功后直接按该方案执行。',
         inputSchema: objectSchema({
           summary: stringProperty('准备实现的明确目标。'),
+          interactionPlan: objectSchema({
+            mode: {
+              type: 'string',
+              enum: ['none', 'preserve-existing', 'local-demo'],
+              description: '无交互改动、保留既有交互，或使用 React 本地状态实现演示交互。真实业务行为不在副本能力内，应 clarify。'
+            },
+            initialState: stringProperty('操作前用户看到的内容。'),
+            trigger: stringProperty('触发交互的具体用户动作。'),
+            result: stringProperty('触发后具体出现或变化的内容。'),
+            layoutBehavior: {
+              type: 'string',
+              enum: ['unchanged', 'overlay', 'in-flow'],
+              description: '交互结果不影响布局、以浮层覆盖展示，或进入普通布局占据空间。'
+            },
+            completionBehavior: stringProperty('选择、确认或再次点击后的状态。'),
+            nodeIdentity: {
+              type: 'string',
+              enum: ['preserve-source-node', 'preserve-semantic-role', 'replace-node'],
+              description: '保留原 sourceId 节点、只保留最终标签和可访问语义，或允许替换节点。'
+            }
+          }, ['mode']),
           relevantSourceIds: {
             type: 'array', maxItems: 12,
             items: stringProperty('与本次目标相关的 sourceId。')
@@ -610,18 +688,38 @@ export class ClineCodingAgentAdapter implements CodingAgentPort {
             description: 'visualConstraints 中可由浏览器几何或计算样式验证的序号；省略时默认验证第一项。'
           },
           layoutScope: { type: 'string', enum: ['selected-context', 'explicit-container', 'global'] }
-        }, ['summary']),
+        }, ['summary', 'interactionPlan']),
         execute: (input, context) => execute(
           'declare_intent',
           input,
           context,
           async () => {
+            const interactionPlan = input.interactionPlan;
+            if (interactionPlan.mode !== 'none') {
+              const missingBehavior = [
+                ['initialState', interactionPlan.initialState],
+                ['trigger', interactionPlan.trigger],
+                ['result', interactionPlan.result],
+                ['layoutBehavior', interactionPlan.layoutBehavior],
+                ['completionBehavior', interactionPlan.completionBehavior],
+                ['nodeIdentity', interactionPlan.nodeIdentity]
+              ].filter(([, value]) => !value).map(([name]) => name);
+              if (missingBehavior.length) {
+                throw new Error(`declare_intent 的交互方案缺少：${missingBehavior.join('、')}；请先确定完整行为，存在关键歧义时调用 clarify`);
+              }
+            }
             const sourceIds = [...new Set([
               ...(turn.request.sourceId ? [turn.request.sourceId] : []),
               ...(input.relevantSourceIds ?? []),
               ...(input.verificationSourceIds ?? [])
             ])];
-            const constraints = [...new Set(input.visualConstraints?.length ? input.visualConstraints : [input.summary])];
+            const interactionConstraint = interactionPlan.mode === 'none'
+              ? undefined
+              : `交互方案：初始=${interactionPlan.initialState}；触发=${interactionPlan.trigger}；结果=${interactionPlan.result}；布局=${interactionPlan.layoutBehavior}；结束=${interactionPlan.completionBehavior}；节点=${interactionPlan.nodeIdentity}`;
+            const constraints = [...new Set([
+              ...(input.visualConstraints?.length ? input.visualConstraints : [input.summary]),
+              ...(interactionConstraint ? [interactionConstraint] : [])
+            ])];
             const renderConstraintIndexes = [...new Set(input.renderConstraintIndexes?.length ? input.renderConstraintIndexes : [1])];
             if (!sourceIds.length) {
               throw new Error('declare_intent 必须列出至少一个实际相关的 sourceId；请先查询并检查目标结构，无法定位时调用 clarify');
@@ -640,7 +738,7 @@ export class ClineCodingAgentAdapter implements CodingAgentPort {
               layoutScope: input.layoutScope ?? 'selected-context',
               createdAt: new Date().toISOString()
             };
-            return `意图已声明：${input.summary}`;
+            return `意图已声明并锁定实现方案：${input.summary}${interactionConstraint ? `；${interactionConstraint}` : '；本轮无交互改动'}。除非工具返回新的冲突证据，请直接执行并完成校验。`;
           }
         )
       }),
@@ -876,6 +974,26 @@ export class ClineCodingAgentAdapter implements CodingAgentPort {
             requireIntentDeclared();
             const result = await workspace.replaceInElement(input.sourceId, input.search, input.replace);
             trackSourceIdChanges(input.search, input.replace);
+            trackCreatedSourceIdsFromResult(result);
+            return result;
+          }
+        )
+      }),
+      createTool<{ sourceId: string; html: string }, string>({
+        name: 'replace_element',
+        description: '按 sourceId 原子替换一个完整元素，保持原位置，并为替换后的单个顶层元素及其后代生成全新 sourceId。适合把选中控件替换为 ui-agent-module；已有 selectedElementContext 时无需再读取原元素整段 HTML。',
+        inputSchema: objectSchema({
+          sourceId: stringProperty('要完整替换的现有元素 sourceId。'),
+          html: stringProperty('替换后的一个安全 HTML 顶层元素；新增 sourceId 由系统生成。')
+        }, ['sourceId', 'html']),
+        execute: (input, context) => execute(
+          'replace_element',
+          input,
+          context,
+          async () => {
+            requireIntentDeclared();
+            if (!workspace.replaceElement) throw new Error('当前源码工作区不支持完整元素替换');
+            const result = await workspace.replaceElement(input.sourceId, input.html);
             trackCreatedSourceIdsFromResult(result);
             return result;
           }

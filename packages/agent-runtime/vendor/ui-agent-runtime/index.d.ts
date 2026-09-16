@@ -66,6 +66,8 @@ export interface AgentRunDiagnostics {
     outputTextChars: number;
     /** Effective per-call generation budget; smaller for output-stall recovery. */
     outputBudget?: number;
+    /** True when reported output tokens reached the effective generation budget. */
+    outputBudgetReached?: boolean;
     toolChoice?: 'auto' | 'required';
     recoveringOutputLimit?: boolean;
     reasoning?: string;

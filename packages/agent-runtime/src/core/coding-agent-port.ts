@@ -42,6 +42,7 @@ export interface CodingWorkspaceTools {
     >
   ): Promise<string>;
   replaceInElement(sourceId: string, search: string, replace: string): Promise<string>;
+  replaceElement?(sourceId: string, html: string): Promise<string>;
   setElementText(sourceId: string, text: string): Promise<string>;
   setElementAttributes(sourceId: string, set: Record<string, string>, remove: string[]): Promise<string>;
   insertElement(

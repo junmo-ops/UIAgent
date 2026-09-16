@@ -14,6 +14,8 @@ function phaseForAction(action: string): SourceTurnProgress['phase'] {
     || action === 'replace'
     || action === 'replace_in_element'
     || action === 'replaceInElement'
+    || action === 'replace_element'
+    || action === 'replaceElement'
     || action === 'remove_element'
     || action === 'removeElement'
     || action === 'set_element_text'
@@ -61,6 +63,8 @@ function labelForAction(action: string): string {
     replace: '修改页面源码',
     replace_in_element: '修改选中元素',
     replaceInElement: '修改选中元素',
+    replace_element: '替换选中元素',
+    replaceElement: '替换选中元素',
     remove_element: '删除页面元素',
     removeElement: '删除页面元素',
     set_element_text: '设置元素文本',

@@ -81,7 +81,7 @@ export class Agent {
     let rateLimitRetries = 0;
     const usage = {};
     const runtimeStarted = Date.now();
-    const diagnostics = { version: 1, runtimeRevision: '2026-09-11-bounded-recovery-v13',
+    const diagnostics = { version: 1, runtimeRevision: '2026-09-15-intent-lock-v14',
       countingBasis: 'model decision rounds; rate-limit request retries are recorded separately per call',
       maxIterations: this.config.maxIterations ?? 12, maxOutputTokens: this.config.maxOutputTokens,
       requiredCompletionTool: this.config.completionPolicy?.requireCompletionTool === true,
@@ -270,6 +270,10 @@ export class Agent {
         const stepUsage = await stream.usage;
         rateLimitRetries = 0;
         currentCall.usage = Object.fromEntries(Object.entries(stepUsage ?? {}).filter(([, value]) => typeof value === 'number'));
+        const outputTokens = stepUsage?.outputTokens;
+        if (typeof outputBudget === 'number' && typeof outputTokens === 'number') {
+          currentCall.outputBudgetReached = outputTokens >= outputBudget;
+        }
         const reasoningTokens = stepUsage?.outputTokenDetails?.reasoningTokens ?? stepUsage?.outputTokensDetails?.reasoningTokens;
         const cachedInputTokens = stepUsage?.inputTokenDetails?.cacheReadTokens ?? stepUsage?.inputTokensDetails?.cacheReadTokens;
         if (typeof reasoningTokens === 'number') currentCall.usage.reasoningTokens = reasoningTokens;

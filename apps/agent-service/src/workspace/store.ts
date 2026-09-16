@@ -2391,6 +2391,7 @@ export class SourceWorkspaceStore {
       },
       applyPatch: async (path, edits) => {
         this.assertEditablePath(path, editableStylePath);
+        if (!Array.isArray(edits)) throw new Error('apply_patch 缺少 edits 数组；本次未执行写入');
         if (edits.length < 1 || edits.length > 20) throw new Error('Patch 必须包含 1-20 个编辑操作');
         const file = path as Extract<WorkspaceFile, 'index.html' | 'snapshot.css' | 'author-overrides.css' | 'module.jsx'>;
         let next = working[file];
@@ -2458,6 +2459,28 @@ export class SourceWorkspaceStore {
         const next = `${html.slice(0, range.start)}${updatedElement}${html.slice(range.end)}`;
         const identityResult = writeHtml(next);
         return `元素 ${sourceId} 内替换成功；HTML 与安全规则校验通过${identityResult}`;
+      },
+      replaceElement: async (sourceId, fragmentHtml) => {
+        if (typeof fragmentHtml !== 'string' || !fragmentHtml.trim()) {
+          throw new Error('replace_element 缺少有效的 html；本次未执行写入');
+        }
+        const html = working['index.html'];
+        const range = sourceElementRange(html, sourceId);
+        const removedHtml = html.slice(range.start, range.end);
+        const removedSourceIds = [...removedHtml.matchAll(
+          /\bdata-ui-source-id\s*=\s*["']([^"']+)["']/gi
+        )].map(match => match[1]!);
+        const replacement = fragmentWithFreshSourceIds(html, fragmentHtml);
+        if (replacement.rootSourceIds.length !== 1) {
+          throw new Error(`replace_element 必须提供且仅提供一个顶层元素，当前为 ${replacement.rootSourceIds.length} 个；本次未执行写入`);
+        }
+        const next = `${html.slice(0, range.start)}${replacement.html}${html.slice(range.end)}`;
+        validateHtml(next);
+        working['index.html'] = next;
+        working[editableStylePath] = withoutSourceScopedCss(working[editableStylePath], removedSourceIds);
+        validateCss(working[editableStylePath]);
+        refreshIndexes();
+        return `元素 ${sourceId} 已由新元素替换；新增顶层元素：${replacement.rootSourceIds[0]}；原位置保持不变，${removedSourceIds.length} 个原 sourceId 及其专属样式已移除；HTML、CSS、结构与安全规则校验通过`;
       },
       setElementText: async (sourceId, text) => {
         const html = working['index.html'];
@@ -2679,6 +2702,7 @@ export class SourceWorkspaceStore {
         return `已从模板 ${templateSourceId} 完整克隆元素 ${clone.rootSourceId}${destination}；结构与${authorRuleMode ? '可编辑覆盖样式' : '冻结样式'}已同步；HTML、CSS 与安全规则校验通过`;
       },
       applyDomOperations: async operations => {
+        if (!Array.isArray(operations)) throw new Error('apply_dom_operations 缺少 operations 数组；本次未执行写入');
         if (!operations.length || operations.length > 20) throw new Error('批量 DOM 操作必须包含 1-20 项');
         const before = { ...working };
         const results: string[] = [];
