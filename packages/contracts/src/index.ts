@@ -282,7 +282,7 @@ export const domOperationSchema = z.discriminatedUnion('kind', [
   z.object({
     kind: z.literal('insert'),
     targetSourceId: z.string().min(1).max(100),
-    position: z.enum(['parentStart', 'parentEnd', 'before', 'after']),
+    position: z.enum(['insideStart', 'insideEnd', 'parentStart', 'parentEnd', 'before', 'after']),
     html: z.string().min(1).max(100_000)
   }),
   z.object({
@@ -296,13 +296,13 @@ export const domOperationSchema = z.discriminatedUnion('kind', [
   z.object({
     kind: z.literal('move'),
     sourceId: z.string().min(1).max(100),
-    position: z.enum(['parentStart', 'parentEnd', 'before', 'after']),
+    position: z.enum(['insideStart', 'insideEnd', 'parentStart', 'parentEnd', 'before', 'after']),
     targetSourceId: z.string().min(1).max(100).optional()
   }),
   z.object({
     kind: z.literal('clone'),
     templateSourceId: z.string().min(1).max(100),
-    position: z.enum(['replace', 'parentStart', 'parentEnd', 'before', 'after']),
+    position: z.enum(['replace', 'insideStart', 'insideEnd', 'parentStart', 'parentEnd', 'before', 'after']),
     targetSourceId: z.string().min(1).max(100).optional(),
     replacements: z.array(z.object({
       search: z.string().min(1).max(2_000),

@@ -1,8 +1,9 @@
 import { WORKSPACE_FILES, AGENT_WORKSPACE_FILES, type WorkspaceFile, type WorkspaceFiles, type CapturedLayoutIndex, type StructureNode } from './workspace-types';
 import { compileModuleSource, validateModuleJavaScript, validateModuleBindings } from './module-compiler';
 import { validateHtml, validateCss } from './source-validation';
-import { structureQueryTerms, normalizeStructureSearchText, structureNeighborhood, countOccurrences, findTagEnd, sourceElementRange, sourceElementAncestry, elementClosingTagStart, cloneWithFreshSourceIds, clonedSourceScopedCss, sourceElementInnerRange, escapeHtmlText, updateOpeningTagAttributes, nextSourceNumber, fragmentWithFreshSourceIds, applyFrozenReferenceStyles, wrapperOpeningTag, withoutSourceScopedCss, compactElementSource, extractCapturedLayoutIndex, sourceLayoutFacts, cssRulesForClasses, cssRulesForClass, boundedStyleEntries, relevantElementStyleContext, cssSnippetsForSymbol } from './source-document';
+import { structureQueryTerms, normalizeStructureSearchText, structureNeighborhood, countOccurrences, findTagEnd, sourceElementRange, sourceElementAncestry, elementClosingTagStart, cloneWithFreshSourceIds, clonedSourceScopedCss, sourceElementInnerRange, escapeHtmlText, updateOpeningTagAttributes, nextSourceNumber, fragmentWithFreshSourceIds, applyFrozenReferenceStyles, wrapperOpeningTag, withoutSourceScopedCss, compactElementSource, extractCapturedLayoutIndex, sourceLayoutFacts, cssRulesForClasses, cssRulesForClass, boundedStyleEntries, relevantElementStyleContext } from './source-document';
 import { parseHTML } from 'linkedom';
+import { splitCssTopLevel } from './source-document';
 import type { CodingWorkspaceTools } from '@ui-agent/agent-runtime';
 import type { WorkspaceCandidate } from '@ui-agent/contracts';
 import { refreshWorkspaceIndexes } from './compiler';
@@ -289,14 +290,25 @@ export function createEditingSession(session: EditingSessionOptions): CodingWork
         compactElementSource(html.slice(range.start, range.end), full ? 12_000 : 4_000)
       ].join('\n');
     },
-    queryStyleSymbols: async symbols => {
+    queryStyleSymbols: async (symbols, options = {}) => {
       const sources: Array<{ path: string; content: string }> = authorRuleMode
         ? [
             { path: 'author.css', content: authorCssContent },
             { path: 'author-overrides.css', content: working['author-overrides.css'] }
           ]
         : [{ path: 'snapshot.css', content: working['snapshot.css'] }];
-      const normalized = symbols.map(rawSymbol => {
+      const selectedSources = sources.filter(source => options.source === 'overrides'
+        ? source.path === editableStylePath
+        : options.source === 'original' ? source.path !== 'author-overrides.css' : true);
+      const normalizeProperty = (value: string) => value.trim().startsWith('--') ? value.trim() : value.trim().toLowerCase();
+      const properties = [...new Set((options.properties ?? []).map(normalizeProperty))];
+      if (properties.some(value => !/^(?:--)?[a-z][a-z0-9-]*$/i.test(value))) throw new Error('CSS 属性名格式无效');
+      const document = options.sourceId ? parseHTML(working['index.html']).document : undefined;
+      const target = options.sourceId
+        ? [...document!.querySelectorAll('[data-ui-source-id]')].find(element => element.getAttribute('data-ui-source-id') === options.sourceId)
+        : undefined;
+      if (options.sourceId && !target) throw new Error(`未找到元素 ${options.sourceId}`);
+      const normalized = [...new Set(symbols)].map(rawSymbol => {
         const symbol = rawSymbol.trim();
         if (!/^(?:\.?[a-zA-Z_][\w-]{0,119}|--[a-zA-Z_][\w-]{0,117})$/.test(symbol)) {
           throw new Error(`样式符号格式无效：${rawSymbol}`);
@@ -304,26 +316,87 @@ export function createEditingSession(session: EditingSessionOptions): CodingWork
         return { symbol, variable: symbol.startsWith('--'), className: symbol.replace(/^\./, '') };
       });
       const classNames = normalized.filter(item => !item.variable).map(item => item.className);
-      const ruleIndexes = new Map(sources.map(source => [
+      let unknownSelectors = 0;
+      const uncertainSelectors = new Set<string>();
+      const matchesTarget = (selector: string, element: NonNullable<typeof target>): boolean => {
+        return splitCssTopLevel(selector, ',').some(part => {
+          // Only strip a terminal pseudo-element. Match its originating element;
+          // do not drop arbitrary pseudo-classes inside :not/:is/:has.
+          const trimmed = part.trim();
+          const origin = trimmed.replace(/::[\w-]+(?:\([^()]*\))?\s*$/, '').trim() || '*';
+          try {
+            const matches = element.matches(origin);
+            if (matches && origin !== trimmed) uncertainSelectors.add(selector);
+            return matches;
+          } catch {
+            unknownSelectors++;
+            return false;
+          }
+        });
+      };
+      const variableRules = (content: string, variable: string) => {
+        const declarations = (body: string) => splitCssTopLevel(body, ';')
+          .map(value => value.replace(/^(?:\s|\/\*[\s\S]*?\*\/)+/, '').trim())
+          .filter(value => value.slice(0, value.indexOf(':')).trim() === variable);
+        return cssRulesForClasses(content, [], Number.POSITIVE_INFINITY, (selector, body) => {
+          if (!declarations(body).length) return false;
+          if (!target) return true;
+          const elementSelectors = splitCssTopLevel(selector, ',').filter(part => !part.includes('::')).join(',');
+          if (!elementSelectors) return false;
+          for (let element: typeof target | null = target; element; element = element.parentElement) {
+            if (matchesTarget(elementSelectors, element)) return true;
+          }
+          return false;
+        }, body => declarations(body).join('; ') + ';').get('') ?? [];
+      };
+      const acceptRule = (selector: string, body: string) => {
+        if (properties.length) {
+          const declarations = [...body.matchAll(/(?:^|[;{}])\s*([\w-]+)\s*:/g)].map(match => normalizeProperty(match[1]!));
+          if (!declarations.some(name => name === 'all' || properties.some(property => name === property
+            || name.startsWith(property + '-') || property.startsWith(name + '-') || name.endsWith('-' + property)))) return false;
+        }
+        if (!target) return true;
+        return matchesTarget(selector, target);
+      };
+      const ruleIndexes = new Map(selectedSources.map(source => [
         source.path,
-        cssRulesForClasses(source.content, classNames, 4)
+        cssRulesForClasses(source.content, target ? [] : classNames, Number.POSITIVE_INFINITY, acceptRule)
       ]));
       let matchedSymbols = 0;
       const sections = normalized.flatMap(({ symbol, variable, className }) => {
-        const matches = [...sources].sort((a, b) => Number(b.path === 'author-overrides.css') - Number(a.path === 'author-overrides.css')).flatMap(source => {
+        const matches = [...selectedSources].sort((a, b) => Number(b.path === 'author-overrides.css') - Number(a.path === 'author-overrides.css')).flatMap(source => {
           const values = variable
-            ? cssSnippetsForSymbol(source.content, symbol, 4)
+            ? variableRules(source.content, symbol)
             : ruleIndexes.get(source.path)?.get(className) ?? [];
-          return values.map(value => `${symbol} — ${source.path}: ${value}`);
+          return values.map(value => `${symbol} — ${source.path}${variable ? '（仅指定变量声明摘录，非完整规则）' : ''}: ${value}`);
         });
         if (matches.length) matchedSymbols += 1;
         return matches.length
           ? matches
           : [`${symbol}：未提取到可读取的完整规则或引用（不代表原始 CSS 中不存在）`];
       });
-      sections.sort((a, b) => Number(b.includes('— author-overrides.css:')) - Number(a.includes('— author-overrides.css:')));
-      const header = `样式查询摘要: 请求 ${normalized.length} 个，命中 ${matchedSymbols} 个，未命中 ${normalized.length - matchedSymbols} 个。覆盖层优先展示；每个符号每个文件最多展示 4 条候选规则。\n\n`;
-      return header + boundedStyleEntries(sections, 4_000 - header.length);
+      if (target) {
+        sections.length = 0;
+        for (const source of [...selectedSources].reverse()) {
+          const isUncertain = (rule: string) => [...uncertainSelectors].some(selector => rule.includes(selector + '{') || rule.includes(selector + ' {'));
+          const rules = [...new Set((ruleIndexes.get(source.path)?.get('') ?? []))]
+            .sort((a, b) => Number(isUncertain(a)) - Number(isUncertain(b)));
+          for (const rule of rules) sections.push(`${source.path}（${isUncertain(rule) ? '状态或选择器待核对' : '静态结构匹配，条件待核对'}）: ${rule}`);
+        }
+      }
+      // Derive variable lookups only from the evidence actually delivered.
+      sections.sort((a, b) => Number(b.includes('author-overrides.css')) - Number(a.includes('author-overrides.css'))
+        || Number(b.startsWith('--')) - Number(a.startsWith('--')));
+      const visibleSections = boundedStyleEntries(sections, 4_500);
+      const variables = [...visibleSections.matchAll(/var\(\s*(--[\w-]+)/g)].map(match => match[1]!);
+      const requestedVariables = [...new Set(variables)].slice(0, 8);
+      const variableSections = requestedVariables.flatMap(variable => selectedSources.flatMap(source =>
+        variableRules(source.content, variable).map(rule => `${variable} — ${source.path}（变量定义，需核对继承及作用域）: ${rule}`)));
+      const header = `样式查询：来源=${options.source ?? 'all'}；目标=${options.sourceId ?? '按符号'}；关注属性=${properties.join(', ') || '全部'}。候选规则不是浏览器最终计算样式；状态、伪元素、媒体条件及嵌套选择器仍需核对。\n`
+        + (target ? `当前目标行内样式: ${target.getAttribute('style') ?? '无'}\n` : `请求 ${normalized.length} 个符号，命中 ${matchedSymbols} 个。\n`);
+      return header + (sections.length ? visibleSections : '未命中相关规则；无需因此重复读取，可按现有证据修改或调整查询条件。')
+        + (variableSections.length ? '\n变量声明摘录（仅保留指定声明，保留选择器及条件；不是整条规则）:\n' + boundedStyleEntries(variableSections, 1_500) : '')
+        + (unknownSelectors ? `\n[${unknownSelectors} 次选择器匹配无法静态解析，未混入目标结果；不代表这些规则不存在，必要时按符号查询原始规则。]` : '');
     },
     readStyleRule: async rawClassName => {
       const className = rawClassName.replace(/^\./, '');
@@ -496,9 +569,9 @@ export function createEditingSession(session: EditingSessionOptions): CodingWork
         : fragment.html;
       const targetRange = sourceElementRange(html, targetSourceId);
       let insertionIndex: number;
-      if (position === 'parentStart') {
+      if (position === 'parentStart' || position === 'insideStart') {
         insertionIndex = findTagEnd(html, targetRange.start) + 1;
-      } else if (position === 'parentEnd') {
+      } else if (position === 'parentEnd' || position === 'insideEnd') {
         insertionIndex = elementClosingTagStart(html, targetRange);
       } else {
         insertionIndex = position === 'before' ? targetRange.start : targetRange.end;
@@ -596,7 +669,14 @@ export function createEditingSession(session: EditingSessionOptions): CodingWork
       let insertionIndex: number;
       let destination: string;
 
-      if (position === 'parentStart' || position === 'parentEnd') {
+      if (position === 'insideStart' || position === 'insideEnd') {
+        if (!targetSourceId) throw new Error(`${position} 移动必须提供 targetSourceId`);
+        const targetRange = sourceElementRange(withoutSource, targetSourceId);
+        insertionIndex = position === 'insideStart'
+          ? findTagEnd(withoutSource, targetRange.start) + 1
+          : elementClosingTagStart(withoutSource, targetRange);
+        destination = `目标容器 ${targetSourceId} 的${position === 'insideStart' ? '开头' : '末尾'}`;
+      } else if (position === 'parentStart' || position === 'parentEnd') {
         if (!parent) throw new Error(`元素 ${sourceId} 没有可编辑的父容器`);
         const parentRange = sourceElementRange(withoutSource, parent.sourceId);
         if (position === 'parentStart') {
@@ -649,6 +729,13 @@ export function createEditingSession(session: EditingSessionOptions): CodingWork
         base = `${base.slice(0, targetRange.start)}${base.slice(targetRange.end)}`;
         insertionIndex = targetRange.start;
         destination = `并替换元素 ${targetSourceId}`;
+      } else if (position === 'insideStart' || position === 'insideEnd') {
+        if (!targetSourceId) throw new Error(`${position} 克隆必须提供 targetSourceId`);
+        const targetRange = sourceElementRange(base, targetSourceId);
+        insertionIndex = position === 'insideStart'
+          ? findTagEnd(base, targetRange.start) + 1
+          : elementClosingTagStart(base, targetRange);
+        destination = `到目标容器 ${targetSourceId} 的${position === 'insideStart' ? '开头' : '末尾'}`;
       } else if (position === 'parentStart' || position === 'parentEnd') {
         if (!templateParent) throw new Error(`模板元素 ${templateSourceId} 没有可编辑的父容器`);
         const parentRange = sourceElementRange(base, templateParent.sourceId);

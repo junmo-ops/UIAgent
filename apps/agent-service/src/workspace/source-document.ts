@@ -336,6 +336,8 @@ export function decodeBasicEntities(value: string): string {
 
 export function compactElementSource(outerHtml: string, maxHtmlChars = 4_000): string {
   const compactHtml = outerHtml
+    .replace(/(<path\b[^>]*?)\s+d\s*=\s*("[^"]*"|'[^']*')/gi, '$1 d="[路径数据已省略]"')
+    .replace(/\bdata:[^\s"'<>]+/gi, '[内联资源已省略]')
     .replace(/\sstyle="[^"]*"/gi, '')
     .replace(/\s+/g, ' ')
     .trim()
@@ -441,14 +443,42 @@ export function sourceLayoutFacts(
   };
 }
 
+// Split CSS lists/declarations without splitting quoted values or functions.
+export function splitCssTopLevel(value: string, separator: string): string[] {
+  const parts: string[] = [];
+  let start = 0;
+  let depth = 0;
+  let quote = '';
+  for (let i = 0; i < value.length; i++) {
+    const char = value[i]!;
+    if (char === '\\') { i++; continue; }
+    if (quote) { if (char === quote) quote = ''; continue; }
+    if (char === '"' || char === "'") { quote = char; continue; }
+    if (char === '/' && value[i + 1] === '*') {
+      const end = value.indexOf('*/', i + 2);
+      if (end < 0) break;
+      i = end + 1;
+      continue;
+    }
+    if ('([{'.includes(char)) depth++;
+    else if (')]}'.includes(char)) depth--;
+    else if (char === separator && depth === 0) { parts.push(value.slice(start, i)); start = i + 1; }
+  }
+  parts.push(value.slice(start));
+  return parts;
+}
+
 export function cssRulesForClasses(
   content: string,
   classNames: readonly string[],
-  limitPerClass = Number.POSITIVE_INFINITY
+  limitPerClass = Number.POSITIVE_INFINITY,
+  acceptRule?: (selector: string, body: string) => boolean,
+  projectBody?: (body: string) => string
 ): Map<string, string[]> {
   const names = [...new Set(classNames.filter(Boolean))];
   const matches = new Map(names.map(name => [name, [] as string[]]));
-  if (!names.length) return matches;
+  if (!names.length && !acceptRule) return matches;
+  if (!names.length) matches.set('', []);
   const tokens = names.map(name => ({
     name, pattern: new RegExp('\\.' + escapeRegExp(name) + '(?![\\w-]|\\\\)')
   }));
@@ -490,10 +520,15 @@ export function cssRulesForClasses(
         const matched = tokens.filter(token => (
           matches.get(token.name)!.length < limitPerClass && token.pattern.test(selectorTokens)
         ));
+        if (!tokens.length && acceptRule) matched.push({ name: '', pattern: /./ });
+        if (acceptRule && !acceptRule(block.prelude, content.slice(block.opening + 1, index))) {
+          statementStart = index + 1;
+          continue;
+        }
         if (matched.length) {
           // Preserve conditions, cascade layers and nesting parents.
           const rule = blocks.map(parent => parent.prelude + '{').join('')
-            + block.prelude + content.slice(block.opening, index + 1)
+            + block.prelude + (projectBody ? '{' + projectBody(content.slice(block.opening + 1, index)) + '}' : content.slice(block.opening, index + 1))
             + '}'.repeat(blocks.length);
           for (const token of matched) matches.get(token.name)!.push(rule);
         }

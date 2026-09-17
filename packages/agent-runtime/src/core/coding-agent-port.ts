@@ -31,7 +31,7 @@ export interface CodingWorkspaceTools {
   searchText(query: string, path?: string): Promise<string>;
   readFile(path: string, startLine?: number, endLine?: number, startChar?: number, endChar?: number): Promise<string>;
   inspectElement(sourceId: string, options?: { detail?: 'compact' | 'full' }): Promise<string>;
-  queryStyleSymbols(symbols: string[]): Promise<string>;
+  queryStyleSymbols(symbols: string[], options?: { sourceId?: string; source?: 'all' | 'original' | 'overrides'; properties?: string[] }): Promise<string>;
   readStyleRule(className: string): Promise<string>;
   replaceText(path: string, search: string, replace: string): Promise<string>;
   applyPatch(
@@ -47,7 +47,7 @@ export interface CodingWorkspaceTools {
   setElementAttributes(sourceId: string, set: Record<string, string>, remove: string[]): Promise<string>;
   insertElement(
     targetSourceId: string,
-    position: 'parentStart' | 'parentEnd' | 'before' | 'after',
+    position: 'insideStart' | 'insideEnd' | 'parentStart' | 'parentEnd' | 'before' | 'after',
     html: string,
     options?: { styleReferenceSourceId?: string }
   ): Promise<string>;
@@ -58,12 +58,12 @@ export interface CodingWorkspaceTools {
   applyDomOperations(operations: DomOperation[]): Promise<string>;
   moveElement(
     sourceId: string,
-    position: 'parentStart' | 'parentEnd' | 'before' | 'after',
+    position: 'insideStart' | 'insideEnd' | 'parentStart' | 'parentEnd' | 'before' | 'after',
     targetSourceId?: string
   ): Promise<string>;
   cloneElement(
     templateSourceId: string,
-    position: 'replace' | 'parentStart' | 'parentEnd' | 'before' | 'after',
+    position: 'replace' | 'insideStart' | 'insideEnd' | 'parentStart' | 'parentEnd' | 'before' | 'after',
     targetSourceId: string | undefined,
     replacements?: Array<{ search: string; replace: string }>
   ): Promise<string>;

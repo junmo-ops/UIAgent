@@ -81,7 +81,7 @@ export class Agent {
     let rateLimitRetries = 0;
     const usage = {};
     const runtimeStarted = Date.now();
-    const diagnostics = { version: 1, runtimeRevision: '2026-09-15-intent-lock-v14',
+    const diagnostics = { version: 1, runtimeRevision: '2026-09-17-auto-tool-recovery-v15',
       countingBasis: 'model decision rounds; rate-limit request retries are recorded separately per call',
       maxIterations: this.config.maxIterations ?? 12, maxOutputTokens: this.config.maxOutputTokens,
       requiredCompletionTool: this.config.completionPolicy?.requireCompletionTool === true,
@@ -154,7 +154,10 @@ export class Agent {
         const outputBudget = recoveringOutputLimit
           ? Math.min(this.config.maxOutputTokens ?? OUTPUT_LIMIT_RECOVERY_BUDGET, OUTPUT_LIMIT_RECOVERY_BUDGET)
           : this.config.maxOutputTokens;
-        const toolChoice = recoveringOutputLimit && Object.keys(tools).length ? 'required' : 'auto';
+        // Thinking endpoints may reject forced tool choice. Recovery is guided
+        // by the continuation message and bounded by the progress check below;
+        // completion still requires the configured completion tool.
+        const toolChoice = 'auto';
         currentCall = { modelCall: iterations, startedAt: new Date(callStarted).toISOString(),
           status: 'running', inputMessageCount: messages.length, availableTools: Object.keys(tools), outputTextChars: 0, tools: [],
           outputBudget, toolChoice, recoveringOutputLimit };

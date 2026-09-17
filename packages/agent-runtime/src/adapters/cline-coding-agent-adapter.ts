@@ -43,6 +43,75 @@ const stringProperty = (description: string): Record<string, unknown> => ({
   description
 });
 
+function boundedInspection(result: string, budget: number, seenLayout: Set<string>): string {
+  budget = Math.max(600, budget - 300); // Reserve headings and omission notices.
+  const clip = (value: string, limit: number) => value.length <= limit ? value
+    : `${value.slice(0, Math.max(0, limit - 40))}\n[本项已省略部分内容；按需定向读取]`;
+  const lines = result.split('\n');
+  const layoutLine = lines.find(line => line.startsWith('布局上下文: '));
+  const sourceStart = result.indexOf('domText: ');
+  const styleStart = result.indexOf('组件与样式上下文:');
+  const source = [
+    clip(lines.find(line => line.startsWith('domText: ')) ?? '', Math.floor(budget * 0.08)),
+    clip(lines.find(line => line.startsWith('compactHtml: ')) ?? '', Math.floor(budget * 0.22))
+  ].filter(Boolean).join('\n');
+  const styles = styleStart >= 0 ? result.slice(styleStart, sourceStart >= 0 ? sourceStart : undefined) : '';
+  const layoutBudget = Math.floor(budget * 0.4);
+  const layout: Record<string, unknown> = {};
+  let omitted = 0;
+  if (layoutLine) {
+    const facts = JSON.parse(layoutLine.slice('布局上下文: '.length)) as Record<string, unknown>;
+    for (const [kind, value] of Object.entries(facts)) {
+      const nodes = Array.isArray(value) ? value : [value];
+      const accepted: unknown[] = [];
+      for (const originalNode of nodes) {
+        if (!originalNode || typeof originalNode !== 'object') continue;
+        const fact = originalNode as Record<string, unknown>;
+        let node = Object.fromEntries(Object.entries(fact).filter(([key]) =>
+          !['cascadeNote', 'layoutEvidence'].includes(key)));
+        if (kind === 'target' && JSON.stringify(node).length > layoutBudget) {
+          node = { sourceId: fact.sourceId, tag: fact.tag, capturedRect: fact.capturedRect };
+          for (const [key, value] of Object.entries((fact.computedLayout ?? {}) as Record<string, unknown>)) {
+            const computedLayout = { ...(node.computedLayout as Record<string, unknown> ?? {}), [key]: value };
+            if (JSON.stringify({ ...node, computedLayout }).length <= layoutBudget - 20) node.computedLayout = computedLayout;
+            else omitted++;
+          }
+          omitted++; // Other target fields are intentionally omitted at this budget.
+        }
+        const key = JSON.stringify(node);
+        if (kind !== 'target' && seenLayout.has(key)) { omitted++; continue; }
+        const candidate = { ...layout, [kind]: Array.isArray(value) ? [...accepted, node] : node };
+        if (JSON.stringify(candidate).length > layoutBudget) { omitted++; continue; }
+        accepted.push(node);
+        layout[kind] = Array.isArray(value) ? [...accepted] : node;
+        seenLayout.add(key);
+      }
+    }
+  }
+  return [
+    clip(lines[0] ?? '', 180),
+    '源码摘要（非精确原文；精确替换请按字符范围 read_file）：',
+    clip(source, Math.floor(budget * 0.3)),
+    clip(styles, Math.floor(budget * 0.2)),
+    `布局上下文（捕获值不是修改后的渲染测量）: ${JSON.stringify(layout)}`,
+    ...(omitted ? [`[省略 ${omitted} 项重复或超预算布局；需要时单独检查目标]`] : [])
+  ].filter(Boolean).join('\n');
+}
+
+// Keep legacy positions in the internal protocol for existing callers, but
+// expose only the explicit-target vocabulary to the model, including batches.
+function modelOperationSchema(value: unknown): unknown {
+  if (Array.isArray(value)) return value.map(modelOperationSchema);
+  if (!value || typeof value !== 'object') return value;
+  const schema = Object.fromEntries(Object.entries(value).map(([key, child]) => [key, modelOperationSchema(child)]));
+  if (Array.isArray(schema.enum)) schema.enum = schema.enum.filter(item => item !== 'parentStart' && item !== 'parentEnd');
+  const properties = schema.properties as Record<string, { const?: string }> | undefined;
+  if (properties?.kind?.const === 'move' || properties?.kind?.const === 'clone') {
+    schema.required = [...new Set([...(schema.required as string[] ?? []), 'targetSourceId'])];
+  }
+  return schema;
+}
+
 const INTERACTION_BEHAVIOR_FIELDS = [
   'initialState', 'trigger', 'result', 'layoutBehavior', 'completionBehavior', 'nodeIdentity'
 ] as const;
@@ -59,6 +128,14 @@ function interactionPlanSchema(properties: Record<string, Record<string, unknown
   };
 }
 
+function spatialScopeSchema(properties: Record<string, unknown>, required: string[]): Record<string, unknown> {
+  return { ...objectSchema(properties, required), anyOf: [
+    objectSchema({ ...properties, scope: { type: 'string', enum: ['global'] } }, required),
+    objectSchema({ ...properties, scope: { type: 'string', enum: ['selected-context', 'explicit-container'] },
+      containerSourceId: { type: 'string', minLength: 1 } }, [...required, 'containerSourceId'])
+  ] };
+}
+
 function createTool<TInput, TOutput>(config: AgentTool<TInput, TOutput>): AgentTool<TInput, TOutput> {
   const validateRequiredFields = (
     schema: Record<string, unknown>,
@@ -73,12 +150,20 @@ function createTool<TInput, TOutput>(config: AgentTool<TInput, TOutput>): AgentT
         validateRequiredFields(branch, value, path, errors);
         return errors;
       });
-      if (branchIssues.some(errors => errors.length === 0)) return;
-      issues.push(`${path}: ${branchIssues.map(errors => errors.join('、')).join('；或 ')}`);
-      return;
+      if (!branchIssues.some(errors => errors.length === 0)) {
+        issues.push(`${path}: ${branchIssues.map(errors => errors.join('、')).join('；或 ')}`);
+        return;
+      }
     }
     if (Array.isArray(schema.enum) && !schema.enum.includes(value)) {
       issues.push(`${path} 应为 ${schema.enum.join(' / ')}`);
+    }
+    if ('const' in schema && value !== schema.const) issues.push(`${path} 应为 ${String(schema.const)}`);
+    if ((schema.type === 'number' || schema.type === 'integer') && (typeof value !== 'number'
+      || !Number.isFinite(value) || (schema.type === 'integer' && !Number.isInteger(value))
+      || (typeof schema.minimum === 'number' && value < schema.minimum)
+      || (typeof schema.maximum === 'number' && value > schema.maximum))) {
+      issues.push(`${path} 应为范围内的${schema.type === 'integer' ? '整数' : '数字'}`);
     }
     if (schema.type === 'string' && (typeof value !== 'string'
       || (typeof schema.minLength === 'number' && value.length < schema.minLength))) {
@@ -109,6 +194,10 @@ function createTool<TInput, TOutput>(config: AgentTool<TInput, TOutput>): AgentT
         return;
       }
       const itemSchema = schema.items as Record<string, unknown> | undefined;
+      if ((typeof schema.minItems === 'number' && value.length < schema.minItems)
+        || (typeof schema.maxItems === 'number' && value.length > schema.maxItems)) {
+        issues.push(`${path} 数组长度不符合要求`);
+      }
       if (itemSchema) value.forEach((item, index) => validateRequiredFields(itemSchema, item, `${path}[${index}]`, issues));
     }
   };
@@ -127,9 +216,10 @@ function createTool<TInput, TOutput>(config: AgentTool<TInput, TOutput>): AgentT
 
 const clineSourceRules = [
   '你是静态网页源码编辑 Agent，只使用本次提供的源码工具。页面用于 UI 示意，不实现真实接口或业务提交。',
-  '输入已包含文件摘要；有 selectedElementContext 时直接使用，无需重复枚举文件、搜索或检查同一选中元素。没有目标上下文时先 query_workspace_structure，再按需 inspect_element。取得足够证据后立即修改，不要为了寻找更理想的 class、变量或示例继续扩展搜索。',
+  '输入已包含文件摘要；有 selectedElementContext 时直接使用，无需重复枚举文件、搜索或检查同一选中元素。没有目标上下文时先 query_workspace_structure，再按需 inspect_elements（支持单个 ID）。取得足够证据后立即修改，不要为了寻找更理想的 class、变量或示例继续扩展搜索。',
   'index.html 保存结构和文案。存在 author.css 或 author-style-links.json 时，视觉修改只写 author-overrides.css，author.css 仅供查询，snapshot.css 不可修改；否则视觉修改写 snapshot.css。outline.json 和 source-map.json 只读。',
-  'inspect_element 默认返回目标、祖先、同级、布局、局部源码、目标实际命中的样式规则，以及可识别时的组件库规范；只有缺少完成当前修改的具体信息时才使用 full。已有组件与样式上下文时直接据此修改，不要再次搜索组件基础样式；仅在明确缺少某条页面覆盖规则时使用 query_style_symbols，避免全文搜索大 CSS。',
+  'inspect_elements 返回有预算的目标结构摘要、布局和样式线索。只有缺少具体信息时才使用 full 或按返回字符位置 read_file；摘要不是精确源码。已有组件与样式上下文时直接据此修改，不要再次搜索组件基础样式；仅在明确缺少某条页面覆盖规则时使用 query_style_symbols，避免全文搜索大 CSS。',
+  '样式查询统一使用 query_style_symbols。目标已知时优先提供 sourceId 和本次关注的 properties，一次查询所需证据；source 默认 all，只有明确需要覆盖层时才选 overrides。未命中不等于工具失败，也不要求不断补查。',
   '目标明确且已有 selectedElementContext 时，不重复读取选中元素源码。完整替换选中元素使用 replace_element，无需复制原元素整段 HTML；应在前两次模型决策内完成意图声明并开始写入。不要为了比较未被用户要求的视觉方案检索相邻示例。',
   '修改前只需确认目标、最近相关容器和必要的相邻元素。复制原样保留原结构，小改保留现有实现；新增、重做、改变控件类型或组合交互统一使用 Ant Design 局部模块。只读取必要布局证据，明确风格要求时只读取相关参照。修改行内样式时注意级联优先级，背景也可能由子元素或伪元素绘制。',
   '位置描述以用户明确容器为准，否则以 selectedSourceId 或最近语义祖先为锚点。相邻组件只扩展到最近公共父容器；用户未明确要求全局视口定位时不得新增 position:fixed。新增元素后调用 validate_spatial_scope。',
@@ -139,6 +229,7 @@ const clineSourceRules = [
   '不得添加 script、事件属性、远程资源、接口请求、表单 action 或 javascript: URL。',
   INTERACTION_INSTRUCTIONS,
   '修改完成后直接调用 finish；finish 会执行工作区校验。新增元素仍须先完成空间归属校验。源码和捕获布局不能证明真实渲染结果，不得声称已经通过浏览器验证。无需修改时提供源码证据并使用 already_satisfied。',
+  'finish.summary 是给产品用户看的结果说明，不是技术执行日志。用 1～3 句自然语言说明改了什么；仅在有新增交互时补充如何使用，仅在影响用户预期时说明实际限制（例如仅为演示、未连接真实检索）。简单文案修改一句即可。不罗列 sourceId、文件名、class、React/组件库、工具名或校验过程，不复述完整需求，不追加通用验证免责声明。不得把源码校验表述成已验证视觉效果，不承诺无裁切、绝不影响其他区域。确有未完成项或已知风险必须明确说明，不能为简短而隐瞒。技术细节保留在工具调用日志。',
   '没有调用 finish 或 clarify，本轮不算完成。保持推理和工具说明简洁，不做无关重构。'
 ].join('\n');
 
@@ -152,19 +243,16 @@ const MAX_IDENTICAL_TOOL_FAILURES = 3;
 const MAX_READ_CALLS_PER_ACTION: Readonly<Record<string, number>> = {
   query_workspace_structure: 2,
   search_text: 4,
-  inspect_element: 3,
   inspect_elements: 3,
   query_style_symbols: 3,
-  read_style_rule: 2,
-  read_style_rules: 2,
   read_file: 3
 };
 const BUDGETED_READ_ACTIONS = new Set([
-  'query_workspace_structure', 'search_text', 'read_file', 'inspect_element', 'inspect_elements',
-  'query_style_symbols', 'read_style_rule', 'read_style_rules'
+  'query_workspace_structure', 'search_text', 'read_file', 'inspect_elements',
+  'query_style_symbols'
 ]);
 const MUTATING_ACTIONS = new Set([
-  'replace_text', 'apply_patch', 'replace_in_element', 'replace_element', 'set_element_text', 'set_element_attributes',
+  'apply_patch', 'replace_in_element', 'replace_element', 'set_element_text', 'set_element_attributes',
   'insert_element', 'wrap_element', 'unwrap_element', 'remove_element', 'reorder_children',
   'apply_dom_operations', 'move_element', 'clone_element'
 ]);
@@ -510,7 +598,7 @@ export class ClineCodingAgentAdapter implements CodingAgentPort {
       }
       const remainingAfterThisCall = Math.max(0, this.maxIterations - context.iteration);
       const finalizationStartsAt = Math.max(1, this.maxIterations - FINALIZATION_WINDOW + 1);
-      if (BUDGETED_READ_ACTIONS.has(action) && !['inspect_element', 'inspect_elements'].includes(action)
+      if (BUDGETED_READ_ACTIONS.has(action) && action !== 'inspect_elements'
         && context.iteration >= finalizationStartsAt) {
         const message = `[运行预算] 当前第 ${context.iteration}/${this.maxIterations} 轮，已进入最后 ${FINALIZATION_WINDOW} 轮，停止继续读取。若修改已完成，请立即调用 finish；若关键信息仍不足，请调用 clarify。`;
         record(action, input, context, message, undefined, 'blocked');
@@ -823,22 +911,11 @@ export class ClineCodingAgentAdapter implements CodingAgentPort {
           )
         )
       }),
-      createTool<{ sourceId: string; detail?: 'compact' | 'full' }, string>({
-        name: 'inspect_element',
-        description: '按 data-ui-source-id 读取页面元素的局部源码、文字和样式线索。默认 compact，信息不足时可直接使用 full。',
-        inputSchema: objectSchema({
-          sourceId: stringProperty('元素的 data-ui-source-id。'),
-          detail: { type: 'string', enum: ['compact', 'full'] }
-        }, ['sourceId']),
-        execute: (input, context) => execute(
-          'inspect_element', input, context,
-          () => workspace.inspectElement(input.sourceId, { detail: input.detail ?? 'compact' })
-        )
-      }),
-      createTool<{ sourceIds: string[] }, string>({
+      createTool<{ sourceIds: string[]; detail?: 'compact' | 'full' }, string>({
         name: 'inspect_elements',
-        description: '批量读取多个 data-ui-source-id 元素的局部源码、文字和样式线索，减少重复调用。',
+        description: '检查一个或多个元素。默认 compact，full 返回更多布局与源码摘要；摘要不能用于精确替换，原文使用 read_file。各目标都有独立预算，不因前一个元素过长而丢失后续目标。',
         inputSchema: objectSchema({
+          detail: { type: 'string', enum: ['compact', 'full'] },
           sourceIds: {
             type: 'array',
             minItems: 1,
@@ -851,82 +928,36 @@ export class ClineCodingAgentAdapter implements CodingAgentPort {
           input,
           context,
           async () => {
-            const sections = await Promise.all(input.sourceIds.map(async sourceId => {
-              const result = await workspace.inspectElement(sourceId, { detail: 'compact' });
-              return `元素 ${sourceId}\n${result.slice(0, MAX_BATCH_ELEMENT_CHARS)}`;
-            }));
-            const combined = sections.join('\n\n---\n\n');
-            return combined.length <= MAX_BATCH_INSPECTION_CHARS
-              ? combined
-              : `[批量检查已按总预算截断] 原始 ${combined.length} 字符，仅返回前 ${MAX_BATCH_INSPECTION_CHARS} 字符。请只对确实缺少证据的单个元素补查。\n\n${combined.slice(0, MAX_BATCH_INSPECTION_CHARS)}`;
+            const ids = [...new Set(input.sourceIds)];
+            const budget = Math.min(ids.length === 1 ? MAX_BATCH_INSPECTION_CHARS : MAX_BATCH_ELEMENT_CHARS,
+              Math.floor(MAX_BATCH_INSPECTION_CHARS / ids.length));
+            const seenLayout = new Set<string>();
+            const results = await Promise.all(ids.map(sourceId =>
+              workspace.inspectElement(sourceId, { detail: input.detail ?? 'compact' })));
+            const sections = results.map(result => boundedInspection(result, budget, seenLayout));
+            return sections.join('\n\n---\n\n');
           }
         )
       }),
-      createTool<{ symbols: string[] }, string>({
+      createTool<{ symbols?: string[]; sourceId?: string; source?: 'all' | 'original' | 'overrides'; properties?: string[] }, string>({
         name: 'query_style_symbols',
-        description: '结构化查询 class 或 CSS 自定义属性，返回有总预算的相关规则/片段；优先于全文搜索 author.css。',
-        inputSchema: objectSchema({
+        description: '统一查询样式。优先 sourceId 配合 properties 查询目标结构适用的属性规则；也可按 symbols 查询 class/变量。source 默认 all，original 查原站，overrides 查可编辑层。未命中是正常结果，不必重复读取。返回候选规则，不是最终渲染样式。',
+        inputSchema: { ...objectSchema({
           symbols: {
             type: 'array', minItems: 1, maxItems: 12,
             items: stringProperty('class 名（可带点）或以 -- 开头的 CSS 自定义属性。')
-          }
-        }, ['symbols']),
+          },
+          sourceId: stringProperty('目标元素 sourceId；与 symbols 至少提供一项。'),
+          source: { type: 'string', enum: ['all', 'original', 'overrides'] },
+          properties: { type: 'array', minItems: 1, maxItems: 12, items: stringProperty('关注的 CSS 属性，例如 height、padding、box-sizing；只返回相关规则。') }
+        }, []), anyOf: [
+          { type: 'object', required: ['sourceId'], properties: { sourceId: { type: 'string', minLength: 1 } } },
+          { type: 'object', required: ['symbols'], properties: { symbols: { type: 'array', minItems: 1 } } }
+        ] },
         execute: (input, context) => execute(
-          'query_style_symbols', input, context, () => workspace.queryStyleSymbols(input.symbols)
-        )
-      }),
-      createTool<{ className: string }, string>({
-        name: 'read_style_rule',
-        description: '冻结模式下按 inspect_element 返回的 class 名读取 snapshot.css 中对应的完整样式规则。原始规则模式请检索只读 author.css。',
-        inputSchema: objectSchema({
-          className: stringProperty('单个样式类名，例如 ui-snapshot-style-38，可带或不带开头的点。')
-        }, ['className']),
-        execute: (input, context) => execute(
-          'read_style_rule',
-          input,
-          context,
-          () => workspace.readStyleRule(input.className)
-        )
-      }),
-      createTool<{ classNames: string[] }, string>({
-        name: 'read_style_rules',
-        description: '批量读取多个 snapshot.css 完整样式规则，适合一次比较相关组件。',
-        inputSchema: objectSchema({
-          classNames: {
-            type: 'array',
-            minItems: 1,
-            maxItems: 12,
-            items: stringProperty('样式类名，可带或不带开头的点。')
-          }
-        }, ['classNames']),
-        execute: (input, context) => execute(
-          'read_style_rules',
-          input,
-          context,
-          async () => (await Promise.all(input.classNames.map(
-            className => workspace.readStyleRule(className)
-          ))).join('\n\n---\n\n')
-        )
-      }),
-      createTool<{ path: string; search: string; replace: string }, string>({
-        name: 'replace_text',
-        description: '在允许写入的源码文件中执行一次精确替换。search 必须来自最近读取的原文。',
-        inputSchema: objectSchema({
-          path: stringProperty('只允许 index.html、module.jsx，以及当前模式的样式文件：原始规则模式为 author-overrides.css，冻结模式为 snapshot.css。module.js 是平台编译产物。'),
-          search: stringProperty('要替换的精确原文，应当足够唯一。'),
-          replace: stringProperty('替换后的源码。')
-        }, ['path', 'search', 'replace']),
-        execute: (input, context) => execute(
-          'replace_text',
-          input,
-          context,
-          async () => {
-            requireIntentDeclared();
-            const result = await workspace.replaceText(input.path, input.search, input.replace);
-            if (input.path === 'index.html') trackSourceIdChanges(input.search, input.replace);
-            else if (input.path !== 'module.jsx') trackPositioningChange(input.search, input.replace);
-            if (input.path === 'index.html') trackCreatedSourceIdsFromResult(result);
-            return result;
+          'query_style_symbols', input, context, () => {
+            if (!input.sourceId && !input.symbols?.length) throw new Error('请提供 sourceId 或非空 symbols');
+            return workspace.queryStyleSymbols(input.symbols ?? [], input);
           }
         )
       }),
@@ -945,14 +976,15 @@ export class ClineCodingAgentAdapter implements CodingAgentPort {
             type: 'array',
             minItems: 1,
             maxItems: 20,
-            items: objectSchema({
-              kind: { type: 'string', enum: ['replace', 'insert'] },
-              search: { type: 'string' },
-              replace: { type: 'string' },
-              position: { type: 'string', enum: ['start', 'end', 'before', 'after'] },
-              text: { type: 'string' },
-              anchor: { type: 'string' }
-            }, ['kind'])
+            items: { anyOf: [
+              objectSchema({ kind: { type: 'string', enum: ['replace'] },
+                search: { type: 'string', minLength: 1 }, replace: { type: 'string' } }, ['kind', 'search', 'replace']),
+              objectSchema({ kind: { type: 'string', enum: ['insert'] },
+                position: { type: 'string', enum: ['start', 'end'] }, text: { type: 'string', minLength: 1 } }, ['kind', 'position', 'text']),
+              objectSchema({ kind: { type: 'string', enum: ['insert'] },
+                position: { type: 'string', enum: ['before', 'after'] }, text: { type: 'string', minLength: 1 },
+                anchor: { type: 'string', minLength: 1 } }, ['kind', 'position', 'text', 'anchor'])
+            ] }
           }
         }, ['path', 'edits']),
         execute: (input, context) => execute(
@@ -1046,7 +1078,7 @@ export class ClineCodingAgentAdapter implements CodingAgentPort {
       }),
       createTool<{
         targetSourceId: string;
-        position: 'parentStart' | 'parentEnd' | 'before' | 'after';
+        position: 'insideStart' | 'insideEnd' | 'before' | 'after';
         html: string;
         styleReferenceSourceId?: string;
       }, string>({
@@ -1054,7 +1086,7 @@ export class ClineCodingAgentAdapter implements CodingAgentPort {
         description: '在目标元素内部开头/末尾或目标前后插入静态 HTML；系统为所有新元素生成 sourceId。可选提供已检查的同类元素作为冻结计算样式参照。',
         inputSchema: objectSchema({
           targetSourceId: stringProperty('定位目标 sourceId。'),
-          position: { type: 'string', enum: ['parentStart', 'parentEnd', 'before', 'after'] },
+          position: { type: 'string', enum: ['insideStart', 'insideEnd', 'before', 'after'], description: 'insideStart/insideEnd 表示 targetSourceId 内部，before/after 表示目标外部前后。' },
           html: stringProperty('要插入的安全静态 HTML 片段。'),
           styleReferenceSourceId: stringProperty('可选：已检查的相邻同类元素。系统会将其冻结计算样式复制给新增顶层元素，用于保持尺寸、间距和对齐。')
         }, ['targetSourceId', 'position', 'html']),
@@ -1128,7 +1160,7 @@ export class ClineCodingAgentAdapter implements CodingAgentPort {
         inputSchema: objectSchema({
           operations: {
             type: 'array', minItems: 1, maxItems: 20,
-            items: z.toJSONSchema(domOperationSchema)
+            items: modelOperationSchema(z.toJSONSchema(domOperationSchema))
           }
         }, ['operations']),
         execute: (input, context) => execute('apply_dom_operations', input, context, async () => {
@@ -1140,16 +1172,16 @@ export class ClineCodingAgentAdapter implements CodingAgentPort {
       }),
       createTool<{
         sourceId: string;
-        position: 'parentStart' | 'parentEnd' | 'before' | 'after';
-        targetSourceId?: string;
+        position: 'insideStart' | 'insideEnd' | 'before' | 'after';
+        targetSourceId: string;
       }, string>({
         name: 'move_element',
-        description: '按 sourceId 原样移动现有元素，保留其完整结构、样式类和子节点。before/after 必须提供目标 sourceId。',
+        description: '按 sourceId 原样移动元素，所有位置均相对于必填的 targetSourceId。insideStart/insideEnd 放入目标容器内部；before/after 放在目标外部前后。',
         inputSchema: objectSchema({
           sourceId: stringProperty('要移动的现有元素 sourceId。'),
-          position: { type: 'string', enum: ['parentStart', 'parentEnd', 'before', 'after'] },
-          targetSourceId: stringProperty('before/after 的目标元素 sourceId。')
-        }, ['sourceId', 'position']),
+          position: { type: 'string', enum: ['insideStart', 'insideEnd', 'before', 'after'] },
+          targetSourceId: stringProperty('目标元素或目标容器 sourceId。')
+        }, ['sourceId', 'position', 'targetSourceId']),
         execute: (input, context) => execute(
           'move_element',
           input,
@@ -1162,15 +1194,15 @@ export class ClineCodingAgentAdapter implements CodingAgentPort {
       }),
       createTool<{
         templateSourceId: string;
-        position: 'replace' | 'parentStart' | 'parentEnd' | 'before' | 'after';
-        targetSourceId?: string;
+        position: 'replace' | 'insideStart' | 'insideEnd' | 'before' | 'after';
+        targetSourceId: string;
         replacements?: Array<{ search: string; replace: string }>;
       }, string>({
         name: 'clone_element',
-        description: '克隆现有同款组件并生成全新的 sourceId，可在克隆内容中执行少量精确替换。',
+        description: '克隆元素并生成新 sourceId。所有位置相对于必填 targetSourceId：insideStart/insideEnd 为目标内部，before/after 为目标外部前后，replace 替换目标。',
         inputSchema: objectSchema({
           templateSourceId: stringProperty('要复用的现有组件 sourceId。'),
-          position: { type: 'string', enum: ['replace', 'parentStart', 'parentEnd', 'before', 'after'] },
+          position: { type: 'string', enum: ['replace', 'insideStart', 'insideEnd', 'before', 'after'] },
           targetSourceId: stringProperty('插入或替换的目标 sourceId。'),
           replacements: {
             type: 'array',
@@ -1180,7 +1212,7 @@ export class ClineCodingAgentAdapter implements CodingAgentPort {
               replace: stringProperty('替换内容。')
             }, ['search', 'replace'])
           }
-        }, ['templateSourceId', 'position']),
+        }, ['templateSourceId', 'position', 'targetSourceId']),
         execute: (input, context) => execute(
           'clone_element',
           input,
@@ -1211,7 +1243,7 @@ export class ClineCodingAgentAdapter implements CodingAgentPort {
       }, string>({
         name: 'validate_spatial_scope',
         description: '校验新增模块是否围绕选区或用户明确指定的容器定位。新增元素后、finish 前必须调用。',
-        inputSchema: objectSchema({
+        inputSchema: spatialScopeSchema({
           scope: { type: 'string', enum: ['selected-context', 'explicit-container', 'global'] },
           containerSourceId: stringProperty('实际承载新增顶层模块的容器 sourceId；global 可省略。'),
           createdSourceIds: {
@@ -1293,7 +1325,7 @@ export class ClineCodingAgentAdapter implements CodingAgentPort {
         name: 'finish',
         description: `${finishDescription}若当前副本无需改动，设置 outcome=already_satisfied，并提供源码证据。`,
         inputSchema: objectSchema({
-          summary: stringProperty('面向用户的简洁修改说明。'),
+          summary: stringProperty('面向用户的结果说明，通常 1～3 句：改了什么，必要时说明交互用法或实际限制。不要包含源码标识、文件名、校验过程或重复免责声明；不得声称未经验证的视觉效果。'),
           outcome: {
             type: 'string',
             enum: ['changed', 'already_satisfied'],
@@ -1437,7 +1469,8 @@ export class ClineCodingAgentAdapter implements CodingAgentPort {
       if (completion?.kind === 'completed') {
         response = {
           kind: 'completed',
-          summary: `${completion.summary}（${completion.validation}；已完成源码规则校验，交互行为与视觉效果需在副本页面确认）`,
+          // Validation details remain in the recorded finish tool result.
+          summary: completion.summary,
           revision: completion.revision,
           unchanged: completion.unchanged,
           modelCalls: checkpoint.modelCalls,
@@ -1446,7 +1479,7 @@ export class ClineCodingAgentAdapter implements CodingAgentPort {
       } else if (completion?.kind === 'draft') {
         response = {
           kind: 'draft',
-          summary: `${completion.summary}（${completion.validation}；等待真实渲染验证）`,
+          summary: completion.summary,
           candidate: completion.candidate,
           intent: completion.intent,
           modelCalls: checkpoint.modelCalls,
