@@ -235,6 +235,7 @@ button, textarea { font: inherit; }
 }
 
 .empty-icon .ui-icon { width: 21px; height: 21px; }
+.brand-icon { display: block; flex-shrink: 0; margin-bottom: 14px; }
 .empty-tip strong { color: #2a2826; font-size: 15px; font-weight: 650; }
 .empty-tip p { max-width: 280px; margin: 7px 0 18px; color: #96918d; font-size: 12px; line-height: 1.65; }
 

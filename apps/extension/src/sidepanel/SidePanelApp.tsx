@@ -1225,7 +1225,7 @@ export function SidePanelApp() {
       <section className="workspace" hidden={conversationsOpen}>
         <header className="conversation-header">
           <div className="conversation-heading">
-            <h1 title={sourceWorkspace ? conversationTitle : undefined}>{sourceWorkspace ? conversationTitle : 'UI 助手'}</h1>
+            <h1 title={sourceWorkspace ? conversationTitle : undefined}>{sourceWorkspace ? conversationTitle : 'UI需求助手'}</h1>
           </div>
           {sourceWorkspace && <Tooltip title={busy ? '请等待当前任务完成或先停止，右侧可查看历史会话' : '保留当前页面和历史对话'}>
             <Button className="new-conversation-button" type="text" icon={<UiIcon name="newChat" />}
@@ -1257,14 +1257,14 @@ export function SidePanelApp() {
         <section className="chat-list">
           {!sourceWorkspace && (
             <div className="snapshot-welcome">
-              <span className="empty-icon"><UiIcon name="snapshot" /></span>
+              <img className="brand-icon" src="/icons/logo.svg" width="42" height="42" alt="" />
               <strong>在静态副本中编辑当前页面</strong>
               <p>确认后会将当前标签页切换为静态副本。进入副本后再选择区域、描述改动，原页面不会受到影响。</p>
             </div>
           )}
           {sourceWorkspace && chat.length === 0 && (
             <div className="empty-tip">
-              <span className="empty-icon"><UiIcon name="sparkle" /></span>
+              <img className="brand-icon" src="/icons/logo.svg" width="42" height="42" alt="" />
               <strong>{selection ? '描述你想看到的页面效果' : '先选择需要调整的区域'}</strong>
               <p>{selection ? '可以修改内容、样式和布局，或添加安全的点击交互。' : '点击上方“选择”，然后在静态副本页面中点击目标元素。'}</p>
               <div className="example-list">
@@ -1414,7 +1414,7 @@ export function SidePanelApp() {
         <Tooltip title="运行日志" placement="left"><button type="button" aria-label="运行日志" onClick={() => void openLogs()}><UiIcon name="logs" /></button></Tooltip>
       </nav>
       <Modal
-        title={`必须更新 UI 需求示意助手至 v${availableUpdate?.version ?? ''}`}
+        title={`必须更新UI需求助手至 v${availableUpdate?.version ?? ''}`}
         open={Boolean(availableUpdate)}
         okText="下载更新包"
         cancelButtonProps={{ style: { display: 'none' } }}

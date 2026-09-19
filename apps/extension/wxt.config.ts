@@ -14,11 +14,15 @@ export default defineConfig({
     }
   }),
   manifest: {
-    name: 'UI 需求示意助手',
-    description: '选择页面区域，通过自然语言生成受控的静态 UI 需求示意。',
+    name: 'UI需求助手',
+    description: '在页面上说出需求，直观看到修改效果。',
     version: extensionPackage.version,
     permissions: ['activeTab', 'scripting', 'sidePanel', 'storage', 'downloads'],
     host_permissions: [serviceHostPermission],
-    action: { default_title: '打开 UI 需求示意助手' }
+    icons: { 16: '/icons/16.png', 32: '/icons/32.png', 48: '/icons/48.png', 128: '/icons/128.png' },
+    action: {
+      default_title: '打开UI需求助手',
+      default_icon: { 16: '/icons/16.png', 32: '/icons/32.png', 48: '/icons/48.png', 128: '/icons/128.png' }
+    }
   }
 });

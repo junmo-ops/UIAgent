@@ -55,6 +55,11 @@ const workspaceSession = (workspaceId: string) => storage.defineItem<PersistedWo
 );
 
 export const sourceWorkspaceSessionItem = {
+  async remove(workspaceId: string) {
+    await workspaceSession(workspaceId).removeValue();
+    const latest = await legacySessionItem.getValue();
+    if (latest?.workspace.workspaceId === workspaceId) await legacySessionItem.removeValue();
+  },
   async getValue(workspaceId?: string): Promise<PersistedWorkspaceSession | null> {
     if (!workspaceId) return legacySessionItem.getValue();
     const saved = await workspaceSession(workspaceId).getValue();

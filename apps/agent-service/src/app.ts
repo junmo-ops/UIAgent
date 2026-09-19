@@ -525,11 +525,8 @@ export function createApp(
     .get('/v1/workspaces', c => {
       const rawOffset = Number(c.req.query('offset') ?? 0);
       const rawLimit = Number(c.req.query('limit') ?? 30);
-      const statusValue = c.req.query('status');
-      const status = statusValue === 'trashed' || statusValue === 'all' ? statusValue : 'active';
       const result = workspaceStore.list({
         query: c.req.query('query'),
-        status,
         offset: Number.isInteger(rawOffset) && rawOffset >= 0 ? rawOffset : 0,
         limit: Number.isInteger(rawLimit) && rawLimit > 0 ? rawLimit : 30
       }, c.get('principal'));
@@ -596,21 +593,12 @@ export function createApp(
     })
     .delete('/v1/workspaces/:workspaceId', c => {
       try {
-        const workspace = workspaceStore.trash(c.req.param('workspaceId'));
-        return c.json({ workspaceId: workspace.workspaceId, deletedAt: workspace.deletedAt });
+        const workspaceId = c.req.param('workspaceId');
+        if (workspaceRuns.has(workspaceId)) throw new Error('任务执行期间不能删除副本，请先停止或等待完成');
+        workspaceStore.deleteWorkspace(workspaceId);
+        return c.json({ workspaceId, deleted: true });
       } catch (error) {
-        return c.json({ code: 'WORKSPACE_DELETE_FAILED', message: error instanceof Error ? error.message : '副本移入回收站失败' }, 409);
-      }
-    })
-    .post('/v1/workspaces/:workspaceId/restore', c => {
-      try {
-        const workspace = workspaceStore.restoreWorkspace(c.req.param('workspaceId'));
-        return c.json(sourceWorkspaceInfoSchema.parse({
-          ...workspace,
-          previewUrl: workspacePreviewUrl(workspace.workspaceId, c.req.url, c.get('principal'))
-        }));
-      } catch (error) {
-        return c.json({ code: 'WORKSPACE_RESTORE_FAILED', message: error instanceof Error ? error.message : '副本恢复失败' }, 409);
+        return c.json({ code: 'WORKSPACE_DELETE_FAILED', message: error instanceof Error ? error.message : '副本永久删除失败' }, 409);
       }
     })
     .get('/v1/workspaces/:workspaceId', c => {

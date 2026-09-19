@@ -96,7 +96,6 @@ export interface ManagedSourceWorkspace extends SourceWorkspace {
 
 export interface WorkspaceListOptions {
   query?: string;
-  status?: 'active' | 'trashed' | 'all';
   offset?: number;
   limit?: number;
 }

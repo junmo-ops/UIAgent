@@ -25,7 +25,7 @@ main {
   display: grid;
   place-items: center;
   color: #fff;
-  background: #242424;
+  background: transparent;
   border-radius: 17px;
   font-size: 25px;
 }

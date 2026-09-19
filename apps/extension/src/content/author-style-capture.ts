@@ -112,6 +112,34 @@ export function captureAccessibleAuthorStyles(documentRef: Document = document):
     try {
       const rules = sheet.cssRules;
       const rawCss = Array.from(rules).map(rule => rule.cssText).join('\n');
+      // Observation only: never rewrite a declaration or infer a missing value.
+      // A CSSOM pending-substitution longhand can have an empty value; when
+      // serialized and parsed again it is discarded. Empty custom properties,
+      // on the other hand, are valid and must not be reported as damage.
+      try {
+        let emptyDeclarations = 0;
+        const properties = new Set<string>();
+        const inspect = (list: CSSRuleList) => {
+          for (const rule of Array.from(list)) {
+            const declaration = (rule as CSSStyleRule).style;
+            if (declaration) {
+              for (let index = 0; index < declaration.length; index++) {
+                const property = declaration.item(index);
+                if (property && !property.startsWith('--') && !declaration.getPropertyValue(property).trim()) {
+                  emptyDeclarations++;
+                  if (properties.size < 8) properties.add(property);
+                }
+              }
+            }
+            const nested = (rule as CSSGroupingRule).cssRules;
+            if (nested) inspect(nested);
+          }
+        };
+        inspect(rules);
+        if (emptyDeclarations) missing.push(`${href.slice(0, 1400)}（CSS 导出疑似损失：${emptyDeclarations} 个普通属性值为空；示例：${[...properties].join('、')}。未修改样式）`);
+      } catch {
+        missing.push(`${href.slice(0, 1400)}（CSS 导出损失检查未完成；仍保留原捕获结果）`);
+      }
       const sanitized = sanitizeAuthorCssText(rawCss, sheet.href || sheet.ownerNode?.baseURI || documentRef.baseURI);
       const filteredCount = sanitized.filteredRules;
       if (filteredCount > 0) missing.push(`${href}（过滤 ${filteredCount} 条不安全规则）`);

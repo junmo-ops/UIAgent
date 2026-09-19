@@ -29,9 +29,6 @@ button { cursor: pointer; }
 .search-box span { font-size: 24px; transform: rotate(-15deg); }
 .search-box input { width: 100%; height: 38px; padding: 0; color: #20262a; background: transparent; border: 0; outline: 0; font-size: 13px; }
 .search-box input::placeholder { color: #9ba4aa; }
-.status-switch { display: flex; gap: 4px; padding: 3px; background: #edf0f2; border-radius: 10px; }
-.status-switch button { padding: 0 15px; color: #677178; background: transparent; border: 0; border-radius: 8px; font-size: 12px; }
-.status-switch button.active { color: #172026; background: #fff; box-shadow: 0 2px 8px rgba(31, 40, 46, .08); font-weight: 650; }
 .workspace-transfer-actions { display: flex; align-items: center; gap: 6px; padding-left: 4px; }
 .workspace-transfer-actions button { height: 32px; padding: 0 11px; color: #526067; background: #fff; border: 1px solid #d8dfe2; border-radius: 8px; font-size: 11px; }
 .workspace-transfer-actions button:hover:not(:disabled) { color: #20282d; border-color: #aebcc2; }
@@ -82,8 +79,6 @@ button { cursor: pointer; }
   .archive-count { min-width: 92px; }
   .manager-controls { flex-direction: column; }
   .search-box { min-width: 0; }
-  .status-switch { height: 42px; }
-  .status-switch button { flex: 1; }
   .workspace-grid { grid-template-columns: 1fr; }
 }
 

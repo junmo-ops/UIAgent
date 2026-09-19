@@ -3,7 +3,7 @@ export const logPageHtml = `<!doctype html>
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width,initial-scale=1" />
-  <title>UI Agent 会话日志</title>
+  <title>UI需求助手 · 会话日志</title>
   <style>
     *{box-sizing:border-box}body{margin:0;font:14px/1.5 -apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;color:#182230;background:#f5f7fa}
     header{height:64px;padding:0 24px;display:flex;align-items:center;justify-content:space-between;background:#fff;border-bottom:1px solid #e5e7eb}
@@ -17,7 +17,7 @@ export const logPageHtml = `<!doctype html>
   </style>
 </head>
 <body>
-  <header><div><h1>UI Agent 会话日志</h1><div class="sub">本机调试数据 · 不包含 API Key</div></div><button id="refresh">刷新日志</button></header>
+  <header><div><h1>UI需求助手 · 会话日志</h1><div class="sub">本机调试数据 · 不包含 API Key</div></div><button id="refresh">刷新日志</button></header>
   <div class="layout"><aside><div class="toolbar"><input id="filter" placeholder="筛选会话 ID、指令或状态" /><div class="sub" id="count"></div></div><div id="entries"></div></aside><main id="detail"><div class="empty">选择一条日志查看请求详情</div></main></div>
   <script>
     let logs=[];let selectedId='';

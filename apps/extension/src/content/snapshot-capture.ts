@@ -308,6 +308,30 @@ function bodyContextAttributes(sourceBody: HTMLElement): string {
   return contextAttributes.length ? ` ${contextAttributes.join(' ')}` : '';
 }
 
+/** Keep selector/inheritance context without copying executable attributes.
+ * Body box styles remain on the existing snapshot root: copying padding,
+ * transforms or opacity onto the outer body would apply them twice.
+ */
+function documentContextAttributes(source: HTMLElement, resources: AuthorStyleResource[], body = false): string {
+  const context = document.createElement(source.tagName.toLowerCase());
+  for (const attribute of [...source.attributes]) {
+    const name = attribute.name.toLowerCase();
+    if (['class', 'dir', 'lang'].includes(name) || (!body && name === 'id')
+      || ((name.startsWith('data-') || name.startsWith('aria-')) && !name.startsWith('data-ui-'))) {
+      context.setAttribute(name, attribute.value);
+    }
+  }
+  if (body) {
+    for (const name of [...source.style]) {
+      if (name.startsWith('--')) context.style.setProperty(name, source.style.getPropertyValue(name), source.style.getPropertyPriority(name));
+    }
+  } else if (source.hasAttribute('style')) {
+    context.setAttribute('style', source.getAttribute('style')!);
+  }
+  preserveSafeInlineStyle(context, resources);
+  return [...context.attributes].map(attribute => ` ${attribute.name}="${escapeHtml(attribute.value)}"`).join('');
+}
+
 export function captureStaticSnapshot(sourceRoot: HTMLElement, includeFrozenStyles = false): StaticSnapshot {
   const authorStyles = captureAccessibleAuthorStyles(document);
   const authorStyleSources = Array.from(document.querySelectorAll<HTMLLinkElement>('link[rel~="stylesheet"][href]'))
@@ -316,6 +340,11 @@ export function captureStaticSnapshot(sourceRoot: HTMLElement, includeFrozenStyl
   const cloneRoot = sourceRoot.cloneNode(true) as HTMLElement;
   const registry: StyleRegistry = { rules: new Map(), inlineStyleCharsBefore: 0 };
   const visualResources: AuthorStyleResource[] = [];
+  const htmlContext = includeFrozenStyles ? ' lang="zh-CN"'
+    : documentContextAttributes(document.documentElement, visualResources);
+  const bodyContext = includeFrozenStyles
+    ? (sourceRoot === document.body ? bodyContextAttributes(sourceRoot) : '')
+    : documentContextAttributes(document.body, visualResources, true);
   const pseudoRules = sanitizeTree(sourceRoot, cloneRoot, registry, visualResources, includeFrozenStyles);
   normalizeNestedListItems(cloneRoot);
   authorStyles.resources = [...new Map(
@@ -346,7 +375,7 @@ export function captureStaticSnapshot(sourceRoot: HTMLElement, includeFrozenStyl
     .map(([declaration, className]) => `.${className}{${declaration}}`)
     .join('\n    ');
   const html = `<!doctype html>
-<html lang="zh-CN">
+<html${htmlContext}>
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
@@ -360,7 +389,7 @@ export function captureStaticSnapshot(sourceRoot: HTMLElement, includeFrozenStyl
     ${pseudoRules.join('\n    ')}
   </style>` : ''}
 </head>
-<body data-ui-agent-static-snapshot="true"${sourceRoot === document.body ? bodyContextAttributes(sourceRoot) : ''}>
+<body data-ui-agent-static-snapshot="true"${bodyContext}>
   <main data-ui-agent-snapshot-stage>${renderedRoot.outerHTML}</main>
 </body>
 </html>`;

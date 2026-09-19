@@ -197,7 +197,7 @@ describe('SourceWorkspaceStore', () => {
     expect(store.get(workspace.workspaceId)).toMatchObject({ revision: 0, canUndo: false, canRedo: false });
   });
 
-  it('exports the current active revision and excludes trashed workspaces', () => {
+  it('exports the current revision and excludes deleted workspaces', () => {
     const store = createStore();
     const workspace = store.create(snapshot);
     const exported = store.exportSnapshot(workspace.workspaceId);
@@ -209,7 +209,7 @@ describe('SourceWorkspaceStore', () => {
     expect(exported?.html).toContain('data-ui-agent-workspace-styles');
     const second = store.create({ ...snapshot, title: '第二个副本' });
     expect(store.exportActiveSnapshots()).toHaveLength(2);
-    store.trash(workspace.workspaceId);
+    store.deleteWorkspace(workspace.workspaceId);
     expect(store.exportSnapshot(workspace.workspaceId)).toBeUndefined();
     expect(store.exportActiveSnapshots()).toEqual([expect.objectContaining({ title: second.title })]);
   });
@@ -510,7 +510,7 @@ describe('SourceWorkspaceStore', () => {
     expect(html.indexOf('风险提示')).toBeLessThan(html.indexOf('</main>'));
   });
 
-  it('lists, searches, renames, trashes and restores workspaces', () => {
+  it('lists, searches, renames and deletes workspaces', () => {
     const store = createStore();
     const first = store.create(snapshot);
     const second = store.create({ ...snapshot, title: '结算页副本', sourceUrl: 'https://example.test/checkout' });
@@ -531,15 +531,9 @@ describe('SourceWorkspaceStore', () => {
     });
 
     expect(store.rename(first.workspaceId, '订单筛选方案')).toMatchObject({ title: '订单筛选方案' });
-    expect(store.trash(first.workspaceId).deletedAt).toBeTruthy();
+    store.deleteWorkspace(first.workspaceId);
     expect(store.get(first.workspaceId)).toBeUndefined();
     expect(store.list()).toMatchObject({ total: 1 });
-    expect(store.list({ status: 'trashed' })).toMatchObject({
-      total: 1,
-      items: [expect.objectContaining({ workspaceId: first.workspaceId })]
-    });
-    expect(store.restoreWorkspace(first.workspaceId)).not.toHaveProperty('deletedAt');
-    expect(store.get(first.workspaceId)).toMatchObject({ title: '订单筛选方案' });
   });
 
   it('removes a complete element subtree by source id and refreshes indexes', async () => {

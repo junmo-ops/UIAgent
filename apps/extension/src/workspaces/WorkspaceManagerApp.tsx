@@ -9,8 +9,8 @@ import {
 import { getAgentServiceUrl } from '../service/agent-service-config';
 import { agentServiceFetch } from '../service/agent-service-client';
 import { parseWorkspaceArchiveZip, serializeWorkspaceArchiveZip } from './workspace-archive';
+import { sourceWorkspaceSessionItem } from '../session/source-workspace-session';
 
-type WorkspaceStatus = 'active' | 'trashed';
 type SnapshotDiagnostics = { replicaAEnabled?: boolean; totalChars: number; cssChars: number; cssShare: number; generatedStyleRuleCount: number; generatedStyleShare: number; authorCssChars?: number; authorResourceCount?: number; authorResourceOriginCount?: number; authorRenderOnlyStyleCount?: number; authorResourceFailureCount?: number };
 const PAGE_SIZE = 18;
 
@@ -36,7 +36,6 @@ async function responseError(response: Response, fallback: string): Promise<Erro
 
 export function WorkspaceManagerApp() {
   const [serviceUrl, setServiceUrl] = useState('');
-  const [status, setStatus] = useState<WorkspaceStatus>('active');
   const [query, setQuery] = useState('');
   const [page, setPage] = useState(0);
   const [data, setData] = useState<WorkspaceListResponse>();
@@ -57,7 +56,6 @@ export function WorkspaceManagerApp() {
     setError(undefined);
     try {
       const params = new URLSearchParams({
-        status,
         limit: String(PAGE_SIZE),
         offset: String(page * PAGE_SIZE)
       });
@@ -84,7 +82,7 @@ export function WorkspaceManagerApp() {
     } finally {
       setLoading(false);
     }
-  }, [page, query, serviceUrl, status]);
+  }, [page, query, serviceUrl]);
 
   useEffect(() => {
     const timer = window.setTimeout(() => { void load(); }, 180);
@@ -131,7 +129,7 @@ export function WorkspaceManagerApp() {
       } finally {
         window.setTimeout(() => URL.revokeObjectURL(url), 5_000);
       }
-      setNotice(`已导出 ${archive.workspaces.length} 个副本，未包含回收站。`);
+      setNotice(`已导出 ${archive.workspaces.length} 个副本。`);
       setError(undefined);
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : '一键导出失败');
@@ -180,19 +178,17 @@ export function WorkspaceManagerApp() {
   const visibleCount = data?.items.length ?? 0;
   const emptyCopy = useMemo(() => query.trim()
     ? '没有找到匹配的副本，换个标题或来源地址试试。'
-    : status === 'active'
-      ? '还没有可管理的副本。回到任意页面，从插件创建第一个静态副本。'
-      : '回收站是空的。删除的副本会暂存在这里。', [query, status]);
+    : '还没有可管理的副本。回到任意页面，从插件创建第一个静态副本。', [query]);
 
   return (
     <main className="manager-shell">
       <header className="manager-header">
         <div>
-          <span className="eyebrow">UI AGENT · WORKSPACE ARCHIVE</span>
+          <span className="eyebrow">UI需求助手 · 副本归档</span>
           <h1>副本管理</h1>
           <p>找到、继续或整理每一次页面探索。</p>
         </div>
-        <div className="archive-count"><strong>{data?.total ?? 0}</strong><span>{status === 'active' ? '可用副本' : '回收站'}</span></div>
+        <div className="archive-count"><strong>{data?.total ?? 0}</strong><span>可用副本</span></div>
       </header>
 
       <section className="manager-controls" aria-label="筛选副本">
@@ -200,18 +196,14 @@ export function WorkspaceManagerApp() {
           <span aria-hidden="true">⌕</span>
           <input value={query} onChange={event => { setQuery(event.target.value); setPage(0); }} placeholder="搜索标题或来源地址" />
         </label>
-        <div className="status-switch">
-          <button className={status === 'active' ? 'active' : ''} onClick={() => { setStatus('active'); setPage(0); }}>全部副本</button>
-          <button className={status === 'trashed' ? 'active' : ''} onClick={() => { setStatus('trashed'); setPage(0); }}>回收站</button>
-        </div>
-        {status === 'active' && <div className="workspace-transfer-actions">
+        <div className="workspace-transfer-actions">
           <button disabled={transferBusy || loading || !data?.total} onClick={() => void exportAllWorkspaces()}>导出全部</button>
           <button disabled={transferBusy || loading} onClick={() => importFileRef.current?.click()}>导入备份</button>
           <input ref={importFileRef} hidden type="file" accept=".zip,application/zip" onChange={event => {
             const file = event.target.files?.[0];
             if (file) void importWorkspace(file);
           }} />
-        </div>}
+        </div>
       </section>
 
       {error && <div className="manager-error"><span>{error}</span><button onClick={() => void load()}>重试</button></div>}
@@ -231,7 +223,6 @@ export function WorkspaceManagerApp() {
             {Boolean(diagnostics[workspace.workspaceId]?.authorRenderOnlyStyleCount) && <p className="source-url">部分样式依赖在线加载，离线或原站限制可能导致缺失；资源失败计数不包含这些外链的加载结果。</p>}
             <div className="revision-line"><i /><span>最近修改 {formatTime(workspace.updatedAt)}</span></div>
             <div className="workspace-actions">
-              {status === 'active' ? <>
               <button className="primary" onClick={() => void browser.tabs.create({ url: workspace.previewUrl })}>打开副本</button>
               {diagnostics[workspace.workspaceId]?.replicaAEnabled ? <button onClick={() => {
                 const candidateUrl = new URL(workspace.previewUrl);
@@ -240,13 +231,16 @@ export function WorkspaceManagerApp() {
               }}>查看 A 基线</button> : null}
                 <button disabled={transferBusy} onClick={() => { setRenaming(workspace); setDraftTitle(workspace.title); }}>重命名</button>
                 <button className="danger" onClick={() => {
-                  if (window.confirm(`将“${workspace.title}”移入回收站？`)) {
-                    void mutate(`/v1/workspaces/${workspace.workspaceId}`, { method: 'DELETE' }).catch(cause => setError(cause instanceof Error ? cause.message : '删除失败'));
+                  if (window.confirm(`永久删除“${workspace.title}”？\n副本源码、全部版本和会话将被清除，无法恢复。独立诊断日志及已导出的备份不受影响。`)) {
+                    void mutate(`/v1/workspaces/${workspace.workspaceId}`, { method: 'DELETE' })
+                      .then(async () => {
+                        setNotice('副本已永久删除，无法恢复。');
+                        try { await sourceWorkspaceSessionItem.remove(workspace.workspaceId); }
+                        catch { setError('副本已永久删除，但本机会话缓存清理失败，请重新打开插件。'); }
+                      })
+                      .catch(cause => setError(cause instanceof Error ? cause.message : '删除失败'));
                   }
                 }}>删除</button>
-              </> : <>
-                <button className="primary" onClick={() => void mutate(`/v1/workspaces/${workspace.workspaceId}/restore`, { method: 'POST' }).catch(cause => setError(cause instanceof Error ? cause.message : '恢复失败'))}>恢复副本</button>
-              </>}
             </div>
           </article>
         ))}

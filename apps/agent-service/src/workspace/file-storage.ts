@@ -1,4 +1,4 @@
-import { existsSync, mkdirSync, readFileSync, writeFileSync, renameSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, writeFileSync, renameSync, rmSync, realpathSync, lstatSync } from 'node:fs';
 import { basename, dirname, resolve, sep } from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { refreshWorkspaceIndexes } from './compiler';
@@ -32,6 +32,18 @@ export class WorkspaceFileStorage {
       'outline.json': this.readOptionalFile(resolve(directory, 'outline.json')) ?? generated.outline,
       'source-map.json': this.readOptionalFile(resolve(directory, 'source-map.json')) ?? generated.sourceMap
     };
+  }
+
+  deleteWorkspace(workspaceId: string): void {
+    const directory = this.workspacePath(workspaceId);
+    // Validate the actual target before recursive deletion, including junctions.
+    const root = realpathSync(this.root);
+    const target = realpathSync(directory);
+    if (lstatSync(directory).isSymbolicLink() || dirname(target) !== root || basename(target) !== workspaceId) {
+      throw new Error('副本删除路径越界或包含符号链接');
+    }
+    this.readManifest(directory);
+    rmSync(directory, { recursive: true });
   }
 
   writeWorkspaceFiles(directory: string, files: WorkspaceFiles, atomic = false): void {

@@ -305,9 +305,7 @@ describe('agent service', () => {
       expect(await removed.json()).toMatchObject({ workspaceId: created.workspaceId });
       expect((await app.request(`/v1/workspaces/${created.workspaceId}`)).status).toBe(404);
       expect((await app.request(`/workspaces/${created.workspaceId}/preview`)).status).toBe(404);
-      expect(await (await app.request('/v1/workspaces?status=trashed')).json()).toMatchObject({ total: 1 });
       expect((await app.request('/v1/workspaces/export-all')).status).toBe(409);
-      expect((await app.request(`/v1/workspaces/${created.workspaceId}/restore`, { method: 'POST' })).status).toBe(200);
     } finally {
       rmSync(root, { recursive: true, force: true });
     }

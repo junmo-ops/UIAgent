@@ -312,7 +312,6 @@ export class SourceWorkspaceStore {
     options: WorkspaceListOptions = {},
     owner: WorkspaceOwner = LOCAL_WORKSPACE_OWNER
   ): { items: ManagedSourceWorkspace[]; total: number; offset: number; limit: number } {
-    const status = options.status ?? 'active';
     const query = options.query?.trim().toLocaleLowerCase() ?? '';
     const offset = Math.max(0, options.offset ?? 0);
     const limit = Math.min(100, Math.max(1, options.limit ?? 30));
@@ -324,8 +323,8 @@ export class SourceWorkspaceStore {
         try {
           const manifest = this.storage.readManifest(directory);
           if (!this.manifestBelongsTo(manifest, owner)) return [];
-          if (status === 'active' && manifest.deletedAt) return [];
-          if (status === 'trashed' && !manifest.deletedAt) return [];
+          // Old soft-deleted data stays hidden until explicitly cleaned up.
+          if (manifest.deletedAt) return [];
           if (query && !`${manifest.title}\n${manifest.sourceUrl}`.toLocaleLowerCase().includes(query)) return [];
           return [this.workspaceFromManifest(manifest)];
         } catch {
@@ -351,29 +350,18 @@ export class SourceWorkspaceStore {
     if (!normalized || normalized.length > 200) throw new Error('副本名称长度必须为 1-200 个字符');
     const directory = this.storage.workspacePath(workspaceId);
     const manifest = this.storage.readManifest(directory);
-    if (manifest.deletedAt) throw new Error('回收站中的副本不能重命名');
+    if (manifest.deletedAt) throw new Error('副本已删除');
     const updated = { ...manifest, title: normalized, updatedAt: new Date().toISOString() };
     this.storage.writeManifest(directory, updated);
     return this.workspaceFromManifest(updated);
   }
 
-  trash(workspaceId: string): ManagedSourceWorkspace {
+  deleteWorkspace(workspaceId: string): void {
     if (this.active.has(workspaceId)) throw new Error('Agent 修改执行期间不能删除副本');
     const directory = this.storage.workspacePath(workspaceId);
-    const manifest = this.storage.readManifest(directory);
-    const deletedAt = manifest.deletedAt ?? new Date().toISOString();
-    const updated = { ...manifest, deletedAt, updatedAt: deletedAt };
-    this.storage.writeManifest(directory, updated);
-    return this.workspaceFromManifest(updated);
-  }
-
-  restoreWorkspace(workspaceId: string): ManagedSourceWorkspace {
-    const directory = this.storage.workspacePath(workspaceId);
-    const manifest = this.storage.readManifest(directory);
-    const { deletedAt: _deletedAt, ...retained } = manifest;
-    const updated = { ...retained, updatedAt: new Date().toISOString() };
-    this.storage.writeManifest(directory, updated);
-    return this.workspaceFromManifest(updated);
+    this.storage.deleteWorkspace(workspaceId);
+    this.evictSheetCache(resolve(directory, 'author-sheets.json'));
+    this.resourceLoadFailures.delete(workspaceId);
   }
 
   html(workspaceId: string): string | undefined {
