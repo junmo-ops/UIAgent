@@ -63,7 +63,8 @@ class InstallationTokenAuthenticator implements Authenticator {
     private readonly secret: string,
     private readonly tenantId: string,
     private readonly accessTtlSeconds: number,
-    private readonly previewTtlSeconds: number
+    private readonly previewTtlSeconds: number,
+    private readonly adminUserIds: ReadonlySet<string>
   ) {}
 
   authenticate(request: Request): AuthPrincipal | undefined {
@@ -76,8 +77,7 @@ class InstallationTokenAuthenticator implements Authenticator {
     if (previewClaims?.kind !== 'preview' || !previewClaims.workspaceId) return undefined;
     const previewBasePath = `/workspaces/${previewClaims.workspaceId}/`;
     const previewPath = url.pathname.slice(previewBasePath.length);
-    const candidatePreviewPath = /^candidates\/[0-9a-f-]{36}\/versions\/\d+\/(?:preview|author-overrides\.css|module\.js)$/i.test(previewPath);
-    if (!candidatePreviewPath && !['preview', 'author.css', 'author-overrides.css', 'replica-runtime.js', 'module.js'].includes(previewPath) && !previewPath.startsWith('assets/') && !previewPath.startsWith('author-sheets/')) return undefined;
+    if (!['preview', 'author.css', 'author-overrides.css', 'replica-runtime.js', 'module.js'].includes(previewPath) && !previewPath.startsWith('assets/') && !previewPath.startsWith('author-sheets/')) return undefined;
     return this.principal(previewClaims);
   }
 
@@ -124,8 +124,7 @@ class InstallationTokenAuthenticator implements Authenticator {
     return {
       userId: claims.subject,
       tenantId: claims.tenantId,
-      // Demo 阶段安装身份同时允许访问日志；正式权限模型上线后统一替换。
-      roles: ['user', 'admin'],
+      roles: this.adminUserIds.has(claims.subject) ? ['user', 'admin'] : ['user'],
       identityType: 'installation'
     };
   }
@@ -182,7 +181,8 @@ export function createAuthenticatorFromEnvironment(env: NodeJS.ProcessEnv): Auth
       secret,
       normalizedIdentity(env.INSTALLATION_TENANT_ID, 'internal-pilot'),
       positiveSeconds(env.INSTALLATION_TOKEN_TTL_SECONDS, 365 * 24 * 60 * 60),
-      positiveSeconds(env.PREVIEW_TOKEN_TTL_SECONDS, 7 * 24 * 60 * 60)
+      positiveSeconds(env.PREVIEW_TOKEN_TTL_SECONDS, 7 * 24 * 60 * 60),
+      new Set((env.INSTALLATION_ADMIN_USER_IDS ?? '').split(',').map(value => value.trim()).filter(Boolean))
     );
   }
 

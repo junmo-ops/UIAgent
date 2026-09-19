@@ -1,7 +1,7 @@
-import { lazy, Suspense, useEffect, useState } from 'react';
+import { useEffect, useState } from 'react';
 import type { SourceTurnTranscript } from '@ui-agent/contracts';
+import { MarkdownMessage } from './MarkdownMessage';
 
-const MarkdownMessage = lazy(() => import('./MarkdownMessage').then(module => ({ default: module.MarkdownMessage })));
 const skipLabels = {
   read_budget: '已达到读取额度',
   duplicate_read: '已有相同查询结果',
@@ -30,7 +30,7 @@ export function SourceTurnProgressCard({ progress }: { progress: SourceTurnTrans
     {progress.timelineTruncated && <p className="agent-activity-status">仅显示最近的过程，完整技术记录可在日志中查看。</p>}
     {timeline.map(item => item.kind === 'commentary'
       ? <div key={item.id} className="agent-activity-narration">
-          <Suspense fallback={<span>{item.text}</span>}><MarkdownMessage text={item.text} /></Suspense>
+          <MarkdownMessage text={item.text} />
         </div>
       : <div key={item.id} className={`agent-activity-tool is-${item.status}`}>
           {item.status === 'failed' || item.status === 'blocked'
@@ -45,10 +45,10 @@ export function SourceTurnProgressCard({ progress }: { progress: SourceTurnTrans
         </div>)}
   </div>;
   const uncertain = !active && (progress.status === 'failed' || progress.status === 'cancelled'
-    || progress.saveState === 'draft' || progress.saveState === 'unconfirmed');
+    || progress.saveState === 'unconfirmed');
   const saveMessage = progress.saveState === 'saved' ? '已保存的修改仍保留。'
     : progress.saveState === 'unchanged' || progress.saveState === 'not_started' ? '本轮未保存新版本。'
-      : progress.saveState === 'draft' ? '草稿尚未发布。' : '保存状态尚未确认，请检查当前副本。';
+      : '保存状态尚未确认，请检查当前副本。';
   return <section className="agent-activity" aria-label="本轮处理过程">
     {active ? <>
       {hasProcess && <><div className="agent-activity-heading">已处理 {duration}</div>{content}</>}
@@ -56,7 +56,7 @@ export function SourceTurnProgressCard({ progress }: { progress: SourceTurnTrans
         {progress.status === 'cancelling' ? '正在停止…'
           : progress.execution === 'tool' && timeline.at(-1)?.status === 'running' ? null
             : progress.execution === 'model' && progress.message.includes('繁忙') ? '服务繁忙，等待重试…'
-              : progress.saveState === 'draft' ? progress.message : '正在思考…'}
+              : '正在思考…'}
       </div>
     </> : hasProcess && <details className="agent-activity-disclosure">
       <summary>用时 {duration}<svg className="agent-activity-chevron" viewBox="0 0 16 16" aria-hidden="true"><path d="m6 4 4 4-4 4" /></svg></summary>

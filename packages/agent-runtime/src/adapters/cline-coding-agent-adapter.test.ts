@@ -48,13 +48,11 @@ async function declareIntent(config: ClineAgentFactoryInput, iteration: number):
     relevantSourceIds: string[];
     verificationSourceIds: string[];
     visualConstraints: string[];
-    renderConstraintIndexes: number[];
   }>(config, 'declare_intent').execute({
     summary: '按用户要求修改选中元素',
     relevantSourceIds: ['source-0'],
     verificationSourceIds: ['source-0'],
-    visualConstraints: ['目标元素可见且未被裁切', '保持无关结构和样式不变'],
-    renderConstraintIndexes: [1]
+    visualConstraints: ['目标元素可见且未被裁切', '保持无关结构和样式不变']
   }, context(iteration));
 }
 

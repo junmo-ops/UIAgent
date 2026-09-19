@@ -2,12 +2,8 @@ import { appendFileSync, existsSync, mkdirSync, readFileSync, renameSync, statSy
 import { dirname, resolve } from 'node:path';
 import { toolCallStatistics, type ToolCallStatistics } from '@ui-agent/agent-runtime';
 import type {
-  CandidatePublishResult,
-  CandidateRepair,
   SourceTurnRequest,
   SourceTurnResponse,
-  ValidationRecord,
-  WorkspaceCandidate
 } from '@ui-agent/contracts';
 import type {
   CodingAgentStep,
@@ -28,12 +24,6 @@ export interface TurnLogEntry {
   codingAgent?: { adapterId: string; checkpoint: CodingAgentCheckpoint };
   sourceSteps?: CodingAgentStep[];
   toolStatistics?: ToolCallStatistics;
-  candidateValidation?: {
-    validation: ValidationRecord;
-    publication?: CandidatePublishResult;
-    repair?: CandidateRepair;
-  };
-  candidateValidationHistory?: Array<NonNullable<TurnLogEntry['candidateValidation']>>;
   error?: string;
   durationMs?: number;
 }
@@ -142,35 +132,6 @@ export class TurnLogStore {
     this.trim();
     this.persist(entry);
     console.info(`[agent-log] ${entry.status} source-workspace=${workspaceId} turn=${request.turnId} durationMs=${durationMs}`);
-  }
-
-  recordCandidateValidation(
-    candidate: WorkspaceCandidate,
-    validation: ValidationRecord,
-    publication?: CandidatePublishResult,
-    repair?: CandidateRepair
-  ): void {
-    let index = -1;
-    for (let cursor = this.entries.length - 1; cursor >= 0; cursor -= 1) {
-      const entry = this.entries[cursor]!;
-      if (entry.result?.kind !== 'draft') continue;
-      if (entry.result.candidate.workspaceId !== candidate.workspaceId
-        || entry.result.candidate.candidateId !== candidate.candidateId) continue;
-      index = cursor;
-      break;
-    }
-    if (index < 0) return;
-    const updated: TurnLogEntry = {
-      ...this.entries[index]!,
-      updatedAt: new Date().toISOString(),
-      candidateValidation: { validation, ...(publication ? { publication } : {}), ...(repair ? { repair } : {}) },
-      candidateValidationHistory: [
-        ...(this.entries[index]!.candidateValidationHistory ?? []),
-        { validation, ...(publication ? { publication } : {}), ...(repair ? { repair } : {}) }
-      ]
-    };
-    this.entries[index] = updated;
-    this.persist(updated);
   }
 
   private load(): void {

@@ -1,26 +1,10 @@
 import type {
-  CandidateObservation,
   DomOperation,
   SourceTurnRequest,
   SourceTurnResponse,
-  ValidationCheckResult,
-  WorkspaceCandidate,
-  WorkspaceIntent
 } from '@ui-agent/contracts';
 
-export interface GeometryVerificationInput {
-  candidate: WorkspaceCandidate;
-  intent: WorkspaceIntent;
-  observation: CandidateObservation;
-}
-
-export interface GeometryVerificationResult {
-  constraintResults: ValidationCheckResult[];
-  warnings: string[];
-}
-
 export interface CodingWorkspaceTools {
-  readonly submissionMode?: 'direct' | 'candidate';
   listFiles(): Promise<Array<{ path: string; chars: number }>>;
   /**
    * Query the compact, system-maintained workspace structure before falling
@@ -71,7 +55,6 @@ export interface CodingWorkspaceTools {
   commit(summary: string, options?: { allowNoChanges?: boolean }): Promise<{
     revision: number;
     changed: boolean;
-    candidate?: WorkspaceCandidate;
   }>;
   rollback(): Promise<void>;
 }
@@ -108,7 +91,7 @@ export interface CodingAgentStep {
 export interface CodingAgentCheckpoint {
   runtime?: import('../../vendor/ui-agent-runtime/index.js').AgentRunDiagnostics;
   lifecycle?: {
-    submissionMode: 'direct' | 'candidate';
+    submissionMode: 'direct';
     intentDeclared: boolean;
     spatialScopeValidated: boolean;
     completionAttempts: number;
@@ -133,7 +116,7 @@ export interface CodingAgentCheckpoint {
 
 export type CodingAgentEvent =
   | { type: 'coding-agent.commentary'; timestamp: string; modelCall: number; text: string }
-  | { type: 'coding-agent.persistence.updated'; timestamp: string; state: 'saved' | 'draft' | 'unchanged'; revision: number }
+  | { type: 'coding-agent.persistence.updated'; timestamp: string; state: 'saved' | 'unchanged'; revision: number }
   | { type: 'coding-agent.model.updated'; timestamp: string; call: import('@ui-agent/contracts').ModelCallProgress }
   | { type: 'coding-agent.tool.started'; timestamp: string; action: string; modelCall: number; toolCallId?: string }
   | {
@@ -180,9 +163,4 @@ export interface CodingAgentPort {
     observe?: CodingAgentObserver,
     signal?: AbortSignal
   ): Promise<CodingAgentRunResult>;
-  /**
-   * Optional while older adapters are being retired.  Implementations receive
-   * structured browser geometry only; screenshots are deliberately excluded.
-   */
-  verifyGeometry?(input: GeometryVerificationInput, signal?: AbortSignal): Promise<GeometryVerificationResult>;
 }

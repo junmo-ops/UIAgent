@@ -4,16 +4,16 @@ import { validateWorkspaceFiles } from './workspace-validation';
 import { renderWorkspacePreview } from './preview';
 import { createEditingSession } from './editing-session';
 import { WorkspaceFileStorage } from './file-storage';
-import { WORKSPACE_FILES, type WorkspaceFiles, type CapturedLayoutIndex, LAYOUT_INDEX_FILE, type CandidateManifest, type WorkspaceManifest, type SourceWorkspace, type WorkspaceOwner, LOCAL_WORKSPACE_OWNER, type ManagedSourceWorkspace, type WorkspaceListOptions, type SourceWorkspaceStoreOptions } from './workspace-types';
+import { type WorkspaceFiles, type CapturedLayoutIndex, LAYOUT_INDEX_FILE, type WorkspaceManifest, type SourceWorkspace, type WorkspaceOwner, LOCAL_WORKSPACE_OWNER, type ManagedSourceWorkspace, type WorkspaceListOptions, type SourceWorkspaceStoreOptions } from './workspace-types';
 import { compileModuleSource } from './module-compiler';
 import { validateAuthorCss, cssImportSources, validateHtml, validateCss } from './source-validation';
-import { escapeHtmlAttribute, extractCapturedLayoutIndex } from './source-document';
+import { extractCapturedLayoutIndex } from './source-document';
 import { existsSync, mkdirSync, readFileSync, readdirSync, statSync } from 'node:fs';
 import { resolve } from 'node:path';
-import { createHash, randomUUID } from 'node:crypto';
+import { randomUUID } from 'node:crypto';
 
 import { type CodingAgentConversationTurn, type CodingWorkspaceTools } from '@ui-agent/agent-runtime';
-import { PROTOCOL_VERSION, staticSnapshotSchema, authorStyleCaptureSchema, authorStyleSheetSchema, candidateObservationRequestSchema, candidateGeometryValidationRequestSchema, renderArtifactRequestSchema, workspaceIntentSchema, validationRecordRequestSchema, candidatePublishRequestSchema, type AuthorStyleCapture, type AuthorStyleResource, type AuthorStyleSheet, type StaticSnapshot, type WorkspaceCandidate, type CandidateObservation, type RenderArtifact, type LiveWorkspaceObservation, type WorkspaceIntent, type ValidationRecord, type CandidatePublishResult, type SourceTurnRequest, type SourceTurnResponse, type WorkspaceChatEntry } from '@ui-agent/contracts';
+import { PROTOCOL_VERSION, staticSnapshotSchema, authorStyleCaptureSchema, authorStyleSheetSchema, type AuthorStyleCapture, type AuthorStyleResource, type AuthorStyleSheet, type StaticSnapshot, type SourceTurnRequest, type SourceTurnResponse, type WorkspaceChatEntry } from '@ui-agent/contracts';
 import { compileSourceWorkspace, refreshWorkspaceIndexes } from './compiler';
 
 import { diagnoseSnapshotPackage, type SnapshotDiagnostics } from './snapshot-diagnostics';
@@ -21,7 +21,7 @@ import { diagnoseSnapshotPackage, type SnapshotDiagnostics } from './snapshot-di
 export class SourceWorkspaceStore {
   private readonly storage: WorkspaceFileStorage;
   private readonly history: WorkspaceRevisionHistory;
-  private readonly root: string;
+  readonly root: string;
   private readonly identityIsolation: boolean;
   private readonly frozenStyleVariantEnabled: boolean;
   private readonly active = new Set<string>();
@@ -439,402 +439,10 @@ export class SourceWorkspaceStore {
       .map(item => item.snapshot);
   }
 
-  createCandidate(workspaceId: string, baseRevision?: number, conversationId = workspaceId): WorkspaceCandidate {
-    this.assertConversation(workspaceId, conversationId);
-    const workspace = this.get(workspaceId);
-    if (!workspace) throw new Error('静态源码工作区不存在');
-    if (this.active.has(workspaceId)) throw new Error('当前工作区已有正在执行的修改，不能创建候选');
-    const revision = baseRevision ?? workspace.revision;
-    const sourceDirectory = resolve(this.storage.workspacePath(workspaceId), 'revisions', String(revision).padStart(3, '0'));
-    if (revision < 0 || !existsSync(resolve(sourceDirectory, 'index.html'))) throw new Error('候选基线版本不存在');
-    const files = this.storage.readWorkspaceFiles(sourceDirectory);
-    validateWorkspaceFiles(files);
-    const candidateId = randomUUID();
-    const candidateDirectory = resolve(this.storage.workspacePath(workspaceId), 'candidates', candidateId, 'versions', '000');
-    mkdirSync(candidateDirectory, { recursive: true, mode: 0o700 });
-    this.storage.writeWorkspaceFiles(candidateDirectory, files);
-    const hasAuthorRules = this.hasAuthorRuleCandidate(workspaceId);
-    if (!hasAuthorRules && !this.frozenStyleVariantEnabled) {
-      throw new Error('当前副本没有可用的 B 方案样式资源，已禁用 A 方案兜底');
-    }
-    const manifest: CandidateManifest = {
-      conversationId,
-      workspaceId,
-      baseRevision: revision,
-      candidateId,
-      candidateVersion: 0,
-      contentHash: this.contentHash(workspaceId, files),
-      renderMode: hasAuthorRules ? 'B' : 'A',
-      createdAt: new Date().toISOString(),
-      status: 'active',
-      repairAttempts: 0
-    };
-    this.storage.atomicWrite(resolve(this.storage.workspacePath(workspaceId), 'candidates', candidateId, 'manifest.json'), JSON.stringify(manifest, null, 2));
-    return manifest;
-  }
-
-  candidate(workspaceId: string, candidateId: string, candidateVersion: number): CandidateManifest | undefined {
-    if (!this.get(workspaceId) || !this.isSafeCandidateId(candidateId) || !Number.isSafeInteger(candidateVersion) || candidateVersion < 0) return undefined;
-    const root = resolve(this.storage.workspacePath(workspaceId), 'candidates', candidateId);
-    const raw = this.storage.readOptionalFile(resolve(root, 'manifest.json'));
-    if (!raw) return undefined;
-    try {
-      const parsed = JSON.parse(raw) as Partial<CandidateManifest>;
-      // Candidates created before renderMode became part of the immutable
-      // document identity remain usable as the conservative frozen-style mode.
-      const manifest: CandidateManifest = {
-        ...parsed,
-        renderMode: parsed.renderMode === 'B' ? 'B' : 'A',
-        repairAttempts: Number.isSafeInteger(parsed.repairAttempts) && (parsed.repairAttempts ?? 0) >= 0
-          ? parsed.repairAttempts!
-          : 0
-      } as CandidateManifest;
-      if (manifest.workspaceId !== workspaceId || manifest.candidateId !== candidateId || manifest.candidateVersion !== candidateVersion) return undefined;
-      const files = this.storage.readWorkspaceFiles(resolve(root, 'versions', String(candidateVersion).padStart(3, '0')));
-      if (this.contentHash(workspaceId, files) !== manifest.contentHash) return undefined;
-      return manifest;
-    } catch {
-      return undefined;
-    }
-  }
-
-  /**
-   * Reserve one repair budget before asking the model to change a candidate.
-   * The reservation is durable so retries, duplicate requests, or a process
-   * failure cannot create an unbounded correction loop.
-   */
-  reserveCandidateRepair(workspaceId: string, candidateId: string, candidateVersion: number, maxAttempts = 2): { candidate: CandidateManifest; attempt: number } | undefined {
-    const candidate = this.candidate(workspaceId, candidateId, candidateVersion);
-    if (!candidate || candidate.status !== 'active') return undefined;
-    const path = resolve(this.storage.workspacePath(workspaceId), 'candidates', candidateId, 'manifest.json');
-    const raw = this.storage.readOptionalFile(path);
-    if (!raw) return undefined;
-    try {
-      const manifest = JSON.parse(raw) as CandidateManifest;
-      const attempts = Number.isSafeInteger(manifest.repairAttempts) && manifest.repairAttempts >= 0
-        ? manifest.repairAttempts
-        : 0;
-      if (attempts >= maxAttempts) return undefined;
-      const nextAttempt = attempts + 1;
-      this.storage.atomicWrite(path, JSON.stringify({ ...manifest, repairAttempts: nextAttempt }, null, 2));
-      return { candidate, attempt: nextAttempt };
-    } catch {
-      return undefined;
-    }
-  }
-
-  /**
-   * Persist a complete, validated next candidate version. The caller must have
-   * produced `files` through controlled workspace tools; this method owns the
-   * compare-and-swap and is the single point that invalidates prior evidence.
-   */
-  updateCandidateFiles(workspaceId: string, candidateId: string, expectedVersion: number, files: WorkspaceFiles): WorkspaceCandidate {
-    const current = this.candidate(workspaceId, candidateId, expectedVersion);
-    if (!current || current.status !== 'active') throw new Error('候选版本已变化，拒绝写入');
-    validateWorkspaceFiles(files);
-    const nextVersion = expectedVersion + 1;
-    const root = resolve(this.storage.workspacePath(workspaceId), 'candidates', candidateId);
-    const destination = resolve(root, 'versions', String(nextVersion).padStart(3, '0'));
-    if (existsSync(destination)) throw new Error('候选下一版本已存在，拒绝覆盖');
-    this.storage.writeWorkspaceFiles(destination, files);
-    const next: CandidateManifest = {
-      ...current,
-      candidateVersion: nextVersion,
-      contentHash: this.contentHash(workspaceId, files),
-      createdAt: new Date().toISOString(),
-      status: 'active',
-      repairAttempts: (current as CandidateManifest).repairAttempts ?? 0
-    };
-    this.storage.atomicWrite(resolve(root, 'manifest.json'), JSON.stringify(next, null, 2));
-    return next;
-  }
-
-  candidatePreviewHtml(
-    workspaceId: string,
-    candidateId: string,
-    candidateVersion: number,
-    assetQuery = '',
-    workspaceAssetPath = '',
-    candidateAssetPath = workspaceAssetPath
-  ): string | undefined {
-    const manifest = this.candidate(workspaceId, candidateId, candidateVersion);
-    if (!manifest || manifest.status !== 'active') return undefined;
-    if (manifest.renderMode === 'A' && !this.frozenStyleVariantEnabled) return undefined;
-    const files = this.storage.readWorkspaceFiles(resolve(this.storage.workspacePath(workspaceId), 'candidates', candidateId, 'versions', String(candidateVersion).padStart(3, '0')));
-    const preview = this.previewHtmlFromFiles(workspaceId, files, manifest.renderMode, assetQuery, workspaceAssetPath, candidateAssetPath);
-    if (!preview) return undefined;
-    const marker = `<meta name="ui-agent-document-ref" data-workspace-id="${escapeHtmlAttribute(manifest.workspaceId)}" data-candidate-id="${escapeHtmlAttribute(manifest.candidateId)}" data-candidate-version="${manifest.candidateVersion}" data-content-hash="${escapeHtmlAttribute(manifest.contentHash)}" data-render-mode="${manifest.renderMode}">`;
-    return /<\/head>/i.test(preview) ? preview.replace(/<\/head>/i, `${marker}\n</head>`) : `${marker}\n${preview}`;
-  }
-
-  candidateAuthorOverrides(workspaceId: string, candidateId: string, candidateVersion: number): string | undefined {
-    const manifest = this.candidate(workspaceId, candidateId, candidateVersion);
-    if (!manifest || manifest.status !== 'active') return undefined;
-    const css = this.storage.readOptionalFile(resolve(
-      this.storage.workspacePath(workspaceId), 'candidates', candidateId, 'versions', String(candidateVersion).padStart(3, '0'), 'author-overrides.css'
-    ));
-    if (css === undefined) return undefined;
-    validateCss(css);
-    return css;
-  }
-
   moduleJavaScript(workspaceId: string): string | undefined {
     if (!this.get(workspaceId)) return undefined;
     const directory = this.storage.workspacePath(workspaceId);
     return readFileSync(resolve(directory, 'module.js'), 'utf8');
-  }
-
-  candidateModuleJavaScript(workspaceId: string, candidateId: string, candidateVersion: number): string | undefined {
-    const manifest = this.candidate(workspaceId, candidateId, candidateVersion);
-    if (!manifest || manifest.status !== 'active') return undefined;
-    const directory = resolve(
-      this.storage.workspacePath(workspaceId),
-      'candidates', candidateId, 'versions', String(candidateVersion).padStart(3, '0')
-    );
-    return readFileSync(resolve(directory, 'module.js'), 'utf8');
-  }
-
-  recordCandidateObservation(input: unknown): CandidateObservation {
-    const request = candidateObservationRequestSchema.parse(input);
-    const candidate = this.candidate(request.workspaceId, request.candidateId, request.candidateVersion);
-    if (!candidate || candidate.status !== 'active') throw new Error('候选版本不存在或已失效');
-    if (candidate.baseRevision !== request.baseRevision || candidate.contentHash !== request.contentHash || candidate.renderMode !== request.renderMode) {
-      throw new Error('候选版本已变化，拒绝写入过期观察结果');
-    }
-    const observation: CandidateObservation = {
-      ...request,
-      observationId: randomUUID(),
-      recordedAt: new Date().toISOString()
-    };
-    const directory = resolve(this.storage.workspacePath(request.workspaceId), 'candidates', request.candidateId, 'observations');
-    mkdirSync(directory, { recursive: true, mode: 0o700 });
-    this.storage.atomicWrite(resolve(directory, `${observation.observationId}.json`), JSON.stringify(observation));
-    return observation;
-  }
-
-  recordIntent(workspaceId: string, candidateId: string, candidateVersion: number, input: unknown): WorkspaceIntent {
-    const intent = workspaceIntentSchema.parse(input);
-    const candidate = this.candidate(workspaceId, candidateId, candidateVersion);
-    if (!candidate || candidate.status !== 'active') throw new Error('候选版本不存在或已失效');
-    const directory = resolve(this.storage.workspacePath(workspaceId), 'candidates', candidateId, 'intents');
-    mkdirSync(directory, { recursive: true, mode: 0o700 });
-    const path = resolve(directory, `${intent.intentId}.json`);
-    const existing = this.storage.readOptionalFile(path);
-    if (existing) {
-      // Intent identifiers are immutable audit references.  Retrying the same
-      // request is safe; replacing its contents after evidence was collected
-      // is not.
-      try {
-        const parsed = workspaceIntentSchema.parse(JSON.parse(existing));
-        if (JSON.stringify(parsed) === JSON.stringify(intent)) return parsed;
-      } catch {
-        // A malformed existing record must not be overwritten either.
-      }
-      throw new Error('同一 intentId 已记录为不同内容，拒绝覆盖审计意图');
-    }
-    this.storage.atomicWrite(path, JSON.stringify(intent));
-    return intent;
-  }
-
-  geometryVerificationContext(input: unknown): { candidate: WorkspaceCandidate; intent: WorkspaceIntent; observation: CandidateObservation } {
-    const request = candidateGeometryValidationRequestSchema.parse(input);
-    const candidate = this.candidate(request.workspaceId, request.candidateId, request.candidateVersion);
-    if (!candidate || candidate.status !== 'active' || candidate.baseRevision !== request.baseRevision
-      || candidate.contentHash !== request.contentHash || candidate.renderMode !== request.renderMode) {
-      throw new Error('候选版本已变化，拒绝启动几何验证');
-    }
-    const intent = this.readCandidateIntent(request.workspaceId, request.candidateId, request.intentId);
-    if (!intent || intent.version !== request.intentVersion) throw new Error('几何验证引用的需求意图不存在、来自旧协议或版本不匹配；请重新规划候选');
-    const observation = this.readCandidateJson<CandidateObservation>(request.workspaceId, request.candidateId, 'observations', request.candidateObservationId);
-    if (!observation || observation.baseRevision !== request.baseRevision || observation.candidateVersion !== request.candidateVersion
-      || observation.contentHash !== request.contentHash || observation.renderMode !== request.renderMode) {
-      throw new Error('几何验证引用的候选观察不存在或版本不匹配');
-    }
-    return { candidate, intent, observation };
-  }
-
-  recordValidation(input: unknown): ValidationRecord {
-    const request = validationRecordRequestSchema.parse(input);
-    const candidate = this.candidate(request.workspaceId, request.candidateId, request.candidateVersion);
-    if (!candidate || candidate.status !== 'active' || candidate.baseRevision !== request.baseRevision
-      || candidate.contentHash !== request.contentHash || candidate.renderMode !== request.renderMode) {
-      throw new Error('候选版本已变化，拒绝写入过期验证');
-    }
-    const intent = this.readCandidateIntent(request.workspaceId, request.candidateId, request.intentId);
-    if (!intent || intent.version !== request.intentVersion) throw new Error('验证引用的需求意图不存在、来自旧协议或版本不匹配；请重新规划候选');
-    const observation = this.readCandidateJson<CandidateObservation>(request.workspaceId, request.candidateId, 'observations', request.candidateObservationId);
-    if (!observation || observation.baseRevision !== request.baseRevision || observation.candidateVersion !== request.candidateVersion
-      || observation.contentHash !== request.contentHash || observation.renderMode !== request.renderMode) {
-      throw new Error('验证引用的候选观察不存在或版本不匹配');
-    }
-    const files = this.storage.readWorkspaceFiles(resolve(this.storage.workspacePath(request.workspaceId), 'candidates', request.candidateId, 'versions', String(request.candidateVersion).padStart(3, '0')));
-    let staticOk = false;
-    let staticMessage = '';
-    try {
-      validateWorkspaceFiles(files);
-      staticOk = true;
-      staticMessage = 'HTML、CSS、结构与资源引用校验通过';
-    } catch (error) {
-      staticMessage = error instanceof Error ? error.message : '静态校验失败';
-    }
-    const visualArtifacts = request.visualReview?.artifactIds ?? [];
-    const visualOk = !request.policy.visualRequired || (request.visualReview?.status === 'passed'
-      && Boolean(observation.screenshotArtifactId)
-      && visualArtifacts.includes(observation.screenshotArtifactId!)
-      && visualArtifacts.every(artifactId => this.candidateArtifactMatches(request, artifactId)));
-    const results = new Map(request.constraintResults.map(item => [item.id, item]));
-    const requiredResultPassed = (id: string) => {
-      const result = results.get(id);
-      return Boolean(result?.required && result.status === 'passed' && result.observationId === observation.observationId);
-    };
-    // The names are deliberately derived from durable intent data, rather than
-    // from page classes or natural-language keywords.  A verifier must provide
-    // one observation-backed result for each declared target and constraint.
-    const expectedSourceChecks = intent.sourceIds.map(sourceId => `source:${sourceId}`);
-    const expectedConstraintChecks = intent.renderConstraintIndexes.map(index => `constraint:${index}`);
-    const intentCoverageOk = expectedSourceChecks.concat(expectedConstraintChecks).every(requiredResultPassed);
-    // A target may intentionally disappear (for example, "remove this
-    // banner").  Its source result is still required and must cite this
-    // observation, but presence itself is decided by the declared constraint
-    // rather than imposed as a universal invariant here.
-    const readiness = observation.observation.readiness;
-    const renderReady = readiness.layoutStable && readiness.fonts === 'ready'
-      && readiness.images.failed === 0 && readiness.images.ready >= readiness.images.total;
-    const requiredOk = request.constraintResults.filter(item => item.required).every(item => item.status === 'passed');
-    const hasUnknown = request.constraintResults.some(item => item.required && item.status === 'unknown')
-      || (request.policy.visualRequired && (request.visualReview?.status === 'unknown' || !request.visualReview));
-    const overall = staticOk && request.staticChecks.status === 'passed' && requiredOk && intentCoverageOk
-      && renderReady && visualOk
-      ? 'passed' as const
-      : hasUnknown ? 'unverifiable' as const : 'failed' as const;
-    const record: ValidationRecord = {
-      ...request,
-      staticChecks: {
-        status: staticOk ? request.staticChecks.status : 'failed',
-        message: `${request.staticChecks.message}\n${staticMessage}\n意图覆盖=${intentCoverageOk}；渲染就绪=${renderReady}`.slice(0, 4_000)
-      },
-      validationId: randomUUID(),
-      overall,
-      recordedAt: new Date().toISOString()
-    };
-    const directory = resolve(this.storage.workspacePath(request.workspaceId), 'candidates', request.candidateId, 'validations');
-    mkdirSync(directory, { recursive: true, mode: 0o700 });
-    this.storage.atomicWrite(resolve(directory, `${record.validationId}.json`), JSON.stringify(record));
-    return record;
-  }
-
-  publishCandidate(input: unknown): CandidatePublishResult {
-    const request = candidatePublishRequestSchema.parse(input);
-    const candidate = this.candidate(request.workspaceId, request.candidateId, request.candidateVersion);
-    if (!candidate || candidate.status !== 'active' || candidate.baseRevision !== request.baseRevision
-      || candidate.contentHash !== request.contentHash || candidate.renderMode !== request.renderMode) throw new Error('候选版本已变化，拒绝发布');
-    const commit = this.readCandidateJson<CandidatePublishResult>(request.workspaceId, request.candidateId, 'commits', request.commitId);
-    if (commit) return commit;
-    const validation = this.readCandidateJson<ValidationRecord>(request.workspaceId, request.candidateId, 'validations', request.validationId);
-    if (!validation || validation.overall !== 'passed' || validation.baseRevision !== request.baseRevision
-      || validation.candidateVersion !== request.candidateVersion || validation.contentHash !== request.contentHash
-      || validation.renderMode !== request.renderMode) throw new Error('没有可用于发布的通过验证记录');
-    const intent = this.readCandidateIntent(request.workspaceId, request.candidateId, validation.intentId);
-    if (!intent || intent.version !== validation.intentVersion || intent.sourceIds.length === 0 || intent.constraints.length === 0) {
-      throw new Error('通过验证记录引用的需求意图不存在、不完整或版本不匹配');
-    }
-    const files = this.storage.readWorkspaceFiles(resolve(this.storage.workspacePath(request.workspaceId), 'candidates', request.candidateId, 'versions', String(request.candidateVersion).padStart(3, '0')));
-    const commitsDirectory = resolve(this.storage.workspacePath(request.workspaceId), 'candidates', request.candidateId, 'commits');
-    mkdirSync(commitsDirectory, { recursive: true, mode: 0o700 });
-    const pendingPath = resolve(commitsDirectory, `${request.commitId}.pending.json`);
-    const pending = this.storage.readOptionalFile(pendingPath);
-    if (!pending) {
-      // Persist the idempotency identity before changing the formal document.
-      // If the process stops after commitWorkingCopy, a retry can recover the
-      // receipt from the already-written revision instead of committing again.
-      this.storage.atomicWrite(pendingPath, JSON.stringify({ request, preparedAt: new Date().toISOString() }));
-    }
-    const manifest = this.storage.readManifest(this.storage.workspacePath(request.workspaceId));
-    const recoveredRevision = request.baseRevision + 1;
-    const recoveredFilesPath = resolve(this.storage.workspacePath(request.workspaceId), 'revisions', String(recoveredRevision).padStart(3, '0'));
-    if (manifest.revision === recoveredRevision && existsSync(resolve(recoveredFilesPath, 'index.html'))) {
-      const recoveredFiles = this.storage.readWorkspaceFiles(recoveredFilesPath);
-      if (this.contentHash(request.workspaceId, recoveredFiles) === request.contentHash) {
-        const recovered: CandidatePublishResult = {
-          workspaceId: request.workspaceId, candidateId: request.candidateId, candidateVersion: request.candidateVersion,
-          revision: recoveredRevision, committedAt: new Date().toISOString(), unchanged: false
-        };
-        this.storage.atomicWrite(resolve(commitsDirectory, `${request.commitId}.json`), JSON.stringify(recovered));
-        return recovered;
-      }
-    }
-    if (manifest.revision !== request.baseRevision) throw new Error('正式版本已变化，候选基线过期');
-    const revision = this.commitWorkingCopy(request.workspaceId, files, request.summary);
-    const result: CandidatePublishResult = {
-      workspaceId: request.workspaceId, candidateId: request.candidateId, candidateVersion: request.candidateVersion,
-      revision, committedAt: new Date().toISOString(), unchanged: false
-    };
-    this.storage.atomicWrite(resolve(commitsDirectory, `${request.commitId}.json`), JSON.stringify(result));
-    return result;
-  }
-
-  createRenderArtifact(input: unknown): RenderArtifact {
-    const request = renderArtifactRequestSchema.parse(input);
-    const candidate = this.candidate(request.workspaceId, request.candidateId, request.candidateVersion);
-    if (!candidate || candidate.status !== 'active'
-      || candidate.baseRevision !== request.baseRevision || candidate.contentHash !== request.contentHash
-      || candidate.renderMode !== request.renderMode) throw new Error('候选版本已变化，拒绝写入截图证据');
-    const encoded = request.dataUrl.slice('data:image/png;base64,'.length);
-    const bytes = Buffer.from(encoded, 'base64');
-    if (!bytes.length || bytes.length > 20 * 1024 * 1024) throw new Error('截图大小不在允许范围内');
-    // PNG signature prevents a data URL MIME declaration from disguising a different file.
-    if (!bytes.subarray(0, 8).equals(Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]))) throw new Error('截图不是有效 PNG');
-    const artifact: RenderArtifact = {
-      workspaceId: request.workspaceId,
-      baseRevision: request.baseRevision,
-      candidateId: request.candidateId,
-      candidateVersion: request.candidateVersion,
-      contentHash: request.contentHash,
-      renderMode: request.renderMode,
-      jobId: request.jobId,
-      sampleId: request.sampleId,
-      capture: request.capture,
-      artifactId: randomUUID(),
-      mimeType: 'image/png',
-      byteLength: bytes.length,
-      createdAt: new Date().toISOString()
-    };
-    const directory = resolve(this.storage.workspacePath(request.workspaceId), 'candidates', request.candidateId, 'artifacts');
-    mkdirSync(directory, { recursive: true, mode: 0o700 });
-    this.storage.atomicWrite(resolve(directory, `${artifact.artifactId}.png`), bytes);
-    this.storage.atomicWrite(resolve(directory, `${artifact.artifactId}.json`), JSON.stringify(artifact));
-    return artifact;
-  }
-
-  renderArtifactMatches(document: Pick<RenderArtifact, 'workspaceId' | 'baseRevision' | 'candidateId' | 'candidateVersion' | 'contentHash' | 'renderMode' | 'jobId' | 'sampleId'>, observation: Pick<LiveWorkspaceObservation, 'viewport' | 'scroll'>, artifactId: string): boolean {
-    if (!/^[0-9a-f-]{36}$/i.test(artifactId)) return false;
-    const raw = this.storage.readOptionalFile(resolve(this.storage.workspacePath(document.workspaceId), 'candidates', document.candidateId, 'artifacts', `${artifactId}.json`));
-    if (!raw) return false;
-    try {
-      const artifact = JSON.parse(raw) as RenderArtifact;
-      return artifact.artifactId === artifactId && artifact.workspaceId === document.workspaceId
-        && artifact.baseRevision === document.baseRevision && artifact.candidateId === document.candidateId
-        && artifact.candidateVersion === document.candidateVersion && artifact.contentHash === document.contentHash
-        && artifact.renderMode === document.renderMode && artifact.jobId === document.jobId && artifact.sampleId === document.sampleId
-        && artifact.capture.viewport.width === observation.viewport.width && artifact.capture.viewport.height === observation.viewport.height
-        && artifact.capture.viewport.devicePixelRatio === observation.viewport.devicePixelRatio
-        && artifact.capture.scroll.x === observation.scroll.x && artifact.capture.scroll.y === observation.scroll.y;
-    } catch {
-      return false;
-    }
-  }
-
-  private candidateArtifactMatches(document: Pick<ValidationRecord, 'workspaceId' | 'baseRevision' | 'candidateId' | 'candidateVersion' | 'contentHash' | 'renderMode'>, artifactId: string): boolean {
-    if (!/^[0-9a-f-]{36}$/i.test(artifactId)) return false;
-    const raw = this.storage.readOptionalFile(resolve(this.storage.workspacePath(document.workspaceId), 'candidates', document.candidateId, 'artifacts', `${artifactId}.json`));
-    if (!raw) return false;
-    try {
-      const artifact = JSON.parse(raw) as RenderArtifact;
-      return artifact.artifactId === artifactId && artifact.workspaceId === document.workspaceId
-        && artifact.baseRevision === document.baseRevision && artifact.candidateId === document.candidateId
-        && artifact.candidateVersion === document.candidateVersion && artifact.contentHash === document.contentHash
-        && artifact.renderMode === document.renderMode;
-    } catch { return false; }
   }
 
   previewHtml(workspaceId: string, candidate: 'A' | 'B' = 'A', assetQuery = ''): string | undefined {
@@ -846,10 +454,10 @@ export class SourceWorkspaceStore {
 
   private previewHtmlFromFiles(
     workspaceId: string, files: WorkspaceFiles, candidate: 'A' | 'B', assetQuery: string,
-    workspaceAssetPath = '', candidateAssetPath = workspaceAssetPath
+    workspaceAssetPath = ''
   ): string | undefined {
     return renderWorkspacePreview({
-      files, candidate, assetQuery, workspaceAssetPath, candidateAssetPath,
+      files, candidate, assetQuery, workspaceAssetPath,
       authorResources: this.authorStyleResources(workspaceId),
       unreadableStyleSources: this.unreadableAuthorStyleSources(workspaceId),
       authorSheets: this.authorStyleSheets(workspaceId),
@@ -949,9 +557,6 @@ export class SourceWorkspaceStore {
 
   recordTurn(workspaceId: string, request: SourceTurnRequest, response: SourceTurnResponse): void {
     const conversationId = request.conversationId ?? workspaceId;
-    // Candidate drafts are intentionally not mixed into the formal-revision
-    // conversation history. M3 will add draft-session recovery separately.
-    if (response.kind === 'draft') return;
     const directory = this.storage.workspacePath(workspaceId);
     const manifest = this.storage.readManifest(directory);
     if (response.kind === 'failed' || response.kind === 'cancelled') return;
@@ -1013,33 +618,24 @@ export class SourceWorkspaceStore {
     });
   }
 
-  tools(workspaceId: string, candidateInput?: WorkspaceCandidate): CodingWorkspaceTools {
+  tools(workspaceId: string): CodingWorkspaceTools {
     const workspaceDirectory = this.storage.workspacePath(workspaceId);
     if (!this.get(workspaceId)) throw new Error('静态源码工作区不存在');
     if (this.active.has(workspaceId)) throw new Error('当前工作区已有正在执行的修改');
-    const candidate = candidateInput && this.candidate(workspaceId, candidateInput.candidateId, candidateInput.candidateVersion);
-    if (candidateInput && (!candidate || candidate.status !== 'active')) throw new Error('候选版本不存在或已失效');
-    const directory = candidate
-      ? resolve(workspaceDirectory, 'candidates', candidate.candidateId, 'versions', String(candidate.candidateVersion).padStart(3, '0'))
-      : workspaceDirectory;
+    const directory = workspaceDirectory;
     this.active.add(workspaceId);
     try {
       const original = this.storage.readWorkspaceFiles(directory);
       const authorRuleMode = this.hasAuthorRuleCandidate(workspaceId);
       return createEditingSession({
         original,
-        initial: candidate ? original : this.storage.readWorkspaceFiles(resolve(workspaceDirectory, 'revisions', '000')),
-        candidate,
+        initial: this.storage.readWorkspaceFiles(resolve(workspaceDirectory, 'revisions', '000')),
         authorRuleMode,
         authorCssContent: authorRuleMode ? this.authorCss(workspaceId) ?? '' : '',
         unreadableStyleSources: this.unreadableAuthorStyleSources(workspaceId),
         layoutIndex: () => this.capturedLayoutIndex(workspaceId),
         currentRevision: () => this.storage.readManifest(workspaceDirectory).revision,
         commit: (files, summary) => this.commitWorkingCopy(workspaceId, files, summary),
-        commitCandidate: files => {
-          if (!candidate) throw new Error('当前编辑会话没有候选版本');
-          return this.updateCandidateFiles(workspaceId, candidate.candidateId, candidate.candidateVersion, files);
-        },
         release: () => { this.active.delete(workspaceId); }
       });
     } catch (error) {
@@ -1078,48 +674,6 @@ export class SourceWorkspaceStore {
   private capturedLayoutIndex(workspaceId: string): CapturedLayoutIndex {
     const stored = readFileSync(resolve(this.storage.workspacePath(workspaceId), LAYOUT_INDEX_FILE), 'utf8');
     return staticSnapshotSchema.shape.layoutIndex.parse(JSON.parse(stored)) ?? {};
-  }
-
-  private contentHash(workspaceId: string, files: WorkspaceFiles): string {
-    const hash = createHash('sha256');
-    for (const path of WORKSPACE_FILES) {
-      hash.update(path, 'utf8');
-      hash.update('\0', 'utf8');
-      hash.update(files[path], 'utf8');
-      hash.update('\0', 'utf8');
-    }
-    // These files are read by B preview from the workspace rather than the
-    // candidate directory. They therefore belong to the rendered-document
-    // identity even though the candidate never edits them.
-    for (const path of ['author.css', 'author-resources.json', 'author-sheets.json', 'author-style-links.json']) {
-      hash.update(path, 'utf8');
-      hash.update('\0', 'utf8');
-      hash.update(this.storage.readOptionalFile(resolve(this.storage.workspacePath(workspaceId), path)) ?? '', 'utf8');
-      hash.update('\0', 'utf8');
-    }
-    return hash.digest('hex');
-  }
-
-  private isSafeCandidateId(candidateId: string): boolean {
-    return /^[0-9a-f-]{36}$/i.test(candidateId);
-  }
-
-  private readCandidateJson<T>(workspaceId: string, candidateId: string, category: 'intents' | 'observations' | 'validations' | 'commits', id: string): T | undefined {
-    if (!this.isSafeCandidateId(candidateId) || !/^[0-9a-f-]{36}$/i.test(id)) return undefined;
-    const raw = this.storage.readOptionalFile(resolve(this.storage.workspacePath(workspaceId), 'candidates', candidateId, category, `${id}.json`));
-    if (!raw) return undefined;
-    try { return JSON.parse(raw) as T; } catch { return undefined; }
-  }
-
-  /**
-   * Intent records are protocol data, not an unchecked JSON blob.  In
-   * particular, this prevents candidates created before a required
-   * verification field was introduced from failing later with a TypeError.
-   */
-  private readCandidateIntent(workspaceId: string, candidateId: string, intentId: string): WorkspaceIntent | undefined {
-    const raw = this.readCandidateJson<unknown>(workspaceId, candidateId, 'intents', intentId);
-    const parsed = workspaceIntentSchema.safeParse(raw);
-    return parsed.success ? parsed.data : undefined;
   }
 
   private workspaceFromManifest(manifest: WorkspaceManifest): ManagedSourceWorkspace {

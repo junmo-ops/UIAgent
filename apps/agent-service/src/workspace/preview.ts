@@ -9,7 +9,6 @@ export interface WorkspacePreviewInput {
   candidate: 'A' | 'B';
   assetQuery: string;
   workspaceAssetPath?: string;
-  candidateAssetPath?: string;
   authorResources: AuthorStyleResource[];
   unreadableStyleSources: string[];
   authorSheets: AuthorStyleSheet[];
@@ -20,7 +19,7 @@ export interface WorkspacePreviewInput {
 /** Pure rendering: never writes source, creates revisions, or invokes the Agent. */
 export function renderWorkspacePreview(input: WorkspacePreviewInput): string | undefined {
   const { files, candidate, assetQuery, workspaceAssetPath = '',
-    candidateAssetPath = workspaceAssetPath, authorResources, unreadableStyleSources,
+    authorResources, unreadableStyleSources,
     authorSheets, authorCss, authorRulesAvailable } = input;
   const html = files['index.html'];
   const css = files['snapshot.css'];
@@ -55,11 +54,11 @@ export function renderWorkspacePreview(input: WorkspacePreviewInput): string | u
       : `${authorCss
         ? `<link rel="stylesheet" href="${workspaceAssetPath}author.css${assetQuery}" data-ui-agent-author-styles data-ui-agent-candidate="B">`
         : ''}${unreadableStyleSources.map(source => `\n<link rel="stylesheet" href="${escapeHtmlAttribute(source)}" data-ui-agent-render-only-stylesheet>`).join('')}`;
-    style = `${orderedStyleLinks}\n<link rel="stylesheet" href="${candidateAssetPath}author-overrides.css${assetQuery}" data-ui-agent-author-overrides>`;
+    style = `${orderedStyleLinks}\n<link rel="stylesheet" href="${workspaceAssetPath}author-overrides.css${assetQuery}" data-ui-agent-author-overrides>`;
   }
   const localizedHtml = localizeSnapshotResources(html, authorResources);
   const componentRuntime = /<ui-agent-module\b/i.test(localizedHtml)
-    ? `<script src="${workspaceAssetPath}replica-runtime.js${assetQuery}" defer data-ui-agent-replica-runtime="module-v2"></script>\n<script src="${candidateAssetPath}module.js${assetQuery}" defer data-ui-agent-module-source></script>\n`
+    ? `<script src="${workspaceAssetPath}replica-runtime.js${assetQuery}" defer data-ui-agent-replica-runtime="module-v2"></script>\n<script src="${workspaceAssetPath}module.js${assetQuery}" defer data-ui-agent-module-source></script>\n`
     : '';
   return /<\/head>/i.test(localizedHtml)
     ? localizedHtml.replace(/<\/head>/i, () => `${style}\n${componentRuntime}</head>`)

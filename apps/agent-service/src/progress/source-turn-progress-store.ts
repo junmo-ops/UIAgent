@@ -116,6 +116,16 @@ function detailForStep(step: CodingAgentStep): string | undefined {
 export class SourceTurnProgressStore {
   private readonly values = new Map<string, SourceTurnProgress>();
 
+  constructor(private readonly storage?: {
+    read(workspaceId: string, turnId: string): SourceTurnProgress | undefined;
+    write(value: SourceTurnProgress): void;
+  }) {}
+
+  private persist(workspaceId: string, turnId: string): void {
+    const value = this.values.get(this.key(workspaceId, turnId));
+    if (value) this.storage?.write(value);
+  }
+
   private record(current: SourceTurnProgress, item: NonNullable<SourceTurnProgress['timeline']>[number]) {
     const timeline = [...(current.timeline ?? [])];
     const index = timeline.findIndex(previous => previous.id === item.id);
@@ -140,13 +150,30 @@ export class SourceTurnProgressStore {
       updatedAt: timestamp,
       activities: []
     };
+    this.storage?.write(value);
     this.values.set(this.key(workspaceId, turnId), value);
     this.trim();
     return value;
   }
 
   get(workspaceId: string, turnId: string): SourceTurnProgress | undefined {
-    return this.values.get(this.key(workspaceId, turnId));
+    const cached = this.values.get(this.key(workspaceId, turnId));
+    if (cached) return cached;
+    const value = this.storage?.read(workspaceId, turnId);
+    if (!value) return undefined;
+    // Running entries never leave the in-memory cache. A disk-only running
+    // entry therefore belongs to a previous service process, not a live task.
+    if (value.status === 'running' || value.status === 'cancelling') {
+      const message = '服务重启或执行进程中断，本轮任务已中断。已保存的副本版本仍可继续编辑；未确认的修改请以当前页面为准。';
+      Object.assign(value, { status: 'failed', execution: 'settled', phase: 'finishing',
+        saveState: 'unconfirmed', message, updatedAt: new Date().toISOString(),
+        result: { kind: 'failed', code: 'SOURCE_TURN_INTERRUPTED', message } });
+      value.timeline = value.timeline?.map(item => item.status === 'running' ? { ...item, status: 'failed' } : item);
+      this.storage?.write(value);
+    }
+    this.values.set(this.key(workspaceId, turnId), value);
+    this.trim();
+    return value;
   }
 
   observe(workspaceId: string, turnId: string, event: CodingAgentEvent): void {
@@ -168,6 +195,7 @@ export class SourceTurnProgressStore {
       this.values.set(this.key(workspaceId, turnId), {
         ...current, saveState: event.state, savedRevision: event.revision, updatedAt: event.timestamp
       });
+      this.persist(workspaceId, turnId);
       return;
     }
     if (event.type === 'coding-agent.model.updated') {
@@ -253,7 +281,7 @@ export class SourceTurnProgressStore {
         // The service still needs to attach the final result/preview URL.
         // Only complete()/fail() may publish a terminal polling status.
         execution: 'preparing',
-        ...(event.response.kind === 'completed' || event.response.kind === 'draft' ? this.resultState(event.response) : {}),
+        ...(event.response.kind === 'completed' ? this.resultState(event.response) : {}),
         phase: 'finishing',
         message: current.status === 'cancelling' ? current.message : '正在整理本轮结果…',
         modelCalls: event.checkpoint.modelCalls,
@@ -275,6 +303,7 @@ export class SourceTurnProgressStore {
       result,
       updatedAt: new Date().toISOString()
     });
+    this.persist(workspaceId, turnId);
   }
 
   requestCancellation(workspaceId: string, turnId: string): SourceTurnProgress | undefined {
@@ -288,6 +317,7 @@ export class SourceTurnProgressStore {
       updatedAt: new Date().toISOString()
     };
     this.values.set(this.key(workspaceId, turnId), next);
+    this.persist(workspaceId, turnId);
     return next;
   }
 
@@ -303,7 +333,7 @@ export class SourceTurnProgressStore {
       ...current,
       status: result.kind === 'cancelled' ? 'cancelled' : result.kind === 'failed' ? 'failed' : 'completed',
       execution: 'settled',
-      ...(result.kind === 'completed' || result.kind === 'draft' || !['saved', 'unchanged'].includes(current.saveState ?? '')
+      ...(result.kind === 'completed' || !['saved', 'unchanged'].includes(current.saveState ?? '')
         ? this.resultState(result) : {}),
       ...(result.kind === 'clarification' && current.saveState === 'not_started' ? { saveState: 'not_started' as const } : {}),
       phase: 'finishing',
@@ -313,6 +343,7 @@ export class SourceTurnProgressStore {
       result,
       updatedAt: new Date().toISOString()
     });
+    this.persist(workspaceId, turnId);
   }
 
   private key(workspaceId: string, turnId: string): string {
@@ -323,7 +354,6 @@ export class SourceTurnProgressStore {
     if (result.kind === 'completed') return {
       saveState: result.unchanged ? 'unchanged' : 'saved', savedRevision: result.revision
     };
-    if (result.kind === 'draft') return { saveState: 'draft' };
     // A terminal task status alone is not evidence that rollback or saving succeeded.
     return { saveState: 'unconfirmed' };
   }
@@ -331,13 +361,13 @@ export class SourceTurnProgressStore {
   private resultMessage(result: SourceTurnResponse): string {
     if (result.kind === 'completed') return result.unchanged ? '本轮无需修改，未创建新版本' : '修改已保存';
     if (result.kind === 'clarification') return '需要你确认修改需求';
-    if (result.kind === 'draft') return '候选草稿已生成，尚未发布';
     return result.kind === 'cancelled' ? '本轮修改已停止' : '本轮修改未完成';
   }
 
   private trim(): void {
-    if (this.values.size <= 200) return;
-    const oldest = this.values.keys().next().value as string | undefined;
-    if (oldest) this.values.delete(oldest);
+    for (const [key, value] of this.values) {
+      if (this.values.size <= 200) break;
+      if (value.status !== 'running' && value.status !== 'cancelling') this.values.delete(key);
+    }
   }
 }

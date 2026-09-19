@@ -1,9 +1,6 @@
 import { onMessage, sendMessage } from '../src/messaging';
 import {
   sourceWorkspaceCreatedSchema,
-  renderJobLeaseSchema,
-  renderArtifactSchema,
-  type RenderJobLease,
   type AuthorStyleResource,
   type SourceWorkspaceInfo,
   type ContentCommand,
@@ -78,17 +75,6 @@ async function sendToContent(tab: Browser.tabs.Tab, command: ContentCommand): Pr
       throw new BrowserCommandError('CONTENT_UNAVAILABLE', injectionMessage);
     }
     return await sendMessage('contentCommand', command, tab.id);
-  }
-}
-
-function candidatePreviewIdentity(tabUrl: string | undefined, serviceUrl: string) {
-  if (!tabUrl || !isWorkspacePreviewUrl(tabUrl, serviceUrl)) return undefined;
-  try {
-    const url = new URL(tabUrl);
-    const match = /^\/workspaces\/([0-9a-f-]{36})\/candidates\/([0-9a-f-]{36})\/versions\/(\d+)\/preview$/i.exec(url.pathname);
-    return match ? { workspaceId: match[1]!, candidateId: match[2]!, candidateVersion: Number(match[3]) } : undefined;
-  } catch {
-    return undefined;
   }
 }
 
@@ -183,49 +169,6 @@ async function exportScreenshot(tab: Browser.tabs.Tab): Promise<ContentCommandRe
   }
 }
 
-type RenderState = NonNullable<Extract<ContentCommandResult, { ok: true }>['renderState']>;
-type RenderEvidence = { dataUrl: string; capture: { viewport: RenderState['viewport']; scroll: RenderState['scroll']; pixelWidth: number; pixelHeight: number; crop: { x: number; y: number; width: number; height: number } } };
-
-function sameRenderState(left: RenderState | undefined, right: RenderState | undefined): boolean {
-  return Boolean(left && right && left.viewport.width === right.viewport.width && left.viewport.height === right.viewport.height
-    && left.viewport.devicePixelRatio === right.viewport.devicePixelRatio && left.scroll.x === right.scroll.x && left.scroll.y === right.scroll.y);
-}
-
-function pngDimensions(dataUrl: string): { width: number; height: number } | undefined {
-  try {
-    const binary = atob(dataUrl.slice('data:image/png;base64,'.length, 'data:image/png;base64,'.length + 32));
-    if (binary.length < 24 || binary.slice(1, 4) !== 'PNG') return undefined;
-    const view = new DataView(Uint8Array.from(binary, value => value.charCodeAt(0)).buffer);
-    const width = view.getUint32(16); const height = view.getUint32(20);
-    return width > 0 && height > 0 ? { width, height } : undefined;
-  } catch { return undefined; }
-}
-
-async function captureRenderEvidence(tab: Browser.tabs.Tab, document: Extract<ContentCommand, { type: 'observeWorkspacePreview' }>['document'], observedState: RenderState): Promise<RenderEvidence | undefined> {
-  if (!tab.id) return undefined;
-  const [active] = await browser.tabs.query({ active: true, currentWindow: true });
-  // captureVisibleTab cannot safely capture a background tab. Waiting for a
-  // later poll is preferable to silently accepting a screenshot of another page.
-  if (active?.id !== tab.id) return undefined;
-  const before = await sendToContent(tab, { type: 'readWorkspacePreviewState', document });
-  if (!before.ok || !sameRenderState(observedState, before.renderState)) return undefined;
-  await sendToContent(tab, { type: 'prepareScreenshot' });
-  try {
-    const current = await browser.tabs.query({ active: true, currentWindow: true });
-    if (current[0]?.id !== tab.id) return undefined;
-    const dataUrl = await browser.tabs.captureVisibleTab(tab.windowId, { format: 'png' });
-    const [activeAfterCapture] = await browser.tabs.query({ active: true, currentWindow: true });
-    if (activeAfterCapture?.id !== tab.id) return undefined;
-    const after = await sendToContent(tab, { type: 'readWorkspacePreviewState', document });
-    const pixels = pngDimensions(dataUrl);
-    return after.ok && pixels && sameRenderState(observedState, after.renderState)
-      ? { dataUrl, capture: { ...observedState, pixelWidth: pixels.width, pixelHeight: pixels.height, crop: { x: 0, y: 0, width: observedState.viewport.width, height: observedState.viewport.height } } }
-      : undefined;
-  } finally {
-    await sendToContent(tab, { type: 'finishScreenshot' }).catch(() => undefined);
-  }
-}
-
 async function createWorkspaceFromViewport(tab: Browser.tabs.Tab): Promise<SourceWorkspaceInfo> {
   if (!tab.id) throw new BrowserCommandError('TAB_UNAVAILABLE', '当前标签页不可用');
   try {
@@ -283,133 +226,6 @@ async function createWorkspaceFromViewport(tab: Browser.tabs.Tab): Promise<Sourc
 
 export default defineBackground(() => {
   const editorTabs = new EditorTabRegistry();
-  const renderPollers = new Map<number, ReturnType<typeof setInterval>>();
-  const renderPollsInFlight = new Set<number>();
-  const renderPollGenerations = new Map<number, number>();
-  let nextRenderPollGeneration = 0;
-
-  const stopRenderPolling = (tabId: number) => {
-    const timer = renderPollers.get(tabId);
-    if (timer) clearInterval(timer);
-    renderPollers.delete(tabId);
-    renderPollGenerations.delete(tabId);
-  };
-  const reportRenderFailure = async (serviceUrl: string, job: RenderJobLease, code: string, message: string) => {
-    await agentServiceFetch(`${serviceUrl}/v1/workspaces/${job.workspaceId}/render-jobs/${job.jobId}/failure`, {
-      method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        workspaceId: job.workspaceId, baseRevision: job.baseRevision, candidateId: job.candidateId,
-        candidateVersion: job.candidateVersion, contentHash: job.contentHash, renderMode: job.renderMode,
-        leaseToken: job.leaseToken, code, message: message.slice(0, 1_000)
-      })
-    }).catch(() => undefined);
-  };
-  const pollRenderJob = async (tabId: number) => {
-    if (renderPollsInFlight.has(tabId)) return;
-    renderPollsInFlight.add(tabId);
-    const generation = renderPollGenerations.get(tabId);
-    const isCurrent = () => renderPollGenerations.get(tabId) === generation;
-    let claimedJob: RenderJobLease | undefined;
-    try {
-    const serviceUrl = await getAgentServiceUrl();
-    const tab = await browser.tabs.get(tabId).catch(() => undefined);
-    const identity = candidatePreviewIdentity(tab?.url, serviceUrl);
-    if (!tab || !identity) {
-      stopRenderPolling(tabId);
-      return;
-    }
-    const response = await agentServiceFetch(
-      `${serviceUrl}/v1/workspaces/${identity.workspaceId}/render-jobs/next?candidateId=${encodeURIComponent(identity.candidateId)}&candidateVersion=${identity.candidateVersion}`
-    );
-    if (response.status === 204 || !response.ok) return;
-    const job = renderJobLeaseSchema.parse(await response.json());
-    claimedJob = job;
-    if (job.candidateId !== identity.candidateId || job.candidateVersion !== identity.candidateVersion) return;
-    const latestTab = await browser.tabs.get(tabId).catch(() => undefined);
-    const latestIdentity = candidatePreviewIdentity(latestTab?.url, serviceUrl);
-    if (!latestTab || !latestIdentity || latestIdentity.workspaceId !== job.workspaceId
-      || latestIdentity.candidateId !== job.candidateId || latestIdentity.candidateVersion !== job.candidateVersion) return;
-    const document = {
-      workspaceId: job.workspaceId, baseRevision: job.baseRevision, candidateId: job.candidateId,
-      candidateVersion: job.candidateVersion, contentHash: job.contentHash, renderMode: job.renderMode
-    };
-    const observation = await sendToContent(latestTab, {
-      type: 'observeWorkspacePreview',
-      sourceIds: job.sourceIds,
-      document,
-      sampleId: crypto.randomUUID()
-    });
-    if (!observation.ok || !observation.observation) {
-      await reportRenderFailure(serviceUrl, job, 'OBSERVATION_FAILED', observation.ok ? '页面未返回观察结果' : observation.error);
-      return;
-    }
-    if (!isCurrent()) return;
-    let screenshotArtifactId: string | undefined;
-    if (job.screenshotRequired) {
-      let evidence: RenderEvidence | undefined;
-      try {
-        evidence = await captureRenderEvidence(latestTab, document, observation.observation);
-      } catch (error) {
-        await reportRenderFailure(serviceUrl, job, 'SCREENSHOT_FAILED', error instanceof Error ? error.message : '截图失败');
-        return;
-      }
-      if (!evidence) {
-        // This is a recoverable condition: lease expiry returns the job to the
-        // queue so it can run after the user returns to the candidate page.
-        console.info('[ui-agent] Render evidence waiting for the active candidate page or stable viewport');
-        return;
-      }
-      if (!isCurrent()) return;
-      const artifactResponse = await agentServiceFetch(`${serviceUrl}/v1/workspaces/${job.workspaceId}/render-artifacts`, {
-        method: 'POST', headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          workspaceId: job.workspaceId, baseRevision: job.baseRevision, candidateId: job.candidateId,
-          candidateVersion: job.candidateVersion, contentHash: job.contentHash, renderMode: job.renderMode,
-          jobId: job.jobId, leaseToken: job.leaseToken, sampleId: observation.observation.sampleId,
-          capture: evidence.capture, dataUrl: evidence.dataUrl
-        })
-      });
-      if (!artifactResponse.ok) {
-        await reportRenderFailure(serviceUrl, job, 'ARTIFACT_UPLOAD_FAILED', `截图上传失败（HTTP ${artifactResponse.status}）`);
-        return;
-      }
-      screenshotArtifactId = renderArtifactSchema.parse(await artifactResponse.json()).artifactId;
-    }
-    if (!isCurrent()) return;
-    const result = await agentServiceFetch(`${serviceUrl}/v1/workspaces/${identity.workspaceId}/render-jobs/${job.jobId}/result`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        workspaceId: job.workspaceId,
-        baseRevision: job.baseRevision,
-        candidateId: job.candidateId,
-        candidateVersion: job.candidateVersion,
-        contentHash: job.contentHash,
-        renderMode: job.renderMode,
-        leaseToken: job.leaseToken,
-        observation: observation.observation,
-        ...(screenshotArtifactId ? { screenshotArtifactId } : {})
-      })
-    });
-    if (!result.ok) await reportRenderFailure(serviceUrl, job, 'RESULT_REJECTED', `渲染结果被服务拒绝（HTTP ${result.status}）`);
-    } catch (error) {
-      console.error('[ui-agent] Render polling failed', error);
-      if (claimedJob) {
-        const serviceUrl = await getAgentServiceUrl().catch(() => undefined);
-        if (serviceUrl) await reportRenderFailure(serviceUrl, claimedJob, 'RENDER_BRIDGE_FAILED', error instanceof Error ? error.message : '渲染桥异常');
-      }
-    } finally {
-      renderPollsInFlight.delete(tabId);
-    }
-  };
-  const startRenderPolling = (tabId: number) => {
-    if (renderPollers.has(tabId)) return;
-    renderPollGenerations.set(tabId, ++nextRenderPollGeneration);
-    const run = () => { void pollRenderJob(tabId).catch(() => undefined); };
-    renderPollers.set(tabId, setInterval(run, 1_250));
-    run();
-  };
-
   // The manifest path is a global fallback. Disable it so Chrome hides this
   // extension's panel on every tab that has not explicitly opened its own.
   void disableGlobalSidePanel(browser.sidePanel).catch(error => {
@@ -428,7 +244,6 @@ export default defineBackground(() => {
     const deactivateIfLastPort = () => {
       const released = editorTabs.unbind(editorClientId);
       if (released?.lastEditorForTab) {
-        stopRenderPolling(released.tabId);
         void sendMessage('contentCommand', { type: 'deactivateEditor' }, released.tabId).catch(() => undefined);
       }
     };
@@ -452,7 +267,6 @@ export default defineBackground(() => {
 
   browser.tabs.onRemoved.addListener(tabId => {
     editorTabs.removeTab(tabId);
-    stopRenderPolling(tabId);
   });
 
   browser.action.onClicked.addListener(tab => {
@@ -479,10 +293,8 @@ export default defineBackground(() => {
           if (trustedPreviewUrl && sameWorkspacePreview(tab.url, command.previewUrl)) {
             const released = editorTabs.rebind(editorClientId, command.tabId);
             if (released?.lastEditorForTab) {
-              stopRenderPolling(released.tabId);
               void sendMessage('contentCommand', { type: 'deactivateEditor' }, released.tabId).catch(() => undefined);
             }
-            startRenderPolling(command.tabId);
             return { ok: true };
           }
           throw new BrowserCommandError(
@@ -491,7 +303,6 @@ export default defineBackground(() => {
           );
         }
         if (panelTabId === undefined) editorTabs.bind(editorClientId, command.tabId);
-        startRenderPolling(command.tabId);
         return { ok: true };
       }
       let tabId = await editorTabs.waitFor(editorClientId);

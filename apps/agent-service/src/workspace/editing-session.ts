@@ -5,27 +5,24 @@ import { structureQueryTerms, normalizeStructureSearchText, structureNeighborhoo
 import { parseHTML } from 'linkedom';
 import { splitCssTopLevel } from './source-document';
 import type { CodingWorkspaceTools } from '@ui-agent/agent-runtime';
-import type { WorkspaceCandidate } from '@ui-agent/contracts';
 import { refreshWorkspaceIndexes } from './compiler';
 import { analyzeStaticVisibility, staticVisibilityIssueKey } from './visibility';
 
 export interface EditingSessionOptions {
   original: WorkspaceFiles;
   initial: WorkspaceFiles;
-  candidate?: WorkspaceCandidate;
   authorRuleMode: boolean;
   authorCssContent: string;
   unreadableStyleSources: string[];
   layoutIndex(): CapturedLayoutIndex;
   currentRevision(): number;
   commit(files: WorkspaceFiles, summary: string): number;
-  commitCandidate(files: WorkspaceFiles): WorkspaceCandidate;
   release(): void;
 }
 
 /** One in-memory edit transaction. Persistence is only invoked on commit. */
 export function createEditingSession(session: EditingSessionOptions): CodingWorkspaceTools {
-  const { original, initial, candidate, authorRuleMode, authorCssContent, unreadableStyleSources } = session;
+  const { original, initial, authorRuleMode, authorCssContent, unreadableStyleSources } = session;
   const editableStylePath = authorRuleMode ? 'author-overrides.css' : 'snapshot.css';
   let working: WorkspaceFiles = { ...original };
   const baselineVisibilityIssues = authorRuleMode
@@ -151,7 +148,6 @@ export function createEditingSession(session: EditingSessionOptions): CodingWork
 
   let toolset!: CodingWorkspaceTools;
   toolset = {
-    submissionMode: candidate ? 'candidate' : 'direct',
     listFiles: async () => [
       ...AGENT_WORKSPACE_FILES.map(path => ({ path, chars: readableContent(path).length })),
       ...(authorCssContent ? [{ path: 'author.css', chars: authorCssContent.length }] : []),
@@ -810,17 +806,9 @@ export function createEditingSession(session: EditingSessionOptions): CodingWork
         validateWorking();
         const revision = session.currentRevision();
         close();
-        return candidate ? {
-          revision, changed: false,
-          candidate
-        } : { revision, changed: false };
+        return { revision, changed: false };
       }
       validateWorking();
-      if (candidate) {
-        const updated = session.commitCandidate(working);
-        close();
-        return { revision: updated.baseRevision, changed: true, candidate: updated };
-      }
       const revision = session.commit(working, summary);
       close();
       return { revision, changed: true };

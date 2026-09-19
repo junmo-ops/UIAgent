@@ -22,8 +22,6 @@ import {
   type CodingAgentStep,
   type CodingAgentTurn,
   type CodingWorkspaceTools,
-  type GeometryVerificationInput,
-  type GeometryVerificationResult
 } from '../core/coding-agent-port';
 import { INTERACTION_INSTRUCTIONS } from '../source-editing/interaction-instructions';
 import { toolCallStatistics } from '../core/tool-call-statistics';
@@ -227,7 +225,7 @@ const clineSourceRules = [
   '修改前只需确认目标、最近相关容器和必要的相邻元素。复制原样保留原结构，小改保留现有实现；新增、重做、改变控件类型或组合交互统一使用 Ant Design 局部模块。只读取必要布局证据，明确风格要求时只读取相关参照。修改行内样式时注意级联优先级，背景也可能由子元素或伪元素绘制。',
   '位置描述以用户明确容器为准，否则以 selectedSourceId 或最近语义祖先为锚点。相邻组件只扩展到最近公共父容器；用户未明确要求全局视口定位时不得新增 position:fixed。新增元素后调用 validate_spatial_scope。',
   '若多个方案会显著改变最终视觉结果，修改前调用 clarify；问题只询问源码无法确定的信息。已有澄清回复时结合 conversation 继续原需求。保留 button、input 等语义表示最终渲染标签和可访问行为保持一致，不等于必须保留原 sourceId 或原 DOM 节点；只有用户明确要求保留节点身份时才按原节点修改。',
-  '首次写入前调用一次 declare_intent，简洁列出目标、相关 sourceId、需要浏览器验证的约束和布局范围。涉及交互时必须明确初始状态、触发动作、出现内容、是否占据布局、结束状态和节点身份策略。declare_intent 是方案决策边界；成功后按已声明方案执行，只有工具返回新的冲突证据时才调整，不重新比较组件或交互方案。新增 sourceId 会由系统自动加入验证范围。',
+  '首次写入前调用一次 declare_intent，简洁列出目标、相关 sourceId、供用户检查的效果约束和布局范围。涉及交互时必须明确初始状态、触发动作、出现内容、是否占据布局、结束状态和节点身份策略。declare_intent 是方案决策边界；成功后按已声明方案执行，只有工具返回新的冲突证据时才调整，不重新比较组件或交互方案。新增 sourceId 会由系统自动加入验证范围。',
   '已明确实际文本承载元素时优先 set_element_text；含图标或其他子结构的父控件不能直接清空，应定位文字子元素，不确定时再 inspect。属性、插入、完整元素替换、移动、删除和批量操作使用对应结构化工具；完整替换已有元素使用 replace_element，元素内部精确替换才使用 replace_in_element，search 必须来自已读取的原始源码，禁止根据 compactHtml、domText 或结构摘要拼接 HTML，文件级精确替换必须基于已读取原文，追加 CSS 使用 apply_patch。相关修改尽量在同一轮并行调用或用批量工具完成。',
   '不得添加 script、事件属性、远程资源、接口请求、表单 action 或 javascript: URL。',
   INTERACTION_INSTRUCTIONS,
@@ -303,13 +301,6 @@ type Completion =
       validation: string;
       revision: number;
       unchanged: boolean;
-    }
-  | {
-      kind: 'draft';
-      summary: string;
-      validation: string;
-      candidate: import('@ui-agent/contracts').WorkspaceCandidate;
-      intent: import('@ui-agent/contracts').WorkspaceIntent;
     }
   | {
       kind: 'clarification';
@@ -393,100 +384,13 @@ export class ClineCodingAgentAdapter implements CodingAgentPort {
     }));
   }
 
-  async verifyGeometry(input: GeometryVerificationInput, signal?: AbortSignal): Promise<GeometryVerificationResult> {
-    if (signal?.aborted) throw new CodingAgentCancelledError();
-    const expectedIds = [
-      ...input.intent.sourceIds.map(sourceId => `source:${sourceId}`),
-      ...input.intent.renderConstraintIndexes.map(index => `constraint:${index}`)
-    ];
-    let completion: GeometryVerificationResult | undefined;
-    const validator = this.factory({
-      providerId: 'openai-compatible',
-      modelId: this.options.modelName,
-      apiKey: this.options.apiKey,
-      baseUrl: this.options.baseUrl,
-      maxIterations: 4,
-      maxOutputTokens: this.maxOutputTokens,
-      systemPrompt: [
-        '你是网页副本的几何与样式验证器。只能根据调用中提供的结构化需求、真实浏览器几何、计算样式和就绪状态作出结论。',
-        '颜色或背景约束必须检查对应绘制元素的 styles.backgroundColor/backgroundImage/color 等实际计算值，不能以尺寸正确、元素存在或源码已写入代替。透明背景不能证明子元素或伪元素的背景颜色；缺少绘制元素数据时返回 unknown。旧插件未提供样式字段时也返回 unknown。',
-        '当前模型没有图片输入。不得声称看过截图，也不得把截图、DOM 字符串或源码存在当成视觉通过。',
-        '逐一判断每个 source 和被标为可渲染验证的 constraint。source 项可以通过“目标按需求已删除”；缺失的元素本身不是失败。未列入 renderConstraintIndexes 的约束是修改范围说明，不要为它们生成检查结果。',
-        '若几何数据不足以证明某项，标记 unknown；若可证伪则标记 failed。不要猜测页面未提供的层级、样式或位置。',
-        '完成时必须调用 finish_geometry_validation，给出所有要求的 id，不能调用其他工具。'
-      ].join('\n'),
-      tools: [createTool<{
-        results: Array<{ id: string; status: 'passed' | 'failed' | 'unknown'; message: string }>;
-        warnings?: string[];
-      }, string>({
-        name: 'finish_geometry_validation',
-        description: '提交每项目标和约束的几何验证结论。',
-        inputSchema: objectSchema({
-          results: {
-            type: 'array', minItems: expectedIds.length, maxItems: expectedIds.length,
-            items: objectSchema({
-              id: stringProperty(`必须为以下之一：${expectedIds.join('、')}`),
-              status: { type: 'string', enum: ['passed', 'failed', 'unknown'] },
-              message: stringProperty('引用提供的几何事实说明结论。')
-            }, ['id', 'status', 'message'])
-          },
-          warnings: { type: 'array', maxItems: 20, items: stringProperty('不影响逐项结论但应保留的证据边界。') }
-        }, ['results']),
-        lifecycle: { completesRun: true },
-        execute: async value => {
-          const seen = new Set<string>();
-          for (const result of value.results) {
-            if (!expectedIds.includes(result.id) || seen.has(result.id)) {
-              throw new Error('验证结果包含未知或重复的检查 id');
-            }
-            seen.add(result.id);
-          }
-          if (seen.size !== expectedIds.length) throw new Error('验证结果没有覆盖全部目标和约束');
-          completion = {
-            constraintResults: value.results.map(result => ({
-              id: result.id,
-              required: true,
-              status: result.status,
-              message: result.message.slice(0, 2_000),
-              observationId: input.observation.observationId
-            })),
-            warnings: (value.warnings ?? []).map(warning => warning.slice(0, 2_000))
-          };
-          return '几何验证结果已记录';
-        }
-      })],
-    });
-    const abort = () => validator.abort?.(signal?.reason);
-    signal?.addEventListener('abort', abort, { once: true });
-    try {
-      const result = await validator.run(JSON.stringify({
-        intent: input.intent,
-        document: {
-          baseRevision: input.candidate.baseRevision,
-          candidateVersion: input.candidate.candidateVersion,
-          renderMode: input.candidate.renderMode
-        },
-        observation: input.observation.observation
-      }));
-      if (signal?.aborted) throw new CodingAgentCancelledError();
-      if (!completion) throw new Error(
-        result.error instanceof Error ? result.error.message : result.error ?? '几何验证模型未提交结构化结论'
-      );
-      return completion;
-    } finally {
-      signal?.removeEventListener('abort', abort);
-    }
-  }
-
   async run(
     turn: CodingAgentTurn,
     workspace: CodingWorkspaceTools,
     observe?: CodingAgentObserver,
     signal?: AbortSignal
   ): Promise<CodingAgentRunResult> {
-    const finishDescription = workspace.submissionMode === 'candidate'
-      ? 'finish 校验并物化候选草稿，不发布正式 Revision；服务随后执行真实渲染验证。'
-      : 'finish 校验并直接提交正式 Revision；当前未启用自动渲染验证，实际页面效果由用户检查，不得声称正在等待自动渲染验证。';
+    const finishDescription = 'finish 校验并直接提交正式 Revision；实际页面效果由用户检查，不得声称自动渲染验证通过。';
     const modeRules = clineSourceRules;
     const startedAt = new Date().toISOString();
     const steps: CodingAgentStep[] = [];
@@ -537,7 +441,7 @@ export class ClineCodingAgentAdapter implements CodingAgentPort {
     });
 
     const rollback = async () => {
-      if (rolledBack || completion?.kind === 'completed' || completion?.kind === 'draft') return;
+      if (rolledBack || completion?.kind === 'completed') return;
       rolledBack = true;
       try {
         await workspace.rollback();
@@ -777,7 +681,6 @@ export class ClineCodingAgentAdapter implements CodingAgentPort {
         relevantSourceIds?: string[];
         verificationSourceIds?: string[];
         visualConstraints?: string[];
-        renderConstraintIndexes?: number[];
         layoutScope?: 'selected-context' | 'explicit-container' | 'global';
       }, string>({
         name: 'declare_intent',
@@ -815,12 +718,7 @@ export class ClineCodingAgentAdapter implements CodingAgentPort {
           },
           visualConstraints: {
             type: 'array', maxItems: 12,
-            items: stringProperty('需要浏览器验证的简洁视觉或结构约束。')
-          },
-          renderConstraintIndexes: {
-            type: 'array', maxItems: 12,
-            items: { type: 'integer', minimum: 1 },
-            description: 'visualConstraints 中可由浏览器几何或计算样式验证的序号；省略时默认验证第一项。'
+            items: stringProperty('预期的简洁视觉或结构约束，供用户检查；声明约束不代表已经验证。')
           },
           layoutScope: { type: 'string', enum: ['selected-context', 'explicit-container', 'global'] }
         }, ['summary', 'interactionPlan']),
@@ -844,12 +742,8 @@ export class ClineCodingAgentAdapter implements CodingAgentPort {
               ...(input.visualConstraints?.length ? input.visualConstraints : [input.summary]),
               ...(interactionConstraint ? [interactionConstraint] : [])
             ])];
-            const renderConstraintIndexes = [...new Set(input.renderConstraintIndexes?.length ? input.renderConstraintIndexes : [1])];
             if (!sourceIds.length) {
               throw new Error('declare_intent 必须列出至少一个实际相关的 sourceId；请先查询并检查目标结构，无法定位时调用 clarify');
-            }
-            if (renderConstraintIndexes.some(index => index < 1 || index > constraints.length)) {
-              throw new Error('renderConstraintIndexes 必须引用 visualConstraints 中存在的序号');
             }
             intentDeclared = true;
             declaredIntent = {
@@ -858,7 +752,6 @@ export class ClineCodingAgentAdapter implements CodingAgentPort {
               instruction: turn.request.instruction,
               sourceIds,
               constraints,
-              renderConstraintIndexes,
               layoutScope: input.layoutScope ?? 'selected-context',
               createdAt: new Date().toISOString()
             };
@@ -1368,17 +1261,14 @@ export class ClineCodingAgentAdapter implements CodingAgentPort {
               allowNoChanges: input.outcome === 'already_satisfied' && Boolean(input.evidence?.trim())
             });
             safeEmit(observe, { type: 'coding-agent.persistence.updated', timestamp: new Date().toISOString(),
-              state: commit.candidate ? 'draft' : commit.changed ? 'saved' : 'unchanged', revision: commit.revision });
+              state: commit.changed ? 'saved' : 'unchanged', revision: commit.revision });
             if (!commit.changed && input.outcome !== 'already_satisfied') {
               throw new Error('当前副本没有新增源码修改；仅在确认目标已满足时，才能以 outcome=already_satisfied 结束本轮');
             }
             const summary = commit.changed
               ? input.summary
               : `当前副本已满足该需求，无需重复修改。${input.summary}`;
-            if (commit.candidate && !declaredIntent) throw new Error('候选草稿缺少已确认的结构化意图，拒绝进入渲染验证');
-            completion = commit.candidate
-              ? { kind: 'draft', summary, validation, candidate: commit.candidate, intent: declaredIntent! }
-              : { kind: 'completed', summary, validation, revision: commit.revision, unchanged: !commit.changed };
+            completion = { kind: 'completed', summary, validation, revision: commit.revision, unchanged: !commit.changed };
             const result = `${summary}（${validation}；revision=${commit.revision}${commit.changed ? '' : '；未创建新版本'}）`;
             record('finish', input, context, result);
             return result;
@@ -1522,15 +1412,6 @@ export class ClineCodingAgentAdapter implements CodingAgentPort {
           modelCalls: checkpoint.modelCalls,
           toolCalls: checkpoint.toolCalls
         };
-      } else if (completion?.kind === 'draft') {
-        response = {
-          kind: 'draft',
-          summary: completion.summary,
-          candidate: completion.candidate,
-          intent: completion.intent,
-          modelCalls: checkpoint.modelCalls,
-          toolCalls: checkpoint.toolCalls
-        };
       } else if (completion?.kind === 'clarification') {
         response = {
           kind: 'clarification',
@@ -1564,7 +1445,7 @@ export class ClineCodingAgentAdapter implements CodingAgentPort {
     checkpoint = {
       ...checkpoint,
       lifecycle: {
-        submissionMode: workspace.submissionMode ?? 'direct', intentDeclared, spatialScopeValidated,
+        submissionMode: 'direct', intentDeclared, spatialScopeValidated,
         completionAttempts: steps.filter(step => step.action === 'finish').length,
         rollback: rollbackStatus,
         selectedElementContextProvided: selectedElementContextAvailable,
@@ -1576,7 +1457,6 @@ export class ClineCodingAgentAdapter implements CodingAgentPort {
         } : {})
       },
       status: response.kind === 'completed'
-        || response.kind === 'draft'
         ? 'completed'
         : response.kind === 'clarification'
           ? 'clarification'

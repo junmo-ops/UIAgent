@@ -40,7 +40,13 @@ module.exports = {
       name: 'workspace-domain-does-not-depend-on-service-shell',
       severity: 'error',
       from: { path: '^apps/agent-service/src/workspace/' },
-      to: { path: '^apps/agent-service/src/(observability|progress|app|index)' }
+      to: { path: '^apps/agent-service/src/(observability|progress|tasks|app|index)' }
+    },
+    {
+      name: 'task-use-cases-do-not-depend-on-http-shell',
+      severity: 'error',
+      from: { path: '^apps/agent-service/src/tasks/' },
+      to: { path: '^(apps/agent-service/src/(app|index)\\.ts|apps/extension/)' }
     }
   ],
   options: {
