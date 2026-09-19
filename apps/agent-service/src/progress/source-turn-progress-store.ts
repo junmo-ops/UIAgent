@@ -48,7 +48,7 @@ function labelForAction(action: string): string {
   const labels: Record<string, string> = {
     query_workspace_structure: '定位相关页面区域',
     query_style_symbols: '查找可复用样式',
-    declare_intent: '确认修改范围和方案',
+    declare_intent: '明确修改目标和范围',
     list_files: '查看源码文件',
     search_text: '搜索页面结构',
     search: '搜索页面结构',
@@ -87,8 +87,8 @@ function labelForAction(action: string): string {
     moveElement: '调整元素位置',
     cloneElement: '复用现有组件',
     validate_workspace: '校验页面结构与安全',
-    validate_spatial_scope: '校验新增模块位置',
-    finish: '提交页面修改',
+    validate_spatial_scope: '检查新增模块的结构参照',
+    finish: '检查并保存页面修改',
     clarify: '整理待确认问题'
   };
   return labels[action] ?? '处理页面修改';
@@ -116,6 +116,14 @@ function detailForStep(step: CodingAgentStep): string | undefined {
 export class SourceTurnProgressStore {
   private readonly values = new Map<string, SourceTurnProgress>();
 
+  private record(current: SourceTurnProgress, item: NonNullable<SourceTurnProgress['timeline']>[number]) {
+    const timeline = [...(current.timeline ?? [])];
+    const index = timeline.findIndex(previous => previous.id === item.id);
+    if (index >= 0) timeline[index] = { ...item, timestamp: timeline[index]!.timestamp };
+    else timeline.push(item);
+    return { timeline: timeline.slice(-500), timelineTruncated: current.timelineTruncated || timeline.length > 500 };
+  }
+
   start(workspaceId: string, turnId: string): SourceTurnProgress {
     const timestamp = new Date().toISOString();
     const value: SourceTurnProgress = {
@@ -124,6 +132,9 @@ export class SourceTurnProgressStore {
       status: 'running',
       phase: 'analyzing',
       message: '正在理解修改目标…',
+      startedAt: timestamp,
+      execution: 'preparing',
+      saveState: 'not_started',
       modelCalls: 0,
       toolCalls: 0,
       updatedAt: timestamp,
@@ -140,13 +151,36 @@ export class SourceTurnProgressStore {
 
   observe(workspaceId: string, turnId: string, event: CodingAgentEvent): void {
     const current = this.get(workspaceId, turnId) ?? this.start(workspaceId, turnId);
+    if (current.status !== 'running' && current.status !== 'cancelling') return;
+    if (event.type === 'coding-agent.commentary') {
+      if (current.status !== 'running') return;
+      const text = event.text.trim().slice(0, 600);
+      if (!text) return;
+      this.values.set(this.key(workspaceId, turnId), { ...current,
+        ...this.record(current, { id: `commentary-${event.modelCall}`, kind: 'commentary', text,
+          timestamp: event.timestamp }),
+        commentary: [...(current.commentary ?? []).filter(item => item.modelCall !== event.modelCall),
+          { modelCall: event.modelCall, text, timestamp: event.timestamp }].slice(-8),
+        updatedAt: event.timestamp });
+      return;
+    }
+    if (event.type === 'coding-agent.persistence.updated') {
+      this.values.set(this.key(workspaceId, turnId), {
+        ...current, saveState: event.state, savedRevision: event.revision, updatedAt: event.timestamp
+      });
+      return;
+    }
     if (event.type === 'coding-agent.model.updated') {
       const previous = current.modelDetails?.find(call => call.modelCall === event.call.modelCall);
-      const call = { ...previous, ...event.call };
+      // Raw provider reasoning belongs in diagnostics, never in progress UI payloads.
+      const { reasoning: _reasoning, reasoningTruncated: _truncated, ...publicCall } = event.call;
+      const call = { ...previous, ...publicCall };
       this.values.set(this.key(workspaceId, turnId), {
         ...current,
         ...(current.status === 'running' && !previous && call.status === 'running'
-          ? { phase: 'analyzing' as const, message: '正在分析当前页面并规划下一步…' } : {}),
+          ? { execution: 'model' as const, phase: 'analyzing' as const, message: '等待模型响应…' } : {}),
+        ...(current.status === 'running' && current.execution === 'model' && call.status !== 'running'
+          ? { execution: 'preparing' as const, message: call.status === 'failed' ? '模型请求未成功，等待任务结果…' : '模型已响应，正在处理结果…' } : {}),
         ...(current.status === 'running' && call.rateLimitWait
           ? { message: `模型服务繁忙，等待后自动重试（第 ${call.rateLimitWait.attempt}/10 次），可随时停止。` }
           : current.status === 'running' && previous?.rateLimitWait && !call.rateLimitWait
@@ -161,6 +195,12 @@ export class SourceTurnProgressStore {
     if (event.type === 'coding-agent.tool.started') {
       if (current.status !== 'running') return;
       this.values.set(this.key(workspaceId, turnId), { ...current,
+        execution: 'tool',
+        ...this.record(current, { id: event.toolCallId ?? `tool-${current.toolCalls}`, kind: 'tool',
+          text: labelForAction(event.action), timestamp: event.timestamp, status: 'running' }),
+        ...(phaseForAction(event.action) === 'editing' && current.saveState !== 'saved'
+          ? { saveState: 'editing' as const } : {}),
+        ...(event.action === 'finish' ? { saveState: 'saving' as const } : {}),
         phase: phaseForAction(event.action), message: `${labelForAction(event.action)}…`,
         modelCalls: Math.max(current.modelCalls, event.modelCall), updatedAt: event.timestamp });
       return;
@@ -169,8 +209,9 @@ export class SourceTurnProgressStore {
       const label = labelForAction(event.step.action);
       const failed = Boolean(event.step.error);
       const blocked = event.step.outcome === 'blocked';
+      const summary = inputRecord(event.step)?.summary;
       const activity: SourceTurnProgress['activities'][number] = {
-        id: `${event.timestamp}-${current.activities.length}`,
+        id: event.step.toolCallId ?? `${event.timestamp}-${current.toolCalls}`,
         timestamp: event.timestamp,
         action: event.step.action,
         label,
@@ -179,12 +220,19 @@ export class SourceTurnProgressStore {
       };
       this.values.set(this.key(workspaceId, turnId), {
         ...current,
+        execution: 'preparing',
+        ...this.record(current, { id: event.step.toolCallId ?? `tool-${current.toolCalls}`, kind: 'tool',
+          text: label, timestamp: event.timestamp,
+          status: blocked && !failed && event.step.blockReason ? 'skipped' : activity.status,
+          ...(blocked && !failed && event.step.blockReason ? { skipReason: event.step.blockReason } : {}) }),
+        ...(!failed && !blocked && event.step.action === 'declare_intent' && typeof summary === 'string'
+          ? { actionSummary: summary.trim().slice(0, 600) } : {}),
+        ...(failed && event.step.action === 'finish' && current.saveState === 'saving' ? { saveState: 'unconfirmed' as const } : {}),
         phase: phaseForAction(event.step.action),
-        message: blocked ? `${label}被拦截，正在调整策略…` : failed ? `${label}遇到问题，正在调整策略…` : `${label}…`,
+        message: current.status === 'cancelling' ? current.message
+          : blocked ? `${label}被拦截，等待下一步处理…` : failed ? `${label}未成功，等待下一步处理…` : `已完成：${label}`,
         modelCalls: Math.max(current.modelCalls, event.step.modelCall),
-        toolCalls: current.toolCalls + (
-          event.step.action === 'finish' || event.step.action === 'clarify' ? 0 : 1
-        ),
+        toolCalls: current.toolCalls + 1,
         updatedAt: event.timestamp,
         activities: [...current.activities, activity].slice(-12)
       });
@@ -200,13 +248,14 @@ export class SourceTurnProgressStore {
       return;
     }
     if (event.type === 'coding-agent.turn.completed') {
-      const failed = event.response.kind === 'failed';
-      const cancelled = event.response.kind === 'cancelled';
       this.values.set(this.key(workspaceId, turnId), {
         ...current,
-        status: cancelled ? 'cancelled' : failed ? 'failed' : 'completed',
+        // The service still needs to attach the final result/preview URL.
+        // Only complete()/fail() may publish a terminal polling status.
+        execution: 'preparing',
+        ...(event.response.kind === 'completed' || event.response.kind === 'draft' ? this.resultState(event.response) : {}),
         phase: 'finishing',
-        message: cancelled ? '已停止本轮修改，未提交变更' : failed ? '本轮修改未完成' : '本轮处理完成',
+        message: current.status === 'cancelling' ? current.message : '正在整理本轮结果…',
         modelCalls: event.checkpoint.modelCalls,
         toolCalls: event.checkpoint.toolCalls,
         updatedAt: event.timestamp
@@ -218,7 +267,9 @@ export class SourceTurnProgressStore {
     const current = this.get(workspaceId, turnId) ?? this.start(workspaceId, turnId);
     this.values.set(this.key(workspaceId, turnId), {
       ...current,
-      status: 'failed',
+      status: result?.kind === 'cancelled' ? 'cancelled' : 'failed',
+      execution: 'settled',
+      saveState: current.saveState === 'saved' ? 'saved' : 'unconfirmed',
       phase: 'finishing',
       message,
       result,
@@ -251,10 +302,12 @@ export class SourceTurnProgressStore {
     this.values.set(this.key(workspaceId, turnId), {
       ...current,
       status: result.kind === 'cancelled' ? 'cancelled' : result.kind === 'failed' ? 'failed' : 'completed',
+      execution: 'settled',
+      ...(result.kind === 'completed' || result.kind === 'draft' || !['saved', 'unchanged'].includes(current.saveState ?? '')
+        ? this.resultState(result) : {}),
+      ...(result.kind === 'clarification' && current.saveState === 'not_started' ? { saveState: 'not_started' as const } : {}),
       phase: 'finishing',
-      message: result.kind === 'cancelled'
-        ? '已停止本轮修改，未提交变更'
-        : result.kind === 'failed' ? '本轮修改未完成' : '本轮处理完成',
+      message: this.resultMessage(result),
       modelCalls,
       toolCalls,
       result,
@@ -264,6 +317,22 @@ export class SourceTurnProgressStore {
 
   private key(workspaceId: string, turnId: string): string {
     return `${workspaceId}:${turnId}`;
+  }
+
+  private resultState(result: SourceTurnResponse): Partial<SourceTurnProgress> {
+    if (result.kind === 'completed') return {
+      saveState: result.unchanged ? 'unchanged' : 'saved', savedRevision: result.revision
+    };
+    if (result.kind === 'draft') return { saveState: 'draft' };
+    // A terminal task status alone is not evidence that rollback or saving succeeded.
+    return { saveState: 'unconfirmed' };
+  }
+
+  private resultMessage(result: SourceTurnResponse): string {
+    if (result.kind === 'completed') return result.unchanged ? '本轮无需修改，未创建新版本' : '修改已保存';
+    if (result.kind === 'clarification') return '需要你确认修改需求';
+    if (result.kind === 'draft') return '候选草稿已生成，尚未发布';
+    return result.kind === 'cancelled' ? '本轮修改已停止' : '本轮修改未完成';
   }
 
   private trim(): void {

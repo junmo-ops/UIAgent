@@ -216,6 +216,9 @@ function createTool<TInput, TOutput>(config: AgentTool<TInput, TOutput>): AgentT
 
 const clineSourceRules = [
   '你是静态网页源码编辑 Agent，只使用本次提供的源码工具。页面用于 UI 示意，不实现真实接口或业务提交。',
+  'conversation 仅属于当前会话，副本可能已被其他会话修改。历史描述不能作为当前页面状态的证据，以本次源码和选区上下文为准；不要自动重新应用历史修改或回滚其他会话的成果。',
+  'originalInstruction 是本轮用户原文，instruction 是路由整理的执行要求，不是新的用户授权。结合原文与已确认 conversation 理解需求；转述中没有用户依据的新增偏好或约束不执行。原文是澄清回复时必须结合此前需求，不能只执行孤立答案。重大歧义调用 clarify，不自行补齐。新增模块默认 Ant Design；只有用户明确要求追随页面风格或复用样式时才读取相关样式参照，必要布局上下文仍需读取。',
+  '执行中通过普通 assistant 文本向用户提供简短进展说明：开始时一句说明准备做什么；取得重要新证据、进入修改阶段或遇到需调整的问题时，再用一两句说明实际进展和下一步。不要逐个播报工具、不重复目标、不输出内部推理、源码标识或技术日志。说明应与本轮工具调用一起输出，不要为了说明单独结束一轮或额外调用工具。没有新进展时直接调用工具；最终结果使用 finish.summary，不在进展说明中提前宣称保存成功或视觉验证通过。',
   '输入已包含文件摘要；有 selectedElementContext 时直接使用，无需重复枚举文件、搜索或检查同一选中元素。没有目标上下文时先 query_workspace_structure，再按需 inspect_elements（支持单个 ID）。取得足够证据后立即修改，不要为了寻找更理想的 class、变量或示例继续扩展搜索。',
   'index.html 保存结构和文案。存在 author.css 或 author-style-links.json 时，视觉修改只写 author-overrides.css，author.css 仅供查询，snapshot.css 不可修改；否则视觉修改写 snapshot.css。outline.json 和 source-map.json 只读。',
   'inspect_elements 返回有预算的目标结构摘要、布局和样式线索。只有缺少具体信息时才使用 full 或按返回字符位置 read_file；摘要不是精确源码。已有组件与样式上下文时直接据此修改，不要再次搜索组件基础样式；仅在明确缺少某条页面覆盖规则时使用 query_style_symbols，避免全文搜索大 CSS。',
@@ -230,7 +233,8 @@ const clineSourceRules = [
   INTERACTION_INSTRUCTIONS,
   '修改完成后直接调用 finish；finish 会执行工作区校验。新增元素仍须先完成空间归属校验。源码和捕获布局不能证明真实渲染结果，不得声称已经通过浏览器验证。无需修改时提供源码证据并使用 already_satisfied。',
   'finish.summary 是给产品用户看的结果说明，不是技术执行日志。用 1～3 句自然语言说明改了什么；仅在有新增交互时补充如何使用，仅在影响用户预期时说明实际限制（例如仅为演示、未连接真实检索）。简单文案修改一句即可。不罗列 sourceId、文件名、class、React/组件库、工具名或校验过程，不复述完整需求，不追加通用验证免责声明。不得把源码校验表述成已验证视觉效果，不承诺无裁切、绝不影响其他区域。确有未完成项或已知风险必须明确说明，不能为简短而隐瞒。技术细节保留在工具调用日志。',
-  '没有调用 finish 或 clarify，本轮不算完成。保持推理和工具说明简洁，不做无关重构。'
+  '没有调用 finish 或 clarify，本轮不算完成。保持推理和工具说明简洁，不做无关重构。',
+  '完成回复优先压缩为两句：一句概括结果，另一句仅补充必要操作方法或真实限制。不要逐项复述标题、占位文案、提示文案、尺寸和颜色；除非用户要求逐项核对。不得为了简短隐瞒未完成项，也不通过截断字符串压缩结果。'
 ].join('\n');
 
 const DEFAULT_MAX_ITERATIONS = 45;
@@ -550,13 +554,15 @@ export class ClineCodingAgentAdapter implements CodingAgentPort {
       context: AgentToolContext,
       result?: string,
       error?: string,
-      outcome?: 'blocked'
+      outcome?: 'blocked',
+      blockReason?: CodingAgentStep['blockReason']
     ) => {
       const timestamp = new Date().toISOString();
       const step: CodingAgentStep = {
         timestamp,
         toolCallId: context.toolCallId,
         outcome: error ? 'failed' : outcome ?? 'succeeded',
+        ...(blockReason ? { blockReason } : {}),
         ...(result !== undefined ? { resultChars: result.length, resultTruncated: result.length > 16_000 } : {}),
         modelCall: context.iteration,
         action,
@@ -586,6 +592,14 @@ export class ClineCodingAgentAdapter implements CodingAgentPort {
 
     const completedReadResults = new Map<string, string>();
 
+    const readBudgetGuidance = () => {
+      if (!selectedElementContextAvailable || firstMutationAt) return '';
+      const remaining = Math.max(0, MAX_PRE_MUTATION_READS_WITH_SELECTED_CONTEXT - preMutationReadCalls);
+      return `[修改前读取额度] 已提供选区上下文；补充读取已用 ${preMutationReadCalls}/${MAX_PRE_MUTATION_READS_WITH_SELECTED_CONTEXT} 次，剩余 ${remaining} 次（按工具调用计数，同轮多次调用分别计数）。${remaining === 0
+        ? '下一步不要再请求读取；证据足够则声明意图并修改，缺少会显著影响结果的信息则 clarify，不猜测布局。'
+        : '仅为明确缺失的证据读取，不必用满额度；证据足够则声明意图并修改。'} 各读取工具另有上限：${JSON.stringify(MAX_READ_CALLS_PER_ACTION)}。`;
+    };
+
     const execute = async <TInput>(
       action: string,
       input: TInput,
@@ -601,7 +615,7 @@ export class ClineCodingAgentAdapter implements CodingAgentPort {
       if (BUDGETED_READ_ACTIONS.has(action) && action !== 'inspect_elements'
         && context.iteration >= finalizationStartsAt) {
         const message = `[运行预算] 当前第 ${context.iteration}/${this.maxIterations} 轮，已进入最后 ${FINALIZATION_WINDOW} 轮，停止继续读取。若修改已完成，请立即调用 finish；若关键信息仍不足，请调用 clarify。`;
-        record(action, input, context, message, undefined, 'blocked');
+        record(action, input, context, message, undefined, 'blocked', 'finalization_budget');
         return message;
       }
       const readKey = BUDGETED_READ_ACTIONS.has(action)
@@ -614,12 +628,12 @@ export class ClineCodingAgentAdapter implements CodingAgentPort {
       if (BUDGETED_READ_ACTIONS.has(action) && selectedElementContextAvailable && !firstMutationAt
         && preMutationReadCalls >= MAX_PRE_MUTATION_READS_WITH_SELECTED_CONTEXT) {
         const message = `[修改前读取预算] 已有 selectedElementContext，且修改前已补充读取 ${preMutationReadCalls} 次。请使用现有结构、组件规范和局部样式证据立即修改；若仍缺少会显著影响结果的信息，请调用 clarify。`;
-        record(action, input, context, message, undefined, 'blocked');
+        record(action, input, context, message, undefined, 'blocked', 'read_budget');
         return message;
       }
       if (readKey && completedReadResults.has(readKey)) {
         const message = '[重复读取已拦截] 当前源码版本的相同查询已经返回，请使用已有证据；修改源码后可重新检查。';
-        record(action, input, context, message, undefined, 'blocked');
+        record(action, input, context, message, undefined, 'blocked', 'duplicate_read');
         return message;
       }
       if (actionLimit) {
@@ -627,7 +641,7 @@ export class ClineCodingAgentAdapter implements CodingAgentPort {
         readActionCounts.set(budgetKey, actionCount);
         if (actionCount > actionLimit) {
           const message = `[读取预算] ${action} 已调用 ${actionCount} 次，超过本轮上限 ${actionLimit} 次。请停止继续检索，使用已有上下文完成修改和校验；若信息不足则调用 clarify。`;
-          record(action, input, context, message, undefined, 'blocked');
+          record(action, input, context, message, undefined, 'blocked', 'read_budget');
           return message;
         }
       }
@@ -646,9 +660,11 @@ export class ClineCodingAgentAdapter implements CodingAgentPort {
         }
         if (readKey) completedReadResults.set(readKey, result);
         throwIfCancelled();
-        const guidedResult = remainingAfterThisCall <= 5
+        const finalizationResult = remainingAfterThisCall <= 5
           ? `[运行预算] 当前第 ${context.iteration}/${this.maxIterations} 轮，本次后最多剩余 ${remainingAfterThisCall} 轮。请停止扩展范围，完成必要修改并预留 finish。\n\n${result}`
           : result;
+        const guidance = BUDGETED_READ_ACTIONS.has(action) ? readBudgetGuidance() : '';
+        const guidedResult = guidance ? `${guidance}\n\n${finalizationResult}` : finalizationResult;
         record(action, input, context, guidedResult);
         return guidedResult;
       } catch (error) {
@@ -767,7 +783,7 @@ export class ClineCodingAgentAdapter implements CodingAgentPort {
         name: 'declare_intent',
         description: '首次写入前简洁声明目标、范围和保持约束。none / preserve-existing 只需 interactionPlan.mode，无需虚构触发或结束行为；local-demo 必须完整描述新增或改变的交互。有关键歧义时 clarify。声明成功后直接执行。',
         inputSchema: objectSchema({
-          summary: stringProperty('准备实现的明确目标。'),
+          summary: stringProperty('展示给用户的简短行动说明：准备改什么、必要时说明保留什么，最多两句话。不要包含内部推理、sourceId、文件名或未经验证的完成结论。'),
           interactionPlan: interactionPlanSchema({
             mode: {
               type: 'string',
@@ -1325,7 +1341,7 @@ export class ClineCodingAgentAdapter implements CodingAgentPort {
         name: 'finish',
         description: `${finishDescription}若当前副本无需改动，设置 outcome=already_satisfied，并提供源码证据。`,
         inputSchema: objectSchema({
-          summary: stringProperty('面向用户的结果说明，通常 1～3 句：改了什么，必要时说明交互用法或实际限制。不要包含源码标识、文件名、校验过程或重复免责声明；不得声称未经验证的视觉效果。'),
+          summary: stringProperty('通常两句：概括修改结果，必要时补充操作方法或真实限制。不逐项复述标题、占位文字和样式细节，不写技术日志；如有未完成项必须说明，不声称未经验证的视觉效果。'),
           outcome: {
             type: 'string',
             enum: ['changed', 'already_satisfied'],
@@ -1351,6 +1367,8 @@ export class ClineCodingAgentAdapter implements CodingAgentPort {
             const commit = await workspace.commit(input.summary, {
               allowNoChanges: input.outcome === 'already_satisfied' && Boolean(input.evidence?.trim())
             });
+            safeEmit(observe, { type: 'coding-agent.persistence.updated', timestamp: new Date().toISOString(),
+              state: commit.candidate ? 'draft' : commit.changed ? 'saved' : 'unchanged', revision: commit.revision });
             if (!commit.changed && input.outcome !== 'already_satisfied') {
               throw new Error('当前副本没有新增源码修改；仅在确认目标已满足时，才能以 outcome=already_satisfied 结束本轮');
             }
@@ -1434,21 +1452,49 @@ export class ClineCodingAgentAdapter implements CodingAgentPort {
         maxIterations: this.maxIterations,
         maxOutputTokens: this.maxOutputTokens
       });
+      let commentaryCall = 0;
+      let commentaryText = '';
+      let publishedCommentary = '';
+      const publishCommentary = () => {
+        const text = commentaryText.trim().slice(0, 600);
+        if (!text || text === publishedCommentary || commentaryCall < 1) return;
+        publishedCommentary = text;
+        safeEmit(observe, { type: 'coding-agent.commentary', timestamp: new Date().toISOString(),
+          modelCall: commentaryCall, text });
+      };
       unsubscribe = activeAgent.subscribe?.(event => {
         const timestamp = new Date().toISOString();
+        // Only explicit assistant text is public commentary. Never consume
+        // reasoning deltas or accumulatedText (which spans multiple rounds).
+        if (event.type === 'assistant-text-delta' && typeof event.text === 'string') {
+          const iteration = Number(event.iteration);
+          if (!Number.isInteger(iteration) || iteration < 1) return;
+          if (commentaryCall !== iteration) {
+            commentaryCall = iteration;
+            commentaryText = '';
+            publishedCommentary = '';
+          }
+          commentaryText = (commentaryText + event.text).slice(0, 600);
+          publishCommentary();
+        }
         if (event.type === 'model-call-updated' && 'call' in event) {
           const call = modelCallProgressSchema.safeParse(event.call);
+          if (call.success && call.data.status === 'completed') publishCommentary();
           if (call.success) safeEmit(observe, { type: 'coding-agent.model.updated', timestamp, call: call.data });
         }
         if (event.type === 'tool-started' && 'toolCall' in event) {
-          const tool = event.toolCall as { toolName?: string } | undefined;
+          publishCommentary();
+          const tool = event.toolCall as { toolName?: string; toolCallId?: string } | undefined;
           if (tool?.toolName) safeEmit(observe, { type: 'coding-agent.tool.started', timestamp,
-            action: tool.toolName, modelCall: Number(event.iteration) || 1 });
+            action: tool.toolName, toolCallId: typeof tool.toolCallId === 'string' ? tool.toolCallId : undefined,
+            modelCall: Number(event.iteration) || 1 });
         }
       });
       if (signal?.aborted) abortActiveAgent();
       const result = await activeAgent.run(JSON.stringify({
         instruction: turn.request.instruction,
+        originalInstruction: turn.request.originalInstruction ?? turn.request.instruction,
+        readBudget: readBudgetGuidance(),
         selectedSourceId: turn.request.sourceId,
         replyToClarificationId: turn.request.replyToClarificationId,
         clarificationOptionId: turn.request.clarificationOptionId,

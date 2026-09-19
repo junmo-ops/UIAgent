@@ -18,6 +18,7 @@ import {
   sourceWorkspaceInfoSchema,
   workspaceChatEntrySchema,
   workspaceConversationResponseSchema,
+  workspaceConversationsSchema,
   workspaceListResponseSchema,
   workspaceUpdateRequestSchema,
   installationCredentialSchema,
@@ -179,6 +180,7 @@ export function createApp(
   const sourceProgress = new SourceTurnProgressStore();
   const renderJobs = new RenderJobStore();
   const sourceTurnControllers = new Map<string, AbortController>();
+  const workspaceRuns = new Map<string, { turnId: string; conversationId: string }>();
   const sourceTurnKey = (workspaceId: string, turnId: string) => `${workspaceId}:${turnId}`;
   type AppBindings = { Variables: { principal: AuthPrincipal } };
   const authenticate: MiddlewareHandler<AppBindings> = async (c, next) => {
@@ -215,9 +217,9 @@ export function createApp(
     const startedAt = Date.now();
     let rollbackWorkspace: (() => Promise<void>) | undefined;
     try {
-      const conversation = workspaceStore.conversation(workspaceId);
+      const conversation = workspaceStore.conversation(workspaceId, request.conversationId);
       const candidate = candidateRenderValidationEnabled
-        ? workspaceStore.createCandidate(workspaceId)
+        ? workspaceStore.createCandidate(workspaceId, undefined, request.conversationId)
         : undefined;
       const tools = workspaceStore.tools(workspaceId, candidate);
       rollbackWorkspace = tools.rollback;
@@ -322,6 +324,7 @@ export function createApp(
       }
     }).slice(0, 6_000);
     const repairRequest = sourceTurnRequestSchema.parse({
+      conversationId: reserved.candidate.conversationId ?? workspaceId,
       protocolVersion: PROTOCOL_VERSION,
       editSessionId: `candidate-repair-${context.candidate.candidateId}`,
       turnId: randomUUID(),
@@ -339,7 +342,7 @@ export function createApp(
     const tools = workspaceStore.tools(workspaceId, reserved.candidate);
     try {
       const run = await codingAgent.run(
-        { workspaceId, request: repairRequest, conversation: workspaceStore.conversation(workspaceId) },
+        { workspaceId, request: repairRequest, conversation: workspaceStore.conversation(workspaceId, repairRequest.conversationId) },
         tools,
         undefined,
         signal
@@ -924,12 +927,33 @@ export function createApp(
         return c.text(`样式资源无法加载 (${code})`, code === 'RESOURCE_TOO_LARGE' ? 413 : 502);
       }
     })
+    .get('/v1/workspaces/:workspaceId/conversations', c => {
+      const workspaceId = c.req.param('workspaceId');
+      const running = workspaceRuns.get(workspaceId);
+      return c.json(workspaceConversationsSchema.parse({ conversations: workspaceStore.conversations(workspaceId)
+        .map(item => ({ ...item, ...(running?.conversationId === item.id ? { activeTurnId: running.turnId } : {}) })) }));
+    })
+    .post('/v1/workspaces/:workspaceId/conversations', c => {
+      try { return c.json(workspaceStore.createConversation(c.req.param('workspaceId')), 201); }
+      catch (error) { return c.json({ code: 'CONVERSATION_CREATE_FAILED', message: error instanceof Error ? error.message : '创建会话失败' }, 409); }
+    })
+    .delete('/v1/workspaces/:workspaceId/conversations/:conversationId', c => {
+      const workspaceId = c.req.param('workspaceId');
+      if (workspaceRuns.has(workspaceId)) return c.json({ code: 'WORKSPACE_BUSY', message: '副本正在修改，请等待任务完成或先停止再删除会话' }, 409);
+      try {
+        const conversations = workspaceStore.deleteConversation(workspaceId, c.req.param('conversationId'));
+        const next = conversations[0]!;
+        return c.json({ workspaceId, conversations, entries: workspaceStore.chat(workspaceId, next.id) });
+      } catch (error) {
+        return c.json({ code: 'CONVERSATION_DELETE_FAILED', message: error instanceof Error ? error.message : '删除会话失败' }, 409);
+      }
+    })
     .get('/v1/workspaces/:workspaceId/conversation', c => {
       const workspaceId = c.req.param('workspaceId');
       try {
         return c.json(workspaceConversationResponseSchema.parse({
           workspaceId,
-          entries: workspaceStore.chat(workspaceId)
+          entries: workspaceStore.chat(workspaceId, c.req.query('conversationId'))
         }));
       } catch (error) {
         return c.json({ code: 'WORKSPACE_CONVERSATION_NOT_FOUND', message: error instanceof Error ? error.message : '工作区不存在' }, 404);
@@ -941,7 +965,7 @@ export function createApp(
         workspaceStore.appendChat(workspaceId, c.req.valid('json'));
         return c.json(workspaceConversationResponseSchema.parse({
           workspaceId,
-          entries: workspaceStore.chat(workspaceId)
+          entries: workspaceStore.chat(workspaceId, c.req.valid('json').conversationId)
         }), 201);
       } catch (error) {
         return c.json({ code: 'WORKSPACE_CONVERSATION_APPEND_FAILED', message: error instanceof Error ? error.message : '保存副本对话失败' }, 409);
@@ -1031,12 +1055,16 @@ export function createApp(
       const workspaceId = c.req.param('workspaceId');
       const existing = sourceProgress.get(workspaceId, request.turnId);
       if (existing) return c.json(sourceTurnAcceptedSchema.parse({ kind: 'accepted', turnId: request.turnId }), 202);
+      try { workspaceStore.assertConversation(workspaceId, request.conversationId); }
+      catch { return c.json({ code: 'CONVERSATION_NOT_FOUND', message: '会话不存在或不属于该副本' }, 404); }
+      if (workspaceRuns.has(workspaceId)) return c.json({ code: 'WORKSPACE_BUSY', message: '该副本已有修改任务正在运行，请等待完成或先停止该任务' }, 409);
+      workspaceRuns.set(workspaceId, { turnId: request.turnId, conversationId: request.conversationId ?? workspaceId });
       sourceProgress.start(workspaceId, request.turnId);
       const controller = new AbortController();
       const key = sourceTurnKey(workspaceId, request.turnId);
       sourceTurnControllers.set(key, controller);
       void executeSourceTurn(workspaceId, request, controller.signal, c.get('principal'), c.req.url)
-        .finally(() => sourceTurnControllers.delete(key));
+        .finally(() => { sourceTurnControllers.delete(key); workspaceRuns.delete(workspaceId); });
       return c.json(sourceTurnAcceptedSchema.parse({ kind: 'accepted', turnId: request.turnId }), 202);
     })
     .get('/v1/workspaces/:workspaceId/turns/:turnId/progress', c => {

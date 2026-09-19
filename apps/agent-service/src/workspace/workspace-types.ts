@@ -1,5 +1,5 @@
 import type { CodingAgentConversationTurn } from '@ui-agent/agent-runtime';
-import type { StaticSnapshot, WorkspaceCandidate, SnapshotMetrics, WorkspaceChatEntry } from '@ui-agent/contracts';
+import type { StaticSnapshot, WorkspaceCandidate, SnapshotMetrics, WorkspaceChatEntry, WorkspaceConversation } from '@ui-agent/contracts';
 
 export const WORKSPACE_FILES = ['index.html', 'snapshot.css', 'author-overrides.css', 'module.jsx', 'module.js', 'outline.json', 'source-map.json'] as const;
 
@@ -14,6 +14,7 @@ export type CapturedLayoutIndex = NonNullable<StaticSnapshot['layoutIndex']>;
 export const LAYOUT_INDEX_FILE = 'layout-index.json';
 
 export interface CandidateManifest extends WorkspaceCandidate {
+  conversationId?: string;
   workspaceId: string;
   /** Bounded, observation-triggered repair attempts for this candidate lineage. */
   repairAttempts: number;
@@ -49,9 +50,11 @@ export interface WorkspaceManifest {
   conversation?: WorkspaceConversationTurn[];
   /** User-visible discussion history. It is separate from the compact Agent context above. */
   chat?: WorkspaceChatEntry[];
+  conversations?: WorkspaceConversation[];
 }
 
 export interface WorkspaceConversationTurn extends CodingAgentConversationTurn {
+  conversationId?: string;
   /** Workspace revision visible immediately after this turn. */
   revision?: number;
   /** Clarification awaiting a successful source-changing follow-up. */

@@ -91,6 +91,7 @@ export interface CodingAgentStep {
   timestamp?: string;
   toolCallId?: string;
   outcome?: 'succeeded' | 'failed' | 'blocked';
+  blockReason?: 'read_budget' | 'duplicate_read' | 'finalization_budget';
   resultChars?: number;
   resultTruncated?: boolean;
   modelCall: number;
@@ -131,8 +132,10 @@ export interface CodingAgentCheckpoint {
 }
 
 export type CodingAgentEvent =
+  | { type: 'coding-agent.commentary'; timestamp: string; modelCall: number; text: string }
+  | { type: 'coding-agent.persistence.updated'; timestamp: string; state: 'saved' | 'draft' | 'unchanged'; revision: number }
   | { type: 'coding-agent.model.updated'; timestamp: string; call: import('@ui-agent/contracts').ModelCallProgress }
-  | { type: 'coding-agent.tool.started'; timestamp: string; action: string; modelCall: number }
+  | { type: 'coding-agent.tool.started'; timestamp: string; action: string; modelCall: number; toolCallId?: string }
   | {
       type: 'coding-agent.turn.started';
       timestamp: string;

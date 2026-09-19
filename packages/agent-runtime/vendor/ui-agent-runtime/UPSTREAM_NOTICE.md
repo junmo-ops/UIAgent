@@ -1,5 +1,9 @@
 # Upstream notice
 
+2026-09-19: Tool-start progress is emitted when the serialized executor begins
+the operation, rather than when its model-stream tool-call frame is consumed.
+This keeps user-facing progress aligned with actual execution order.
+
 This directory contains UIAgent's DeepSeek-compatible Agent Runtime. Its public
 `Agent`/`createTool` contract follows the subset of the Cline SDK Agent API
 consumed by UIAgent; it does not include Cline Core, MCP, telemetry, or other

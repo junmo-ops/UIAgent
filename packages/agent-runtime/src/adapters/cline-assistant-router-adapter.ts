@@ -23,6 +23,8 @@ const ROUTER_RULES = [
   '若用户要求修改，但 context.hasWorkspace=false，应调用 clarify，明确告知需先点击“进入副本编辑”；不要询问一个系统无法直接执行的确认动作。',
   '若修改只可能针对具体局部元素但 context.hasSelection=false，应调用 clarify；若用户清楚要求修改整个副本，则可使用 workspace 范围。',
   '若当前输入是对上一条澄清问题的回答，应结合最近对话恢复完整意图，不要只转发孤立答案。',
+  'edit_page.instruction 只忠实整理用户原文、已确认的对话要求和选区指代，不替用户新增约束。未明确要求的风格一致性、组件复用、尺寸、布局、功能范围不能写成用户要求；也不能删掉用户明确提出的要求。新增模块的默认组件策略由编辑 Agent 执行，不在转述中追加“保持原页面风格”等偏好。',
+  '可从上下文确定的指代可以补全；影响结果且尚未确认的语义歧义应 clarify，不把自行猜测的实现方案包装成需求。平台能力限制不是用户要求，不得以补全为由静默缩减需求。',
   'chat 只表示交给独立的聊天 Agent 回答，不要在调用工具前输出答案。',
   '不要输出隐藏推理过程。'
 ].join('\n');
@@ -90,7 +92,7 @@ export class ClineAssistantRouterAdapter implements AssistantRouterPort {
         name: 'edit_page',
         description: '把明确的页面修改需求交给受控源码编辑 Agent。',
         inputSchema: objectSchema({
-          instruction: stringProperty('结合对话补全后的、可独立理解的页面修改要求。'),
+          instruction: stringProperty('忠实整理用户原文与已确认对话，仅补全必要指代；不新增风格、尺寸、布局或功能约束，不静默缩减需求。'),
           targetScope: { type: 'string', enum: ['selection', 'workspace'] }
         }, ['instruction', 'targetScope']),
         lifecycle: { completesRun: true },

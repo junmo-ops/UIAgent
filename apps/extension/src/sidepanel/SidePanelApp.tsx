@@ -1,5 +1,5 @@
 import { lazy, Suspense, useEffect, useRef, useState } from 'react';
-import { Alert, Button, Input, Modal, Spin, Tooltip } from 'antd';
+import { Alert, Button, Input, Modal, Tooltip, message } from 'antd';
 import type { TextAreaRef } from 'antd/es/input/TextArea';
 import {
   type SourceTurnRequest,
@@ -9,12 +9,16 @@ import {
   sourceTurnRequestSchema,
   sourceTurnAcceptedSchema,
   sourceTurnProgressSchema,
+  sourceTurnTranscriptSchema,
   renderJobStatusSchema,
   candidateGeometryValidationResultSchema,
   sourceWorkspaceCreatedSchema,
   sourceWorkspaceInfoSchema,
   workspaceChatEntrySchema,
   workspaceConversationResponseSchema,
+  workspaceConversationSchema,
+  workspaceConversationsSchema,
+  type WorkspaceConversation,
   type AssistantTurnResponse,
   type ContentCommand,
   type ContentCommandResult,
@@ -24,6 +28,7 @@ import {
   type SourceTurnProgress
 } from '@ui-agent/contracts';
 import { onMessage, sendMessage } from '../messaging';
+import { SourceTurnProgressCard } from './SourceTurnProgressCard';
 import { DEFAULT_AGENT_SERVICE_URL, getAgentServiceUrl } from '../service/agent-service-config';
 import { agentServiceFetch } from '../service/agent-service-client';
 import { readAssistantEventStream } from '../service/assistant-event-stream';
@@ -51,15 +56,17 @@ void editorPort;
 type ClarificationPrompt = WorkspaceClarificationPrompt;
 type ChatEntry = WorkspaceChatEntry;
 type CompletedSourceTurn = Extract<SourceTurnResponse, { kind: 'completed' }>;
-type ServiceStatus = 'checking' | 'connected' | 'unavailable';
 interface ActiveWorkspace extends SourceWorkspaceInfo {
   tabId: number;
   sourceTabId?: number;
 }
-type IconName = 'sparkle' | 'target' | 'edit' | 'snapshot' | 'undo' | 'redo' | 'reset' | 'download' | 'upload' | 'arrow' | 'stop' | 'back' | 'more';
+type IconName = 'sparkle' | 'target' | 'edit' | 'snapshot' | 'undo' | 'redo' | 'reset' | 'download' | 'upload' | 'arrow' | 'stop' | 'back' | 'history' | 'logs' | 'newChat' | 'search' | 'trash' | 'close';
 
 function UiIcon({ name }: { name: IconName }) {
   const paths: Record<IconName, React.ReactNode> = {
+    search: <><circle cx="10.5" cy="10.5" r="6.5" /><path d="m16 16 5 5" /></>,
+    trash: <><path d="M4 6h16M9 6V3h6v3M6 6l1 15h10l1-15M10 10v7M14 10v7" /></>,
+    close: <path d="m6 6 12 12M18 6 6 18" />,
     sparkle: <><path d="M12 2.8c.5 4.6 2.6 6.7 7.2 7.2-4.6.5-6.7 2.6-7.2 7.2-.5-4.6-2.6-6.7-7.2-7.2 4.6-.5 6.7-2.6 7.2-7.2Z" /><path d="M18.5 16.5c.2 1.8 1 2.6 2.7 2.8-1.7.2-2.5 1-2.7 2.7-.2-1.7-1-2.5-2.7-2.7 1.7-.2 2.5-1 2.7-2.8Z" /></>,
     target: <><circle cx="12" cy="12" r="7" /><circle cx="12" cy="12" r="2.5" /><path d="M12 2v3M12 19v3M2 12h3M19 12h3" /></>,
     edit: <><path d="M4 20h4l11-11a2.8 2.8 0 0 0-4-4L4 16v4Z" /><path d="m13.5 6.5 4 4" /></>,
@@ -72,7 +79,9 @@ function UiIcon({ name }: { name: IconName }) {
     arrow: <><path d="M12 19V5" /><path d="m6.5 10.5 5.5-5.5 5.5 5.5" /></>,
     stop: <rect x="7.5" y="7.5" width="9" height="9" rx="1.25" fill="currentColor" stroke="none" />,
     back: <><path d="m10 7-5 5 5 5" /><path d="M5 12h14" /></>,
-    more: <><circle cx="5" cy="12" r="1" fill="currentColor" stroke="none" /><circle cx="12" cy="12" r="1" fill="currentColor" stroke="none" /><circle cx="19" cy="12" r="1" fill="currentColor" stroke="none" /></>
+    history: <><path d="M4 5h16v12H9l-5 4V5Z" /><path d="M8 9h8M8 13h5" /></>,
+    logs: <><rect x="5" y="3" width="14" height="18" rx="2" /><path d="M9 8h6M9 12h6M9 16h4" /></>,
+    newChat: <><path d="M4 5h16v12H9l-5 4V5Z" /><path d="M9 11h6m-3-3v6" /></>
   };
   return <svg className="ui-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">{paths[name]}</svg>;
 }
@@ -120,23 +129,41 @@ function previewWorkspaceId(value: string | undefined): string | undefined {
 }
 
 export function SidePanelApp() {
+  const [feedback, feedbackHolder] = message.useMessage();
   const [instruction, setInstruction] = useState('');
   const [chat, setChat] = useState<ChatEntry[]>([]);
+  const [conversationId, setConversationId] = useState<string>();
+  const [conversations, setConversations] = useState<WorkspaceConversation[]>([]);
+  const [conversationsOpen, setConversationsOpen] = useState(false);
+  const [historySearch, setHistorySearch] = useState('');
+  const [historyLoading, setHistoryLoading] = useState(false);
+  const historyButtonRef = useRef<HTMLButtonElement>(null);
+  const [historyPreview, setHistoryPreview] = useState<{ conversation: WorkspaceConversation; entries: ChatEntry[] }>();
+  const [conversationLoading, setConversationLoading] = useState(false);
+  const conversationRequestRef = useRef(0);
+  const conversationSwitchRef = useRef(false);
+  const draftsRef = useRef<Record<string, string>>({});
   const [selection, setSelection] = useState<PageSelection>();
   const [selecting, setSelecting] = useState(false);
   const [notice, setNotice] = useState<string>();
   const [error, setError] = useState<string>();
   const [serviceUrl, setServiceUrl] = useState(DEFAULT_AGENT_SERVICE_URL);
-  const [serviceStatus, setServiceStatus] = useState<ServiceStatus>('checking');
   const [editSessionId, setEditSessionId] = useState<string>(() => crypto.randomUUID());
   const [sourceWorkspace, setSourceWorkspace] = useState<ActiveWorkspace>();
-  const [sourceProgress, setSourceProgress] = useState<SourceTurnProgress>();
+  const [sourceProgress, updateSourceProgress] = useState<SourceTurnProgress>();
+  const sourceProgressRef = useRef<SourceTurnProgress | undefined>(undefined);
+  const sourceAnswerIdRef = useRef<string | undefined>(undefined);
+  const assistantAbortRef = useRef<AbortController | undefined>(undefined);
+  const setSourceProgress = (value: SourceTurnProgress | undefined | ((current: SourceTurnProgress | undefined) => SourceTurnProgress | undefined)) => {
+    const next = typeof value === 'function' ? value(sourceProgressRef.current) : value;
+    sourceProgressRef.current = next;
+    updateSourceProgress(next);
+  };
   const [activeSourceTurn, setActiveSourceTurn] = useState<ActiveSourceTurnSession>();
   const [pendingClarification, setPendingClarification] = useState<ClarificationPrompt>();
   const [assistantBusy, setAssistantBusy] = useState(false);
   const [streamingAnswerId, setStreamingAnswerId] = useState<string>();
   const [snapshotBusy, setSnapshotBusy] = useState(false);
-  const [moreOpen, setMoreOpen] = useState(false);
   const [availableUpdate, setAvailableUpdate] = useState<ExtensionUpdateInfo>();
   const composerRef = useRef<TextAreaRef>(null);
   const repairValidationAbortRef = useRef<AbortController | undefined>(undefined);
@@ -144,7 +171,7 @@ export function SidePanelApp() {
   const [recoveryAttempt, setRecoveryAttempt] = useState(0);
   const [initializationAttempt, setInitializationAttempt] = useState(0);
   const [sessionReady, setSessionReady] = useState(false);
-  const busy = snapshotBusy || assistantBusy || Boolean(activeSourceTurn) || Boolean(sourceWorkspace && !sessionReady);
+  const busy = snapshotBusy || assistantBusy || conversationLoading || Boolean(activeSourceTurn) || Boolean(sourceWorkspace && !sessionReady);
   useEffect(() => {
     let disposed = false;
     let retryTimer: ReturnType<typeof setTimeout> | undefined;
@@ -161,7 +188,7 @@ export function SidePanelApp() {
       try {
         const [response, conversationResponse, persisted] = await Promise.all([
           fetchAgentService(`${url.replace(/\/$/, '')}/v1/workspaces/${workspaceId}`, { signal: AbortSignal.timeout(15_000) }),
-          fetchAgentService(`${url.replace(/\/$/, '')}/v1/workspaces/${workspaceId}/conversation`, { signal: AbortSignal.timeout(15_000) }),
+          fetchAgentService(`${url.replace(/\/$/, '')}/v1/workspaces/${workspaceId}/conversations`, { signal: AbortSignal.timeout(15_000) }),
           sourceWorkspaceSessionItem.getValue(workspaceId)
         ]);
         if (response.status === 404) {
@@ -181,22 +208,27 @@ export function SidePanelApp() {
             ? persisted.sourceTabId
             : undefined
         });
-        const serverConversation = conversationResponse.ok
-          ? workspaceConversationResponseSchema.parse(await conversationResponse.json()).entries
-          : [];
-        if (serverConversation.length > 0) {
+        const available = workspaceConversationsSchema.parse(await conversationResponse.json()).conversations;
+        const preferred = persisted?.activeSourceTurn?.conversationId ?? persisted?.conversationId ?? workspaceId;
+        const selected = available.find(item => item.id === preferred)?.id ?? available[0]?.id ?? workspaceId;
+        const historyResponse = await fetchAgentService(`${url.replace(/\/$/, '')}/v1/workspaces/${workspaceId}/conversation?conversationId=${encodeURIComponent(selected)}`, { signal: AbortSignal.timeout(15_000) });
+        if (!historyResponse.ok) throw new Error('读取会话失败');
+        const serverConversation = workspaceConversationResponseSchema.parse(await historyResponse.json()).entries;
+        if (disposed) return;
+        setConversationId(selected);
+        setConversations(available);
+        draftsRef.current = persisted?.drafts ?? {};
+        setInstruction(draftsRef.current[selected] ?? '');
+        {
           setChat(serverConversation);
           const unresolved = [...serverConversation].reverse().find(entry => (
             entry.clarification && !entry.clarification.resolved
           ));
           setPendingClarification(unresolved?.clarification);
-        } else if (persisted?.workspace.workspaceId === workspace.workspaceId) {
-          // Preserve pre-migration local sessions only while the server has no history yet.
-          setChat(persisted.chat);
         }
         if (persisted?.workspace.workspaceId === workspace.workspaceId) {
           setEditSessionId(persisted.editSessionId);
-          setPendingClarification(persisted.pendingClarification);
+          if ((persisted.conversationId ?? workspaceId) === selected && persisted.activeSourceTurn) setPendingClarification(persisted.pendingClarification);
           setActiveSourceTurn(persisted.activeSourceTurn);
         }
         // Keep the exact candidate URL: its identity is what enables render-job polling.
@@ -225,19 +257,6 @@ export function SidePanelApp() {
     return () => browser.tabs.onActivated.removeListener(onActivated);
   }, [sourceWorkspace?.workspaceId, sourceWorkspace?.previewUrl]);
   useEffect(() => {
-    const controller = new AbortController();
-    const timer = window.setTimeout(() => controller.abort(), 5000);
-    setServiceStatus('checking');
-    fetchAgentService(`${serviceUrl}/health`, { signal: controller.signal, cache: 'no-store' })
-      .then(response => setServiceStatus(response.ok ? 'connected' : 'unavailable'))
-      .catch(() => setServiceStatus('unavailable'))
-      .finally(() => window.clearTimeout(timer));
-    return () => {
-      window.clearTimeout(timer);
-      controller.abort();
-    };
-  }, [serviceUrl]);
-  useEffect(() => {
     let disposed = false;
     const check = async () => {
       try {
@@ -258,6 +277,8 @@ export function SidePanelApp() {
     if (!sourceWorkspace || !sessionReady) return;
     const { tabId: _tabId, sourceTabId: _sourceTabId, ...workspace } = sourceWorkspace;
     void sourceWorkspaceSessionItem.setValue({
+      conversationId,
+      drafts: { ...draftsRef.current, ...(conversationId ? { [conversationId]: instruction } : {}) },
       workspace,
       chat,
       editSessionId,
@@ -265,7 +286,7 @@ export function SidePanelApp() {
       pendingClarification,
       activeSourceTurn
     });
-  }, [sourceWorkspace, chat, editSessionId, pendingClarification, activeSourceTurn, sessionReady]);
+  }, [sourceWorkspace, chat, editSessionId, pendingClarification, activeSourceTurn, sessionReady, conversationId, instruction]);
   useEffect(() => {
     const heartbeat = () => { void command({ type: 'editorHeartbeat' }).catch(() => undefined); };
     const deactivate = () => { void command({ type: 'deactivateEditor' }).catch(() => undefined); };
@@ -293,6 +314,7 @@ export function SidePanelApp() {
     if (!workspace || revision === undefined) return;
     const payload = workspaceChatEntrySchema.parse({
       ...entry,
+      conversationId: conversationId ?? workspace?.workspaceId,
       createdAt: new Date().toISOString(),
       revision
     });
@@ -315,7 +337,11 @@ export function SidePanelApp() {
     revision?: number,
     entryId: string = crypto.randomUUID()
   ) => {
-    const entry: ChatEntry = { id: entryId, role, text, ...(clarification && { clarification }) };
+    const progress = sourceProgressRef.current;
+    const entry: ChatEntry = { id: entryId, role, text, ...(clarification && { clarification }),
+      ...(role === 'assistant' && entryId === sourceAnswerIdRef.current && progress
+        && progress.status !== 'running' && progress.status !== 'cancelling'
+        ? { progress: sourceTurnTranscriptSchema.parse(progress) } : {}) };
     setChat(entries => entries.some(current => current.id === entry.id) ? entries : [...entries, entry]);
     await persistWorkspaceChat(entry, sourceWorkspace, revision);
     return entry;
@@ -332,11 +358,16 @@ export function SidePanelApp() {
     clarificationOptionId?: string
   ) => {
     if (!text || busy) return;
+    setSourceProgress(undefined);
     const turnId = crypto.randomUUID();
     await appendChat('user', text, undefined, undefined, turnId);
     setInstruction('');
     if (replyToClarificationId) setPendingClarification(undefined);
     setAssistantBusy(true);
+    const assistantAbort = new AbortController();
+    assistantAbortRef.current = assistantAbort;
+    let streamedEntryId: string | undefined;
+    let streamedText = '';
     try {
       const request = assistantTurnRequestSchema.parse({
         protocolVersion: PROTOCOL_VERSION,
@@ -364,13 +395,12 @@ export function SidePanelApp() {
       });
       const response = await fetchAgentService(`${serviceUrl.replace(/\/$/, '')}/v1/assistant/turns/stream`, {
         method: 'POST',
+        signal: assistantAbort.signal,
         headers: { 'content-type': 'application/json' },
         body: JSON.stringify(request)
       });
       if (!response.ok) throw await serviceResponseError(response, '智能助手返回');
       let outcome: AssistantTurnResponse | undefined;
-      let streamedEntryId: string | undefined;
-      let streamedText = '';
       await readAssistantEventStream(response, event => {
         if (event.type === 'error') throw new Error(`[${event.code}] ${event.message}`);
         if (event.type === 'result') {
@@ -394,6 +424,7 @@ export function SidePanelApp() {
         }
       });
       const finalOutcome = outcome as AssistantTurnResponse | undefined;
+      if (assistantAbort.signal.aborted) throw new Error('已停止');
       if (!finalOutcome) throw new Error('智能助手数据流提前结束');
       if (finalOutcome.kind === 'failed') throw new Error(`[${finalOutcome.code}] ${finalOutcome.message}`);
       if (finalOutcome.kind === 'answered') {
@@ -428,8 +459,14 @@ export function SidePanelApp() {
         { replyToClarificationId, clarificationOptionId, originalInstruction: text, assistantTraceId: request.traceId }
       );
     } catch (error) {
-      fail(error);
+      if (assistantAbort.signal.aborted) {
+        const stopped: ChatEntry = { id: streamedEntryId ?? crypto.randomUUID(), role: 'assistant',
+          text: streamedText ? `${streamedText}\n\n已停止生成。` : '已停止。' };
+        setChat(entries => streamedEntryId ? entries.map(entry => entry.id === stopped.id ? stopped : entry) : [...entries, stopped]);
+        await persistWorkspaceChat(stopped).catch(fail);
+      } else fail(error);
     } finally {
+      if (assistantAbortRef.current === assistantAbort) assistantAbortRef.current = undefined;
       setAssistantBusy(false);
       setStreamingAnswerId(undefined);
     }
@@ -454,7 +491,7 @@ export function SidePanelApp() {
       const value = await response.json() as Pick<SourceWorkspaceInfo, 'revision' | 'canUndo' | 'canRedo'>;
       setSourceWorkspace(current => current ? { ...current, ...value } : current);
       const conversationResponse = await fetchAgentService(
-        `${serviceUrl.replace(/\/$/, '')}/v1/workspaces/${sourceWorkspace.workspaceId}/conversation`,
+        `${serviceUrl.replace(/\/$/, '')}/v1/workspaces/${sourceWorkspace.workspaceId}/conversation?conversationId=${encodeURIComponent(conversationId ?? sourceWorkspace.workspaceId)}`,
         { cache: 'no-store' }
       );
       if (conversationResponse.ok) {
@@ -513,6 +550,8 @@ export function SidePanelApp() {
     const { tabId: _tabId, sourceTabId: _sourceTabId, ...persistedWorkspace } = workspace;
     const existing = await sourceWorkspaceSessionItem.getValue(workspace.workspaceId);
     await sourceWorkspaceSessionItem.setValue({
+      conversationId: activeTurn.conversationId,
+      drafts: existing?.drafts ?? draftsRef.current,
       workspace: persistedWorkspace,
       chat: existing?.workspace.workspaceId === workspace.workspaceId ? existing.chat : chat,
       editSessionId,
@@ -553,6 +592,7 @@ export function SidePanelApp() {
     let requestMayHaveStarted = false;
     setRecoveryAttempt(0);
     const activeTurn: ActiveSourceTurnSession = {
+      conversationId: conversationId ?? workspace.workspaceId,
       turnId,
       instruction: text,
       baseRevision: workspace.revision,
@@ -560,10 +600,12 @@ export function SidePanelApp() {
       startedAt: new Date().toISOString()
     };
     resumedTurnIdsRef.current.add(turnId);
+    sourceAnswerIdRef.current = activeTurn.assistantEntryId;
     setActiveSourceTurn(activeTurn);
     try {
       await persistActiveSourceTurn(workspace, activeTurn);
       const request = sourceTurnRequestSchema.parse({
+        conversationId: conversationId ?? workspace.workspaceId,
         protocolVersion: PROTOCOL_VERSION,
         editSessionId,
         turnId,
@@ -578,6 +620,7 @@ export function SidePanelApp() {
         status: 'running',
         phase: 'analyzing',
         message: '正在理解修改目标…',
+        startedAt: activeTurn.startedAt,
         modelCalls: 0,
         toolCalls: 0,
         updatedAt: new Date().toISOString(),
@@ -623,6 +666,19 @@ export function SidePanelApp() {
       }
       if (outcome.kind === 'draft') {
         if (!outcome.previewUrl) throw new Error('候选草稿已生成，但没有可打开的预览地址');
+        const finishCandidate = async (text: string, clarification?: ClarificationPrompt,
+          revision = workspace.revision, status: 'completed' | 'failed' | 'cancelled' = 'completed') => {
+          setNotice(undefined);
+          setSourceProgress(current => current ? { ...current, status, execution: 'settled',
+            message: text, updatedAt: new Date().toISOString() } : current);
+          await appendChat('assistant', text, clarification, revision, activeTurn.assistantEntryId);
+        };
+        const candidateUpdate = (text: string) => setSourceProgress(current => current ? { ...current,
+          timeline: [...(current.timeline ?? []), { id: crypto.randomUUID(), kind: 'commentary' as const,
+            text: text.slice(0, 600), timestamp: new Date().toISOString() }].slice(-500)
+        } : current);
+        setSourceProgress(current => current ? { ...current, status: 'running', execution: 'preparing',
+          saveState: 'draft', message: '候选草稿已生成，正在等待真实渲染…', updatedAt: new Date().toISOString() } : current);
         const tab = await browser.tabs.update(workspace.tabId, { url: outcome.previewUrl, active: true });
         const candidateTabId = tab?.id;
         if (candidateTabId === undefined) throw new Error('候选草稿标签页不可用');
@@ -644,7 +700,7 @@ export function SidePanelApp() {
           await command({ type: 'bindEditorTab', tabId: formalTabId, previewUrl: published.previewUrl });
           setSourceWorkspace(current => current ? { ...published, tabId: formalTabId } : current);
         };
-        await appendChat('assistant', `${outcome.summary}。正在等待真实渲染与验证。`, undefined, workspace.revision);
+        candidateUpdate(`${outcome.summary}。正在等待真实渲染与验证。`);
         setNotice('候选草稿已生成，正在检查渲染结果');
         const waitForCandidate = async (draft: {
           summary: string;
@@ -656,13 +712,18 @@ export function SidePanelApp() {
         }): Promise<void> => {
           if (!draft.renderJobId) {
             await returnToFormalPreview();
-            setNotice('候选草稿没有渲染任务，已保留草稿并返回正式副本');
+            await finishCandidate('候选草稿没有渲染任务，已保留草稿并返回正式副本。');
             return;
           }
           const statusUrl = `${serviceUrl.replace(/\/$/, '')}/v1/workspaces/${workspace.workspaceId}/render-jobs/${draft.renderJobId}`;
             const deadline = Date.now() + 35_000;
             while (Date.now() < deadline) {
               await new Promise<void>(resolve => window.setTimeout(resolve, 700));
+              if (sourceProgressRef.current?.status === 'cancelling') {
+                await returnToFormalPreview();
+                await finishCandidate('已停止等待渲染，候选草稿未发布并已保留。', undefined, workspace.revision, 'cancelled');
+                return;
+              }
               const response = await fetchAgentService(statusUrl, { cache: 'no-store' }).catch(() => undefined);
               if (!response?.ok) continue;
               const status = renderJobStatusSchema.parse(await response.json());
@@ -670,7 +731,7 @@ export function SidePanelApp() {
                 if (!status.result) {
                   await returnToFormalPreview();
                   setNotice('真实渲染任务未提供观察结果，候选草稿已保留，已返回正式副本');
-                  await appendChat('assistant', '候选草稿未发布：真实渲染任务没有提供可用于验证的观察结果。候选草稿已保留，已返回正式副本。', undefined, workspace.revision);
+                  await finishCandidate('候选草稿未发布：真实渲染任务没有提供可用于验证的观察结果。候选草稿已保留，已返回正式副本。', undefined, workspace.revision);
                   return;
                 }
                 setNotice('真实渲染证据已收集，正在进行几何验证');
@@ -710,7 +771,7 @@ export function SidePanelApp() {
                   if (validationAbort.signal.aborted) {
                     await returnToFormalPreview();
                     setNotice('已停止候选验证，候选草稿已保留，已返回正式副本');
-                    await appendChat('assistant', '已停止候选验证，候选草稿未发布并已保留。', undefined, workspace.revision);
+                    await finishCandidate('已停止候选验证，候选草稿未发布并已保留。', undefined, workspace.revision, 'cancelled');
                     return;
                   }
                   throw error;
@@ -736,13 +797,13 @@ export function SidePanelApp() {
                       };
                       setPendingClarification(clarification);
                       setNotice('自动修正需要你确认后才能继续，已返回正式副本');
-                      await appendChat('assistant', repair.question, clarification, workspace.revision);
+                      await finishCandidate(repair.question, clarification, workspace.revision);
                       return;
                     }
                     if (repair.kind === 'failed') {
                       await returnToFormalPreview();
                       setNotice('自动修正未完成，候选草稿已保留，已返回正式副本');
-                      await appendChat('assistant', `自动修正未完成：${repair.message}。候选草稿已保留，已返回正式副本。`, undefined, workspace.revision);
+                      await finishCandidate(`自动修正未完成：${repair.message}。候选草稿已保留，已返回正式副本。`, undefined, workspace.revision);
                       return;
                     }
                     const repairedTab = await browser.tabs.update(candidateTabId, { url: repair.previewUrl, active: true });
@@ -751,7 +812,7 @@ export function SidePanelApp() {
                     await command({ type: 'bindEditorTab', tabId: repairedTabId, previewUrl: repair.previewUrl });
                     setSourceWorkspace(current => current ? { ...current, tabId: repairedTabId } : current);
                     setNotice(`第 ${repair.attempt} 次自动修正已生成，正在重新检查渲染结果`);
-                    await appendChat('assistant', `几何验证发现可修正问题，已生成第 ${repair.attempt} 次自动修正候选，正在重新渲染验证。${details ? `\n${details}` : ''}`, undefined, workspace.revision);
+                    candidateUpdate(`第 ${repair.attempt} 次修正候选已生成，正在重新渲染验证。`);
                     await waitForCandidate(repair);
                     return;
                   }
@@ -759,8 +820,7 @@ export function SidePanelApp() {
                   setNotice(verification.validation.overall === 'unverifiable'
                     ? '当前证据不足以验证该需求，候选草稿已保留，已返回正式副本'
                     : '几何验证未通过，候选草稿已保留，已返回正式副本');
-                  await appendChat(
-                    'assistant',
+                  await finishCandidate(
                     `候选草稿未发布：${verification.validation.overall === 'unverifiable' ? '当前渲染证据不足以验证需求。' : '几何验证未通过。'}候选草稿已保留，已返回正式副本。${details ? `\n${details}` : ''}`,
                     undefined,
                     workspace.revision
@@ -779,19 +839,22 @@ export function SidePanelApp() {
                 await command({ type: 'bindEditorTab', tabId: publishedTabId, previewUrl: published.previewUrl });
                 setSourceWorkspace(current => current ? { ...published, tabId: publishedTabId } : current);
                 setNotice('几何验证通过，已保存正式 Revision');
-                await appendChat('assistant', `${draft.summary}。已完成真实几何验证并保存为 Revision ${verification.publication.revision}。`, undefined, verification.publication.revision);
+                setSourceProgress(current => current ? { ...current, status: 'completed', execution: 'settled',
+                  saveState: 'saved', savedRevision: verification.publication!.revision,
+                  message: '修改已保存', updatedAt: new Date().toISOString() } : current);
+                await finishCandidate(`${draft.summary}。已完成真实几何验证并保存为 Revision ${verification.publication.revision}。`, undefined, verification.publication.revision);
                 return;
               }
               if (status.status === 'failed' || status.status === 'cancelled') {
                 await returnToFormalPreview();
                 setNotice(`候选草稿未完成渲染：${status.failure ?? status.status}；已返回正式副本`);
-                await appendChat('assistant', `候选草稿未完成渲染：${status.failure ?? status.status}。候选草稿已保留，已返回正式副本。`, undefined, workspace.revision);
+                await finishCandidate(`候选草稿未完成渲染：${status.failure ?? status.status}。候选草稿已保留，已返回正式副本。`, undefined, workspace.revision);
                 return;
               }
             }
             await returnToFormalPreview();
             setNotice('候选草稿等待渲染超时，已保留草稿并返回正式副本');
-            await appendChat('assistant', '候选草稿未发布：等待真实渲染超时。候选草稿已保留，已返回正式副本。', undefined, workspace.revision);
+            await finishCandidate('候选草稿未发布：等待真实渲染超时。候选草稿已保留，已返回正式副本。', undefined, workspace.revision);
         };
         try {
           await waitForCandidate(outcome);
@@ -809,7 +872,7 @@ export function SidePanelApp() {
     } finally {
       setSnapshotBusy(false);
       if (settled || !requestMayHaveStarted) {
-        setSourceProgress(undefined);
+        setSourceProgress(current => current?.status === 'running' || current?.status === 'cancelling' ? undefined : current);
         setActiveSourceTurn(undefined);
         await clearPersistedActiveSourceTurn(workspace.workspaceId, activeTurn.turnId).catch(() => undefined);
       } else {
@@ -820,7 +883,15 @@ export function SidePanelApp() {
   };
 
   const cancelSourceTurn = async () => {
+    if (assistantBusy && assistantAbortRef.current) {
+      assistantAbortRef.current.abort();
+      return;
+    }
     if (!sourceWorkspace || !sourceProgress || sourceProgress.status !== 'running') return;
+    if (sourceProgress.saveState === 'draft' && !repairValidationAbortRef.current) {
+      setSourceProgress(current => current ? { ...current, status: 'cancelling', message: '正在停止…' } : current);
+      return;
+    }
     if (repairValidationAbortRef.current) {
       repairValidationAbortRef.current.abort(new Error('用户停止候选验证'));
       setSourceProgress(current => current ? {
@@ -838,7 +909,7 @@ export function SidePanelApp() {
         { method: 'POST' }
       );
       if (!response.ok) throw await serviceResponseError(response, '停止源码 Agent 返回');
-      setSourceProgress(current => current ? {
+      setSourceProgress(current => current?.status === 'running' ? {
         ...current,
         status: 'cancelling',
         phase: 'finishing',
@@ -849,6 +920,7 @@ export function SidePanelApp() {
     }
   };
   const resumeSourceTurn = async (workspace: ActiveWorkspace, activeTurn: ActiveSourceTurnSession) => {
+    sourceAnswerIdRef.current = activeTurn.assistantEntryId;
     let settled = false;
     setSnapshotBusy(true);
     setSourceProgress({
@@ -857,6 +929,7 @@ export function SidePanelApp() {
       status: 'running',
       phase: 'finishing',
       message: '正在恢复上次修改任务…',
+      startedAt: activeTurn.startedAt,
       modelCalls: 0,
       toolCalls: 0,
       updatedAt: new Date().toISOString(),
@@ -868,6 +941,8 @@ export function SidePanelApp() {
         if (!progress) {
           const refreshed = await refreshFormalWorkspace(workspace);
           const message = '上次修改任务的运行状态无法恢复，服务可能已重启。当前已保存的副本版本仍可继续编辑。';
+          setSourceProgress(current => current ? { ...current, status: 'failed', execution: 'settled',
+            saveState: 'unconfirmed', message, updatedAt: new Date().toISOString() } : current);
           setNotice(message);
           await appendChat('assistant', message, undefined, refreshed.revision, activeTurn.assistantEntryId);
           await command({ type: 'reloadPreview' });
@@ -902,7 +977,7 @@ export function SidePanelApp() {
     } finally {
       setSnapshotBusy(false);
       if (settled) {
-        setSourceProgress(undefined);
+        setSourceProgress(current => current?.status === 'running' || current?.status === 'cancelling' ? undefined : current);
         setActiveSourceTurn(undefined);
         await clearPersistedActiveSourceTurn(workspace.workspaceId, activeTurn.turnId).catch(() => undefined);
       } else {
@@ -933,6 +1008,8 @@ export function SidePanelApp() {
         sourceTabId: persisted?.sourceTabId ?? tab.id
       });
       setChat(persisted?.chat ?? []);
+      setConversationId(persisted?.conversationId ?? workspace.workspaceId);
+      setConversations([]);
       setPendingClarification(persisted?.pendingClarification);
       setEditSessionId(persisted?.editSessionId ?? crypto.randomUUID());
       setSessionReady(true);
@@ -962,47 +1039,210 @@ export function SidePanelApp() {
   };
   const examples = ['把按钮文案改成“确定”', '在右侧增加一个筛选项', '点击按钮时展开下方内容'];
 
+  const closeConversations = () => {
+    ++conversationRequestRef.current;
+    setConversationsOpen(false);
+    setHistoryPreview(undefined);
+    setHistoryLoading(false);
+    historyButtonRef.current?.focus();
+  };
+  const openConversations = async () => {
+    if (!sourceWorkspace) return;
+    const requestId = ++conversationRequestRef.current;
+    setConversationsOpen(true);
+    setHistoryPreview(undefined);
+    setHistorySearch('');
+    setHistoryLoading(true);
+    try {
+      const response = await fetchAgentService(`${serviceUrl.replace(/\/$/, '')}/v1/workspaces/${sourceWorkspace.workspaceId}/conversations`, { signal: AbortSignal.timeout(15_000) });
+      if (!response.ok) throw await serviceResponseError(response, '读取会话列表返回');
+      const available = workspaceConversationsSchema.parse(await response.json()).conversations;
+      if (requestId === conversationRequestRef.current) setConversations(available);
+    } catch (error) { if (requestId === conversationRequestRef.current) fail(error); }
+    finally { if (requestId === conversationRequestRef.current) setHistoryLoading(false); }
+  };
+  const previewConversation = async (conversation: WorkspaceConversation) => {
+    if (!sourceWorkspace) return;
+    const requestId = ++conversationRequestRef.current;
+    setHistoryPreview(undefined);
+    setHistoryLoading(true);
+    try {
+      const response = await fetchAgentService(`${serviceUrl.replace(/\/$/, '')}/v1/workspaces/${sourceWorkspace.workspaceId}/conversation?conversationId=${conversation.id}`, { signal: AbortSignal.timeout(15_000) });
+      if (!response.ok) throw await serviceResponseError(response, '读取历史会话返回');
+      const entries = workspaceConversationResponseSchema.parse(await response.json()).entries;
+      if (requestId === conversationRequestRef.current) setHistoryPreview({ conversation, entries });
+    } catch (error) { if (requestId === conversationRequestRef.current) fail(error); }
+    finally { if (requestId === conversationRequestRef.current) setHistoryLoading(false); }
+  };
+  const changeConversation = async (target?: WorkspaceConversation) => {
+    if (!sourceWorkspace || busy || conversationSwitchRef.current) return;
+    conversationSwitchRef.current = true;
+    setConversationLoading(true);
+    try {
+      const base = `${serviceUrl.replace(/\/$/, '')}/v1/workspaces/${sourceWorkspace.workspaceId}`;
+      let selected = target;
+      if (!selected) {
+        const response = await fetchAgentService(`${base}/conversations`, { method: 'POST', signal: AbortSignal.timeout(15_000) });
+        if (!response.ok) throw await serviceResponseError(response, '新建会话返回');
+        selected = workspaceConversationSchema.parse(await response.json());
+        setConversations(items => [...items, selected!]);
+      }
+      const [historyResponse, workspaceResponse] = await Promise.all([
+        fetchAgentService(`${base}/conversation?conversationId=${selected.id}`, { signal: AbortSignal.timeout(15_000) }),
+        fetchAgentService(base, { signal: AbortSignal.timeout(15_000) })
+      ]);
+      if (!historyResponse.ok || !workspaceResponse.ok) throw new Error('暂时无法切换会话，请重试');
+      const entries = workspaceConversationResponseSchema.parse(await historyResponse.json()).entries;
+      const latest = sourceWorkspaceInfoSchema.parse(await workspaceResponse.json());
+      if (conversationId) draftsRef.current[conversationId] = instruction;
+      if (latest.revision !== sourceWorkspace.revision) {
+        await command({ type: 'reloadPreview' });
+        setSelection(undefined);
+      }
+      setSourceWorkspace({ ...sourceWorkspace, ...latest });
+      setConversationId(selected.id);
+      setEditSessionId(crypto.randomUUID());
+      setInstruction(draftsRef.current[selected.id] ?? '');
+      setChat(entries);
+      setPendingClarification([...entries].reverse().find(entry => entry.clarification && !entry.clarification.resolved)?.clarification);
+      setSourceProgress(undefined);
+      setError(undefined);
+      setNotice(selected.lastRevision !== latest.revision
+        ? '页面版本已更新。切换会话不会回滚页面，后续修改将基于当前副本。'
+        : undefined);
+      if (!target) void feedback.success({ key: 'conversation-action', content: '新会话已创建，页面与历史对话已保留', duration: 3 });
+      ++conversationRequestRef.current;
+      setConversationsOpen(false);
+      setHistoryPreview(undefined);
+    } catch (error) { fail(error); }
+    finally { conversationSwitchRef.current = false; setConversationLoading(false); }
+  };
+  const deleteConversation = (target: WorkspaceConversation) => {
+    if (!sourceWorkspace || busy || target.activeTurnId) return;
+    Modal.confirm({
+      title: '删除这段会话？',
+      content: `将永久删除“${target.title}”的对话及处理过程，无法恢复。副本页面、修改版本和诊断日志不会删除。`,
+      okText: '删除会话', cancelText: '取消', okButtonProps: { danger: true },
+      onOk: async () => {
+        if (conversationSwitchRef.current) throw new Error('正在处理会话操作，请稍后重试');
+        conversationSwitchRef.current = true;
+        setConversationLoading(true);
+        ++conversationRequestRef.current;
+        try {
+          const response = await fetchAgentService(`${serviceUrl.replace(/\/$/, '')}/v1/workspaces/${sourceWorkspace.workspaceId}/conversations/${target.id}`,
+            { method: 'DELETE', signal: AbortSignal.timeout(15_000) });
+          if (!response.ok) throw await serviceResponseError(response, '删除会话返回');
+          const payload: unknown = await response.json();
+          const remaining = workspaceConversationsSchema.parse(payload).conversations;
+          const entries = workspaceConversationResponseSchema.parse(payload).entries;
+          const next = remaining[0];
+          if (!next) throw new Error('删除后未返回可用会话，请刷新侧栏');
+          delete draftsRef.current[target.id];
+          setConversations(remaining);
+          setHistoryPreview(undefined);
+          setError(undefined);
+          if (target.id === conversationId) {
+            setConversationId(next.id);
+            setEditSessionId(crypto.randomUUID());
+            setChat(entries);
+            setInstruction(draftsRef.current[next.id] ?? '');
+            setPendingClarification([...entries].reverse().find(entry => entry.clarification && !entry.clarification.resolved)?.clarification);
+            setSourceProgress(undefined);
+          }
+          const persisted = await sourceWorkspaceSessionItem.getValue(sourceWorkspace.workspaceId);
+          if (persisted) {
+            const drafts = { ...persisted.drafts };
+            delete drafts[target.id];
+            await sourceWorkspaceSessionItem.setValue({ ...persisted, drafts,
+              ...(persisted.conversationId === target.id ? { conversationId: next.id, chat: entries,
+                pendingClarification: undefined, activeSourceTurn: undefined } : {}) });
+          }
+          void feedback.success({ key: 'conversation-action', content: '会话已删除，页面与修改版本保留', duration: 3 });
+        } catch (error) { fail(error); throw error; }
+        finally { conversationSwitchRef.current = false; setConversationLoading(false); }
+      }
+    });
+  };
+  const visibleConversations = [...conversations]
+    .filter(item => `${item.title} ${item.preview ?? ''}`.toLocaleLowerCase().includes(historySearch.trim().toLocaleLowerCase()))
+    .sort((a, b) => b.updatedAt.localeCompare(a.updatedAt));
+  const conversationTitle = chat.find(entry => entry.role === 'user')?.text.slice(0, 40)
+    ?? conversations.find(item => item.id === conversationId)?.title ?? '新会话';
+
   return (
     <main className="panel">
-      <section className="workspace">
-        <div className="conversation-header">
-          <span>{sourceWorkspace ? '静态副本' : '新建 UI 示意'}</span>
-          <div className="conversation-meta">
-            <div className="more-menu-wrap">
-              <Button
-                className="header-back"
-                type="text"
-                size="small"
-                icon={<UiIcon name="more" />}
-                onClick={() => setMoreOpen(value => !value)}
-              >
-                更多
-              </Button>
-              {moreOpen && <div className="more-menu">
-                <button type="button" onClick={() => { setMoreOpen(false); void openWorkspaceManager(); }}><UiIcon name="snapshot" />副本</button>
-                <button type="button" onClick={() => { setMoreOpen(false); void openLogs(); }}><UiIcon name="snapshot" />日志</button>
-              </div>}
-            </div>
-            <Tooltip title={`Agent Service：${serviceUrl}`}>
-              <span className={`service-status ${serviceStatus}`}><i />{serviceStatus === 'connected' ? '已连接' : serviceStatus === 'checking' ? '连接中' : '未连接'}</span>
-            </Tooltip>
+      {feedbackHolder}
+      {conversationsOpen && <section className="history-panel" aria-label="历史会话"
+        onKeyDown={event => { if (event.key === 'Escape' && !conversationLoading) { event.stopPropagation(); closeConversations(); } }}>
+        <header className="history-header">
+          <h1>历史会话 <span>({conversations.length})</span></h1>
+          <button className="history-icon-button" type="button" aria-label="关闭历史会话" onClick={closeConversations}><UiIcon name="close" /></button>
+        </header>
+        {error && <Alert type="error" message={error} />}
+        {historyPreview ? <div className="conversation-preview">
+          <div className="conversation-preview-heading">
+            <button className="history-icon-button" type="button" aria-label="返回历史列表" onClick={() => setHistoryPreview(undefined)}><UiIcon name="back" /></button>
+            <strong title={historyPreview.conversation.title}>{historyPreview.conversation.title}</strong>
+            <Button type="text" size="small" disabled={busy}
+              onClick={() => historyPreview.conversation.id === conversationId ? closeConversations() : void changeConversation(historyPreview.conversation)}>继续会话</Button>
           </div>
-        </div>
-
+          {busy && <p className="history-hint">只读查看，不影响正在进行的任务。</p>}
+          <div className="conversation-preview-messages">
+            {historyPreview.entries.length === 0 && <p className="history-empty">还没有消息</p>}
+            {historyPreview.entries.map(entry => <div key={entry.id} className={`bubble ${entry.role}`}>
+              {entry.progress && <SourceTurnProgressCard progress={entry.progress} />}
+              <Suspense fallback={<div className="markdown-streaming">{entry.text}</div>}><MarkdownMessage text={entry.text} /></Suspense>
+            </div>)}
+          </div>
+        </div> : <>
+          <Input className="history-search" autoFocus allowClear prefix={<UiIcon name="search" />}
+            aria-label="搜索会话标题和摘要" placeholder="搜索会话" value={historySearch}
+            onChange={event => setHistorySearch(event.target.value)} />
+          {busy && <p className="history-hint">任务进行中，可只读查看历史。</p>}
+          <div className="conversation-list" aria-busy={historyLoading || conversationLoading}>
+            {historyLoading ? <p className="history-empty" role="status">正在加载…</p> : <>
+              {visibleConversations.length === 0 && <p className="history-empty">{historySearch.trim() ? '没有找到匹配的会话' : '暂无历史会话'}</p>}
+              {visibleConversations.map(item => <div key={item.id} className={`conversation-list-row${item.id === conversationId ? ' is-current' : ''}`}>
+                <button type="button" className="conversation-item" disabled={conversationLoading}
+                  aria-current={item.id === conversationId ? 'true' : undefined}
+                  title={item.title}
+                  onClick={() => {
+                    if (item.id === conversationId) closeConversations();
+                    else if (busy) void previewConversation(item);
+                    else void changeConversation(item);
+                  }}>
+                  <span className="conversation-item-heading"><strong>{item.title}</strong>{item.id === conversationId && <em>当前</em>}</span>
+                  <small>{item.preview || '还没有消息'}</small>
+                </button>
+                <Tooltip title="删除会话"><button type="button" className="history-icon-button conversation-delete"
+                  aria-label={`删除会话：${item.title}`} disabled={busy || Boolean(item.activeTurnId)}
+                  onClick={() => deleteConversation(item)}><UiIcon name="trash" /></button></Tooltip>
+              </div>)}
+            </>}
+          </div>
+        </>}
+      </section>}
+      <section className="workspace" hidden={conversationsOpen}>
+        <header className="conversation-header">
+          <div className="conversation-heading">
+            <h1 title={sourceWorkspace ? conversationTitle : undefined}>{sourceWorkspace ? conversationTitle : 'UI 助手'}</h1>
+          </div>
+          {sourceWorkspace && <Tooltip title={busy ? '请等待当前任务完成或先停止，右侧可查看历史会话' : '保留当前页面和历史对话'}>
+            <Button className="new-conversation-button" type="text" icon={<UiIcon name="newChat" />}
+              disabled={busy} onClick={() => void changeConversation()}>新建会话</Button>
+          </Tooltip>}
+        </header>
         {sourceWorkspace && (
           <div className={`selection-strip ${selection ? 'has-selection' : ''}`}>
             <span className="selection-symbol"><UiIcon name="target" /></span>
             <div className="selection-copy">
               <span className="selection-label">{selection ? '当前选区' : '选择编辑区域'}</span>
               <span className="selection-value">
-                {selection
-                  ? `${selection.selected.tag} · ${selection.selected.text || '无文本内容'}`
-                  : '在静态副本中选择需要调整的元素'}
+                {selection ? `${selection.selected.tag} · ${selection.selected.text || '无文本内容'}` : '在静态副本中选择需要调整的元素'}
               </span>
             </div>
             <div className="selection-actions">
-              <Button
-                type="text"
+              <Button type="text"
                 className="selection-action"
                 icon={<UiIcon name="edit" />}
                 disabled={busy}
@@ -1037,6 +1277,7 @@ export function SidePanelApp() {
               && pendingClarification?.clarificationId === entry.clarification.clarificationId;
             return (
               <div key={entry.id} className={`bubble ${entry.role}${entry.clarification ? ' clarification' : ''}`}>
+                {entry.role === 'assistant' && entry.progress && <SourceTurnProgressCard progress={entry.progress} />}
                 {entry.role === 'assistant' && !entry.clarification && entry.id !== streamingAnswerId
                   ? (
                       <Suspense fallback={<div className="markdown-streaming">{entry.text}</div>}>
@@ -1069,35 +1310,17 @@ export function SidePanelApp() {
               </div>
             );
           })}
-          {busy && sourceWorkspace && snapshotBusy && sourceProgress ? (
-            <div className="agent-progress-card">
-              <div className="agent-progress-head">
-                <Spin size="small" />
-                <div>
-                  <strong>{sourceProgress.message}</strong>
-                  <span>已进行 {sourceProgress.modelCalls} 轮分析 · {sourceProgress.toolCalls} 次工具操作</span>
-                </div>
-              </div>
-              {sourceProgress.activities.length > 0 && (
-                <div className="agent-progress-list">
-                  {sourceProgress.activities.slice(-5).map(activity => (
-                    <div key={activity.id} className={`agent-progress-item ${activity.status}`}>
-                      <i />
-                      <span>{activity.label}{activity.detail ? ` · ${activity.detail}` : ''}</span>
-                    </div>
-                  ))}
-                </div>
-              )}
-            </div>
+          {sourceWorkspace && sourceProgress?.workspaceId === sourceWorkspace.workspaceId
+            && !chat.some(entry => entry.progress?.turnId === sourceProgress.turnId)
+            && (snapshotBusy || !busy) ? (
+            <SourceTurnProgressCard key={sourceProgress.turnId} progress={sourceProgress} />
           ) : sourceWorkspace && assistantBusy && !streamingAnswerId ? (
             <div className="bubble assistant working">
-              <Spin size="small" />
-              <span>正在理解你的问题…</span>
+              <span role="status">正在思考…</span>
             </div>
           ) : snapshotBusy && sourceWorkspace && (
             <div className="bubble assistant working">
-              <Spin size="small" />
-              <span>正在读取并修改静态源码…</span>
+              <span role="status">正在思考…</span>
             </div>
           )}
           {notice && <Alert className="inline-alert" type="info" showIcon message={notice} closable onClose={() => setNotice(undefined)} />}
@@ -1146,16 +1369,16 @@ export function SidePanelApp() {
                 <Tooltip title="导出当前可视区域"><Button className="export-action" type="text" shape="circle" aria-label="导出截图" disabled={busy} icon={<UiIcon name="download" />} onClick={exportScreenshot} /></Tooltip>
               </div>
             ) : <div />}
-            {sourceProgress && (sourceProgress.status === 'running' || sourceProgress.status === 'cancelling') ? (
-              <Tooltip title={sourceProgress.status === 'cancelling' ? '正在停止' : '停止生成'}>
+            {assistantBusy || sourceProgress && (sourceProgress.status === 'running' || sourceProgress.status === 'cancelling') ? (
+              <Tooltip title={sourceProgress?.status === 'cancelling' ? '正在停止' : '停止生成'}>
                 <Button
                   className="send-button stop-button"
                   type="primary"
                   shape="circle"
-                  aria-label={sourceProgress.status === 'cancelling' ? '正在停止' : '停止生成'}
-                  disabled={sourceProgress.status === 'cancelling'}
-                  loading={sourceProgress.status === 'cancelling'}
-                  icon={sourceProgress.status === 'running' ? <UiIcon name="stop" /> : undefined}
+                  aria-label={sourceProgress?.status === 'cancelling' ? '正在停止' : '停止生成'}
+                  disabled={sourceProgress?.status === 'cancelling'}
+                  loading={sourceProgress?.status === 'cancelling'}
+                  icon={sourceProgress?.status !== 'cancelling' ? <UiIcon name="stop" /> : undefined}
                   onClick={() => void cancelSourceTurn()}
                 />
               </Tooltip>
@@ -1181,6 +1404,15 @@ export function SidePanelApp() {
         </footer>}
       </section>
 
+      <nav className="side-tools" aria-label="辅助工具">
+        <Tooltip title="历史会话" placement="left"><button type="button" aria-label="历史会话"
+          ref={historyButtonRef} disabled={!sourceWorkspace} aria-pressed={conversationsOpen} onClick={() => conversationsOpen ? closeConversations() : void openConversations()}><UiIcon name="history" /></button></Tooltip>
+        <Tooltip title="副本管理" placement="left"><button type="button" aria-label="副本管理" onClick={() => void openWorkspaceManager()}><UiIcon name="snapshot" /></button></Tooltip>
+        {sourceWorkspace?.sourceTabId && <Tooltip title="返回原页面" placement="left"><button type="button" aria-label="返回原页面" disabled={busy}
+          onClick={() => void returnToSource()}><UiIcon name="back" /></button></Tooltip>}
+        <div className="side-tools-spacer" />
+        <Tooltip title="运行日志" placement="left"><button type="button" aria-label="运行日志" onClick={() => void openLogs()}><UiIcon name="logs" /></button></Tooltip>
+      </nav>
       <Modal
         title={`必须更新 UI 需求示意助手至 v${availableUpdate?.version ?? ''}`}
         open={Boolean(availableUpdate)}

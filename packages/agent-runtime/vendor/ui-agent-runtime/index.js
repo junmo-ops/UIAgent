@@ -116,6 +116,8 @@ export class Agent {
           const toolStarted = Date.now();
           const toolLog = { name: tool.name, toolCallId: call?.toolCallId, status: 'running' };
           currentCall?.tools.push(toolLog);
+          this.emit({ type: 'tool-started', iteration: iterations,
+            toolCall: { toolName: tool.name, toolCallId: call?.toolCallId } });
           try {
             const value = await tool.execute(args, { agentId, runId, iteration: iterations,
               toolCallId: call?.toolCallId, signal: controller.signal, metadata: this.config.toolContextMetadata,
@@ -209,7 +211,6 @@ export class Agent {
                   ...(event.toolName ? { name: sanitizeDiagnosticText(event.toolName) } : {}),
                   ...(event.toolCallId ? { toolCallId: sanitizeDiagnosticText(event.toolCallId) } : {})
                 });
-                this.emit({ type: 'tool-started', iteration: iterations, toolCall: event });
               }
               if (event.type === 'tool-input-error') {
                 if (!event.toolCallId || !reportedToolErrorIds.has(event.toolCallId)) {

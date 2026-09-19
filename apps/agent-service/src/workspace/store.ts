@@ -1,4 +1,5 @@
 import { WorkspaceRevisionHistory } from './revision-history';
+import type { WorkspaceConversation } from '@ui-agent/contracts';
 import { validateWorkspaceFiles } from './workspace-validation';
 import { renderWorkspacePreview } from './preview';
 import { createEditingSession } from './editing-session';
@@ -450,7 +451,8 @@ export class SourceWorkspaceStore {
       .map(item => item.snapshot);
   }
 
-  createCandidate(workspaceId: string, baseRevision?: number): WorkspaceCandidate {
+  createCandidate(workspaceId: string, baseRevision?: number, conversationId = workspaceId): WorkspaceCandidate {
+    this.assertConversation(workspaceId, conversationId);
     const workspace = this.get(workspaceId);
     if (!workspace) throw new Error('静态源码工作区不存在');
     if (this.active.has(workspaceId)) throw new Error('当前工作区已有正在执行的修改，不能创建候选');
@@ -468,6 +470,7 @@ export class SourceWorkspaceStore {
       throw new Error('当前副本没有可用的 B 方案样式资源，已禁用 A 方案兜底');
     }
     const manifest: CandidateManifest = {
+      conversationId,
       workspaceId,
       baseRevision: revision,
       candidateId,
@@ -482,7 +485,7 @@ export class SourceWorkspaceStore {
     return manifest;
   }
 
-  candidate(workspaceId: string, candidateId: string, candidateVersion: number): WorkspaceCandidate | undefined {
+  candidate(workspaceId: string, candidateId: string, candidateVersion: number): CandidateManifest | undefined {
     if (!this.get(workspaceId) || !this.isSafeCandidateId(candidateId) || !Number.isSafeInteger(candidateVersion) || candidateVersion < 0) return undefined;
     const root = resolve(this.storage.workspacePath(workspaceId), 'candidates', candidateId);
     const raw = this.storage.readOptionalFile(resolve(root, 'manifest.json'));
@@ -512,7 +515,7 @@ export class SourceWorkspaceStore {
    * The reservation is durable so retries, duplicate requests, or a process
    * failure cannot create an unbounded correction loop.
    */
-  reserveCandidateRepair(workspaceId: string, candidateId: string, candidateVersion: number, maxAttempts = 2): { candidate: WorkspaceCandidate; attempt: number } | undefined {
+  reserveCandidateRepair(workspaceId: string, candidateId: string, candidateVersion: number, maxAttempts = 2): { candidate: CandidateManifest; attempt: number } | undefined {
     const candidate = this.candidate(workspaceId, candidateId, candidateVersion);
     if (!candidate || candidate.status !== 'active') return undefined;
     const path = resolve(this.storage.workspacePath(workspaceId), 'candidates', candidateId, 'manifest.json');
@@ -867,26 +870,76 @@ export class SourceWorkspaceStore {
     });
   }
 
-  conversation(workspaceId: string): CodingAgentConversationTurn[] {
+  conversations(workspaceId: string): WorkspaceConversation[] {
+    if (!this.get(workspaceId)) throw new Error('静态源码工作区不存在');
+    const manifest = this.storage.readManifest(this.storage.workspacePath(workspaceId));
+    const previews = new Map<string, string>();
+    for (const entry of manifest.chat ?? []) {
+      if (entry.text.trim()) previews.set(entry.conversationId ?? workspaceId, entry.text.replace(/\s+/g, ' ').slice(0, 160));
+    }
+    const conversations = manifest.conversations ?? [{ id: workspaceId, title: manifest.chat?.find(entry => entry.role === 'user')?.text.slice(0, 40) ?? '新会话',
+      createdAt: manifest.createdAt, updatedAt: manifest.updatedAt, lastRevision: manifest.revision }];
+    return conversations.map(conversation => ({ ...conversation, preview: previews.get(conversation.id) }));
+  }
+
+  createConversation(workspaceId: string) {
+    const conversations = this.conversations(workspaceId);
+    if (conversations.length >= 100) throw new Error('该副本已达到 100 个会话上限，请新建副本继续');
+    const directory = this.storage.workspacePath(workspaceId);
+    const manifest = this.storage.readManifest(directory);
+    const now = new Date().toISOString();
+    const conversation = { id: randomUUID(), title: '新会话', createdAt: now, updatedAt: now, lastRevision: manifest.revision };
+    this.storage.writeManifest(directory, { ...manifest, conversations: [...conversations, conversation] });
+    return conversation;
+  }
+
+  assertConversation(workspaceId: string, conversationId = workspaceId): void {
+    if (!this.conversations(workspaceId).some(item => item.id === conversationId)) throw new Error('会话不存在或不属于该副本');
+  }
+
+  deleteConversation(workspaceId: string, conversationId: string) {
+    this.assertConversation(workspaceId, conversationId);
+    if (this.active.has(workspaceId)) throw new Error('副本正在修改，请等待任务完成或先停止再删除会话');
+    const directory = this.storage.workspacePath(workspaceId);
+    const manifest = this.storage.readManifest(directory);
+    const now = new Date().toISOString();
+    const conversations = this.conversations(workspaceId).filter(item => item.id !== conversationId);
+    if (!conversations.length) conversations.push({ id: randomUUID(), title: '新会话',
+      createdAt: now, updatedAt: now, lastRevision: manifest.revision });
+    // Delete only conversation data. Page files, revisions and diagnostic logs are untouched.
+    this.storage.writeManifest(directory, { ...manifest, conversations,
+      chat: (manifest.chat ?? []).filter(entry => (entry.conversationId ?? workspaceId) !== conversationId),
+      conversation: (manifest.conversation ?? []).filter(turn => (turn.conversationId ?? workspaceId) !== conversationId)
+    });
+    return conversations.sort((a, b) => b.updatedAt.localeCompare(a.updatedAt));
+  }
+
+  conversation(workspaceId: string, conversationId = workspaceId): CodingAgentConversationTurn[] {
+    this.assertConversation(workspaceId, conversationId);
     const directory = this.storage.workspacePath(workspaceId);
     if (!this.get(workspaceId)) throw new Error('静态源码工作区不存在');
     const manifest = this.storage.readManifest(directory);
     return (manifest.conversation ?? [])
+      .filter(turn => (turn.conversationId ?? workspaceId) === conversationId)
       .filter(turn => (turn.revision ?? 0) <= manifest.revision)
       .slice(-8)
       .map(({ instruction, result }) => ({ instruction, result }));
   }
 
-  chat(workspaceId: string): WorkspaceChatEntry[] {
+  chat(workspaceId: string, conversationId = workspaceId): WorkspaceChatEntry[] {
+    this.assertConversation(workspaceId, conversationId);
     const directory = this.storage.workspacePath(workspaceId);
     if (!this.get(workspaceId)) throw new Error('静态源码工作区不存在');
     const manifest = this.storage.readManifest(directory);
     return (manifest.chat ?? [])
-      .filter(entry => entry.revision <= manifest.revision)
+      .filter(entry => (entry.conversationId ?? workspaceId) === conversationId)
       .slice(-200);
   }
 
   appendChat(workspaceId: string, entry: WorkspaceChatEntry): void {
+    const conversationId = entry.conversationId ?? workspaceId;
+    this.assertConversation(workspaceId, conversationId);
+    const conversations = this.conversations(workspaceId);
     const directory = this.storage.workspacePath(workspaceId);
     if (!this.get(workspaceId)) throw new Error('静态源码工作区不存在');
     const manifest = this.storage.readManifest(directory);
@@ -897,11 +950,17 @@ export class SourceWorkspaceStore {
     this.storage.writeManifest(directory, {
       ...manifest,
       updatedAt: new Date().toISOString(),
-      chat: [...(manifest.chat ?? []), entry].slice(-200)
+      conversations: conversations.map(item => item.id === conversationId ? { ...item,
+        title: entry.role === 'user' && !manifest.chat?.some(previous => previous.role === 'user'
+          && (previous.conversationId ?? workspaceId) === conversationId) ? entry.text.slice(0, 40) : item.title,
+        updatedAt: entry.createdAt, lastRevision: entry.revision } : item),
+      chat: [...(manifest.chat ?? []).filter(item => (item.conversationId ?? workspaceId) !== conversationId),
+        ...[...(manifest.chat ?? []).filter(item => (item.conversationId ?? workspaceId) === conversationId), entry].slice(-200)]
     });
   }
 
   recordTurn(workspaceId: string, request: SourceTurnRequest, response: SourceTurnResponse): void {
+    const conversationId = request.conversationId ?? workspaceId;
     // Candidate drafts are intentionally not mixed into the formal-revision
     // conversation history. M3 will add draft-session recovery separately.
     if (response.kind === 'draft') return;
@@ -911,10 +970,10 @@ export class SourceWorkspaceStore {
     const result = response.kind === 'completed' ? response.summary : response.question;
     const revision = response.kind === 'completed' ? response.revision : manifest.revision;
     const retained = response.kind === 'completed'
-      ? (manifest.conversation ?? []).filter(turn => (turn.revision ?? 0) < response.revision)
+      ? (manifest.conversation ?? []).filter(turn => (turn.conversationId ?? workspaceId) !== conversationId || (turn.revision ?? 0) < response.revision)
       : (manifest.conversation ?? []);
     const linked = response.kind === 'completed'
-      ? retained.map(turn => turn.pending && (
+      ? retained.map(turn => (turn.conversationId ?? workspaceId) === conversationId && turn.pending && (
         request.replyToClarificationId
           ? turn.clarificationId === request.replyToClarificationId
           : turn.revision === response.revision - 1
@@ -926,7 +985,8 @@ export class SourceWorkspaceStore {
       ...manifest,
       updatedAt: new Date().toISOString(),
       chat: response.kind === 'completed'
-        ? (manifest.chat ?? []).filter(entry => entry.revision < response.revision).map(entry => {
+        ? (manifest.chat ?? []).map(entry => {
+          if ((entry.conversationId ?? workspaceId) !== conversationId) return entry;
           if (entry.id === request.turnId || (request.replyToClarificationId && entry.id === request.replyToClarificationId)) {
             return { ...entry, revision: response.revision };
           }
@@ -940,9 +1000,12 @@ export class SourceWorkspaceStore {
           return entry;
         })
         : manifest.chat,
+      conversations: this.conversations(workspaceId).map(item => item.id === conversationId
+        ? { ...item, updatedAt: new Date().toISOString(), lastRevision: revision } : item),
       conversation: [
         ...linked,
         {
+          conversationId,
           instruction: request.instruction,
           result,
           revision,
@@ -957,7 +1020,8 @@ export class SourceWorkspaceStore {
             clarificationId: response.clarificationId ?? request.turnId
           })
         }
-      ].slice(-40)
+      ].filter((turn, index, turns) => (turn.conversationId ?? workspaceId) !== conversationId
+        || turns.slice(index).filter(item => (item.conversationId ?? workspaceId) === conversationId).length <= 40)
     });
   }
 

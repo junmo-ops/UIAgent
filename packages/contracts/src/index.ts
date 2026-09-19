@@ -318,6 +318,7 @@ export const domOperationSchema = z.discriminatedUnion('kind', [
 export type DomOperation = z.infer<typeof domOperationSchema>;
 
 export const sourceTurnRequestSchema = z.object({
+  conversationId: z.string().uuid().optional(),
   protocolVersion: z.literal(PROTOCOL_VERSION),
   editSessionId: z.string().min(1),
   turnId: z.string().min(1),
@@ -460,6 +461,25 @@ export const sourceTurnProgressSchema = z.object({
   status: z.enum(['running', 'cancelling', 'cancelled', 'completed', 'failed']),
   phase: z.enum(['analyzing', 'locating', 'reading', 'editing', 'validating', 'finishing']),
   message: z.string(),
+  startedAt: z.string().optional(),
+  timeline: z.array(z.object({
+    id: z.string(),
+    kind: z.enum(['commentary', 'tool']),
+    text: z.string().max(600),
+    timestamp: z.string(),
+    status: z.enum(['running', 'completed', 'failed', 'blocked', 'skipped']).optional(),
+    skipReason: z.enum(['read_budget', 'duplicate_read', 'finalization_budget']).optional()
+  })).max(500).optional(),
+  timelineTruncated: z.boolean().optional(),
+  actionSummary: z.string().max(600).optional(),
+  commentary: z.array(z.object({
+    modelCall: z.number().int().positive(),
+    text: z.string().max(600),
+    timestamp: z.string()
+  })).max(8).optional(),
+  execution: z.enum(['preparing', 'model', 'tool', 'settled']).optional(),
+  saveState: z.enum(['not_started', 'editing', 'saving', 'saved', 'draft', 'unchanged', 'unconfirmed']).optional(),
+  savedRevision: z.number().int().nonnegative().optional(),
   modelCalls: z.number().int().nonnegative(),
   toolCalls: z.number().int().nonnegative(),
   updatedAt: z.string(),
@@ -476,6 +496,14 @@ export const sourceTurnProgressSchema = z.object({
 });
 export type SourceTurnProgress = z.infer<typeof sourceTurnProgressSchema>;
 
+/** User-facing history only: no model diagnostics, tool arguments or raw reasoning. */
+export const sourceTurnTranscriptSchema = sourceTurnProgressSchema.pick({
+  turnId: true, status: true, startedAt: true, updatedAt: true,
+  timeline: true, timelineTruncated: true, execution: true, message: true,
+  saveState: true, savedRevision: true
+});
+export type SourceTurnTranscript = z.infer<typeof sourceTurnTranscriptSchema>;
+
 /** A user-visible message that belongs to a static source workspace. */
 export const workspaceClarificationPromptSchema = z.object({
   clarificationId: z.string().uuid(),
@@ -486,15 +514,26 @@ export const workspaceClarificationPromptSchema = z.object({
 export type WorkspaceClarificationPrompt = z.infer<typeof workspaceClarificationPromptSchema>;
 
 export const workspaceChatEntrySchema = z.object({
+  conversationId: z.string().uuid().optional(),
   id: z.string().uuid(),
   role: z.enum(['user', 'assistant']),
   text: z.string().min(1).max(30_000),
   createdAt: z.string().datetime(),
-  /** Workspace revision this message describes. Messages on undone branches are hidden. */
+  /** Workspace revision this message describes; conversation history does not roll back with the page. */
   revision: z.number().int().nonnegative(),
-  clarification: workspaceClarificationPromptSchema.optional()
+  clarification: workspaceClarificationPromptSchema.optional(),
+  progress: sourceTurnTranscriptSchema.optional()
 });
 export type WorkspaceChatEntry = z.infer<typeof workspaceChatEntrySchema>;
+
+export const workspaceConversationSchema = z.object({
+  id: z.string().uuid(), title: z.string().max(80), createdAt: z.string(), updatedAt: z.string(),
+  preview: z.string().max(160).optional(),
+  lastRevision: z.number().int().nonnegative(),
+  activeTurnId: z.string().optional()
+});
+export type WorkspaceConversation = z.infer<typeof workspaceConversationSchema>;
+export const workspaceConversationsSchema = z.object({ conversations: z.array(workspaceConversationSchema) });
 
 export const workspaceConversationResponseSchema = z.object({
   workspaceId: z.string().uuid(),

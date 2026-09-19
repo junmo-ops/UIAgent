@@ -1,4 +1,4 @@
-import type { ClarificationOption, SourceWorkspaceInfo } from '@ui-agent/contracts';
+import type { ClarificationOption, SourceWorkspaceInfo, SourceTurnTranscript } from '@ui-agent/contracts';
 import { storage } from 'wxt/utils/storage';
 
 /**
@@ -17,6 +17,7 @@ export interface WorkspaceChatEntry {
   role: 'user' | 'assistant';
   text: string;
   clarification?: WorkspaceClarificationPrompt;
+  progress?: SourceTurnTranscript;
 }
 
 /**
@@ -25,6 +26,7 @@ export interface WorkspaceChatEntry {
  * prevents a reopened panel from losing its terminal status.
  */
 export interface ActiveSourceTurnSession {
+  conversationId?: string;
   turnId: string;
   instruction: string;
   baseRevision: number;
@@ -33,6 +35,8 @@ export interface ActiveSourceTurnSession {
 }
 
 export interface PersistedWorkspaceSession {
+  conversationId?: string;
+  drafts?: Record<string, string>;
   workspace: SourceWorkspaceInfo;
   chat: WorkspaceChatEntry[];
   editSessionId: string;
