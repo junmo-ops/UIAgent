@@ -54,7 +54,7 @@ interface ActiveWorkspace extends SourceWorkspaceInfo {
   tabId: number;
   sourceTabId?: number;
 }
-type IconName = 'sparkle' | 'target' | 'edit' | 'snapshot' | 'undo' | 'redo' | 'reset' | 'download' | 'upload' | 'arrow' | 'stop' | 'back' | 'history' | 'logs' | 'newChat' | 'search' | 'trash' | 'close';
+type IconName = 'sparkle' | 'target' | 'edit' | 'snapshot' | 'undo' | 'redo' | 'reset' | 'download' | 'upload' | 'arrow' | 'stop' | 'back' | 'history' | 'logs' | 'userId' | 'newChat' | 'search' | 'trash' | 'close';
 
 function UiIcon({ name }: { name: IconName }) {
   const paths: Record<IconName, React.ReactNode> = {
@@ -75,6 +75,7 @@ function UiIcon({ name }: { name: IconName }) {
     back: <><path d="m10 7-5 5 5 5" /><path d="M5 12h14" /></>,
     history: <><path d="M4 5h16v12H9l-5 4V5Z" /><path d="M8 9h8M8 13h5" /></>,
     logs: <><rect x="5" y="3" width="14" height="18" rx="2" /><path d="M9 8h6M9 12h6M9 16h4" /></>,
+    userId: <><rect x="3" y="5" width="18" height="14" rx="2" /><circle cx="8" cy="10" r="2" /><path d="M5 16a3 3 0 0 1 6 0M14 10h4M14 14h4" /></>,
     newChat: <><path d="M4 5h16v12H9l-5 4V5Z" /><path d="M9 11h6m-3-3v6" /></>
   };
   return <svg className="ui-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">{paths[name]}</svg>;
@@ -110,6 +111,22 @@ async function fetchAgentService(url: string, init?: RequestInit): Promise<Respo
   }
 }
 
+async function fetchCurrentIdentity(signal?: AbortSignal): Promise<{ userId: string; roles: string[] }> {
+  const url = await getAgentServiceUrl();
+  const response = await fetchAgentService(`${url}/v1/auth/me`, { signal });
+  if (!response.ok) throw await serviceResponseError(response, '获取当前身份失败');
+  const identity: unknown = await response.json();
+  if (!identity || typeof identity !== 'object' || !('userId' in identity)
+    || typeof identity.userId !== 'string' || !identity.userId.trim()) {
+    throw new Error('服务未返回有效的用户 ID');
+  }
+  return {
+    userId: identity.userId,
+    roles: 'roles' in identity && Array.isArray(identity.roles)
+      ? identity.roles.filter((role): role is string => typeof role === 'string') : []
+  };
+}
+
 /** Accept a committed workspace preview. */
 function previewWorkspaceId(value: string | undefined): string | undefined {
   if (!value) return undefined;
@@ -124,6 +141,7 @@ function previewWorkspaceId(value: string | undefined): string | undefined {
 
 export function SidePanelApp() {
   const [feedback, feedbackHolder] = message.useMessage();
+  const copyingUserIdRef = useRef(false);
   const [instruction, setInstruction] = useState('');
   const [chat, setChat] = useState<ChatEntry[]>([]);
   const [conversationId, setConversationId] = useState<string>();
@@ -142,6 +160,7 @@ export function SidePanelApp() {
   const [notice, setNotice] = useState<string>();
   const [error, setError] = useState<string>();
   const [serviceUrl, setServiceUrl] = useState(DEFAULT_AGENT_SERVICE_URL);
+  const [isAdmin, setIsAdmin] = useState(false);
   const [editSessionId, setEditSessionId] = useState<string>(() => crypto.randomUUID());
   const [sourceWorkspace, setSourceWorkspace] = useState<ActiveWorkspace>();
   const [sourceProgress, updateSourceProgress] = useState<SourceTurnProgress>();
@@ -169,6 +188,14 @@ export function SidePanelApp() {
   const restoredMessageIdsRef = useRef(new Set<string>());
   const [sessionReady, setSessionReady] = useState(false);
   const busy = snapshotBusy || assistantBusy || conversationLoading || Boolean(activeSourceTurn) || Boolean(sourceWorkspace && !sessionReady);
+  useEffect(() => {
+    const controller = new AbortController();
+    setIsAdmin(false);
+    void fetchCurrentIdentity(AbortSignal.any([controller.signal, AbortSignal.timeout(15_000)]))
+      .then(identity => { if (!controller.signal.aborted) setIsAdmin(identity.roles.includes('admin')); })
+      .catch(() => { if (!controller.signal.aborted) setIsAdmin(false); });
+    return () => controller.abort();
+  }, [serviceUrl, initializationAttempt]);
   useEffect(() => {
     let disposed = false;
     const controller = new AbortController();
@@ -786,6 +813,31 @@ export function SidePanelApp() {
   const openLogs = async () => {
     await browser.tabs.create({ url: `${browser.runtime.getURL('')}logs.html` });
   };
+  const copyUserId = async () => {
+    if (copyingUserIdRef.current) return;
+    copyingUserIdRef.current = true;
+    void feedback.loading({ key: 'copy-user-id', content: '正在获取用户 ID…', duration: 0 });
+    try {
+      const identity = await fetchCurrentIdentity(AbortSignal.timeout(15_000));
+      setIsAdmin(identity.roles.includes('admin'));
+      const userId = identity.userId;
+      try {
+        await navigator.clipboard.writeText(userId);
+        void feedback.success({ key: 'copy-user-id', content: '用户 ID 已复制', duration: 3 });
+      } catch {
+        feedback.destroy('copy-user-id');
+        Modal.info({
+          title: '请手动复制用户 ID',
+          content: <Input aria-label="当前用户 ID" value={userId} readOnly onFocus={event => event.currentTarget.select()} />,
+          okText: '关闭'
+        });
+      }
+    } catch (cause) {
+      void feedback.error({ key: 'copy-user-id', content: cause instanceof Error ? cause.message : '获取用户 ID 失败', duration: 5 });
+    } finally {
+      copyingUserIdRef.current = false;
+    }
+  };
   const examples = ['把按钮文案改成“确定”', '在右侧增加一个筛选项', '点击按钮时展开下方内容'];
 
   const closeConversations = () => {
@@ -1174,7 +1226,8 @@ export function SidePanelApp() {
         {sourceWorkspace?.sourceTabId && <Tooltip title="返回原页面" placement="left"><button type="button" aria-label="返回原页面" disabled={busy}
           onClick={() => void returnToSource()}><UiIcon name="back" /></button></Tooltip>}
         <div className="side-tools-spacer" />
-        <Tooltip title="运行日志" placement="left"><button type="button" aria-label="运行日志" onClick={() => void openLogs()}><UiIcon name="logs" /></button></Tooltip>
+        <Tooltip title="复制用户 ID" placement="left"><button type="button" aria-label="复制用户 ID" onClick={() => void copyUserId()}><UiIcon name="userId" /></button></Tooltip>
+        {isAdmin && <Tooltip title="运行日志" placement="left"><button type="button" aria-label="运行日志" onClick={() => void openLogs()}><UiIcon name="logs" /></button></Tooltip>}
       </nav>
       <Modal
         title={`必须更新UI需求助手至 v${availableUpdate?.version ?? ''}`}
