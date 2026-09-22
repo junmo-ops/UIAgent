@@ -1,4 +1,5 @@
 node_modules/
+docs/benchmark/local/
 .pnpm-store/
 .wxt/
 .output/

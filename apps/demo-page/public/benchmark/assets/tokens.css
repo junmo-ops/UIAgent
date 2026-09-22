@@ -1,0 +1,1 @@
+:root{--canvas:#f3f5f7;--paper:#fff;--ink:#233044;--muted:#596579;--line:#d2d9e2;--accent:#185a89;--tint:#e9f1f8}:root[data-theme="dark"]{--canvas:#152130;--paper:#203044;--ink:#edf3fb;--muted:#b4c2d4;--line:#536477;--accent:#83caff;--tint:#263e56}:root[data-theme="dark"] button.primary{color:#152130}
