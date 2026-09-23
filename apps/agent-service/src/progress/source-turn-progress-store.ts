@@ -1,3 +1,4 @@
+import type { WorkspacePersistence } from '../workspace/persistence';
 import type { CodingAgentEvent, CodingAgentStep } from '@ui-agent/agent-runtime';
 import type { SourceTurnProgress, SourceTurnResponse } from '@ui-agent/contracts';
 
@@ -119,7 +120,7 @@ export class SourceTurnProgressStore {
   constructor(private readonly storage?: {
     read(workspaceId: string, turnId: string): SourceTurnProgress | undefined;
     write(value: SourceTurnProgress): void;
-  }) {}
+  }, private readonly persistence?: WorkspacePersistence) {}
 
   private persist(workspaceId: string, turnId: string): void {
     const value = this.values.get(this.key(workspaceId, turnId));
@@ -151,8 +152,9 @@ export class SourceTurnProgressStore {
       activities: []
     };
     this.storage?.write(value);
-    this.values.set(this.key(workspaceId, turnId), value);
-    this.trim();
+    const publish = () => { this.values.set(this.key(workspaceId, turnId), value); this.trim(); };
+    if (this.persistence?.inTransaction) this.persistence.afterCommit(publish);
+    else publish();
     return value;
   }
 
@@ -192,6 +194,7 @@ export class SourceTurnProgressStore {
       return;
     }
     if (event.type === 'coding-agent.persistence.updated') {
+      if (this.persistence) return;
       this.values.set(this.key(workspaceId, turnId), {
         ...current, saveState: event.state, savedRevision: event.revision, updatedAt: event.timestamp
       });
@@ -258,6 +261,7 @@ export class SourceTurnProgressStore {
         ...(failed && event.step.action === 'finish' && current.saveState === 'saving' ? { saveState: 'unconfirmed' as const } : {}),
         phase: phaseForAction(event.step.action),
         message: current.status === 'cancelling' ? current.message
+          : this.persistence && event.step.action === 'finish' && !failed ? '正在保存到对象存储…'
           : blocked ? `${label}被拦截，等待下一步处理…` : failed ? `${label}未成功，等待下一步处理…` : `已完成：${label}`,
         modelCalls: Math.max(current.modelCalls, event.step.modelCall),
         toolCalls: current.toolCalls + 1,
@@ -281,7 +285,7 @@ export class SourceTurnProgressStore {
         // The service still needs to attach the final result/preview URL.
         // Only complete()/fail() may publish a terminal polling status.
         execution: 'preparing',
-        ...(event.response.kind === 'completed' ? this.resultState(event.response) : {}),
+        ...(!this.persistence && event.response.kind === 'completed' ? this.resultState(event.response) : {}),
         phase: 'finishing',
         message: current.status === 'cancelling' ? current.message : '正在整理本轮结果…',
         modelCalls: event.checkpoint.modelCalls,
@@ -293,7 +297,7 @@ export class SourceTurnProgressStore {
 
   fail(workspaceId: string, turnId: string, message: string, result?: SourceTurnResponse): void {
     const current = this.get(workspaceId, turnId) ?? this.start(workspaceId, turnId);
-    this.values.set(this.key(workspaceId, turnId), {
+    this.publishTerminal({
       ...current,
       status: result?.kind === 'cancelled' ? 'cancelled' : 'failed',
       execution: 'settled',
@@ -303,7 +307,6 @@ export class SourceTurnProgressStore {
       result,
       updatedAt: new Date().toISOString()
     });
-    this.persist(workspaceId, turnId);
   }
 
   requestCancellation(workspaceId: string, turnId: string): SourceTurnProgress | undefined {
@@ -329,7 +332,7 @@ export class SourceTurnProgressStore {
     toolCalls: number
   ): void {
     const current = this.get(workspaceId, turnId) ?? this.start(workspaceId, turnId);
-    this.values.set(this.key(workspaceId, turnId), {
+    this.publishTerminal({
       ...current,
       status: result.kind === 'cancelled' ? 'cancelled' : result.kind === 'failed' ? 'failed' : 'completed',
       execution: 'settled',
@@ -343,7 +346,13 @@ export class SourceTurnProgressStore {
       result,
       updatedAt: new Date().toISOString()
     });
-    this.persist(workspaceId, turnId);
+  }
+
+  private publishTerminal(value: SourceTurnProgress): void {
+    this.storage?.write(value);
+    const publish = () => { this.values.set(this.key(value.workspaceId, value.turnId), value); this.trim(); };
+    if (this.persistence?.inTransaction) this.persistence.afterCommit(publish);
+    else publish();
   }
 
   private key(workspaceId: string, turnId: string): string {

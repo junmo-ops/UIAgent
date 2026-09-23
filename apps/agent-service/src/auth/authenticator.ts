@@ -1,3 +1,4 @@
+import type { ServiceConfig } from '../configuration/service-config';
 import { createHmac, randomUUID, timingSafeEqual } from 'node:crypto';
 
 export interface AuthPrincipal {
@@ -39,16 +40,6 @@ interface InstallationClaims {
 }
 
 const TOKEN_PREFIX = 'uia1';
-
-function normalizedIdentity(value: string | undefined, fallback: string): string {
-  const normalized = value?.trim();
-  return normalized || fallback;
-}
-
-function positiveSeconds(value: string | undefined, fallback: number): number {
-  const parsed = Number(value);
-  return Number.isInteger(parsed) && parsed > 0 ? parsed : fallback;
-}
 
 function bearerToken(request: Request): string | undefined {
   const authorization = request.headers.get('authorization');
@@ -164,9 +155,8 @@ class InstallationTokenAuthenticator implements Authenticator {
   }
 }
 
-export function createAuthenticatorFromEnvironment(env: NodeJS.ProcessEnv): Authenticator {
-  const mode = env.AUTH_MODE?.trim().toLowerCase()
-    ?? (env.NODE_ENV === 'production' ? 'required' : 'development');
+export function createAuthenticator(config: ServiceConfig['auth'], env: NodeJS.ProcessEnv): Authenticator {
+  const mode = config.mode === 'auto' ? (env.NODE_ENV === 'production' ? 'installation' : 'development') : config.mode;
 
   if (mode === 'installation') {
     const secret = env.INSTALLATION_TOKEN_SECRET?.trim();
@@ -179,15 +169,15 @@ export function createAuthenticatorFromEnvironment(env: NodeJS.ProcessEnv): Auth
     }
     return new InstallationTokenAuthenticator(
       secret,
-      normalizedIdentity(env.INSTALLATION_TENANT_ID, 'internal-pilot'),
-      positiveSeconds(env.INSTALLATION_TOKEN_TTL_SECONDS, 365 * 24 * 60 * 60),
-      positiveSeconds(env.PREVIEW_TOKEN_TTL_SECONDS, 7 * 24 * 60 * 60),
+      config.installation.tenantId,
+      config.installation.tokenTtlSeconds,
+      config.installation.previewTokenTtlSeconds,
       new Set((env.INSTALLATION_ADMIN_USER_IDS ?? '').split(',').map(value => value.trim()).filter(Boolean))
     );
   }
 
   if (mode === 'development') {
-    if (env.NODE_ENV === 'production' && env.ALLOW_INSECURE_DEV_AUTH !== 'true') {
+    if (env.NODE_ENV === 'production') {
       return {
         mode: 'development',
         configurationError: '生产环境禁止使用开发身份认证',
@@ -195,8 +185,8 @@ export function createAuthenticatorFromEnvironment(env: NodeJS.ProcessEnv): Auth
       };
     }
     const principal: AuthPrincipal = {
-      userId: normalizedIdentity(env.DEV_AUTH_USER_ID, LOCAL_DEVELOPMENT_PRINCIPAL.userId),
-      tenantId: normalizedIdentity(env.DEV_AUTH_TENANT_ID, LOCAL_DEVELOPMENT_PRINCIPAL.tenantId),
+      userId: config.development.userId,
+      tenantId: config.development.tenantId,
       roles: ['user', 'admin'],
       identityType: 'development'
     };

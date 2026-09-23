@@ -38,6 +38,21 @@ export class SelectionOverlay {
     this.enabled = true;
   }
 
+  restore(sourceId?: string, visible = true): PageSelection | undefined {
+    const id = sourceId ?? this.selected?.getAttribute('data-ui-source-id');
+    if (id) this.selected = document.querySelector<HTMLElement>(`[data-ui-source-id="${CSS.escape(id)}"]`);
+    if (!this.selected?.isConnected) {
+      this.selected = null;
+      if (visible) this.hide();
+      return undefined;
+    }
+    if (visible) {
+      this.enable();
+      this.refresh();
+    }
+    return { selected: this.reference(this.selected) };
+  }
+
   disable(): void {
     this.enabled = false;
     this.overlay.style.display = 'none';

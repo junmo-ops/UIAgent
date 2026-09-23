@@ -6,7 +6,9 @@ import { WORKSPACE_FILES, type WorkspaceFiles, type WorkspaceManifest } from './
 
 /** Filesystem persistence only; no Agent, DOM editing, or revision decisions. */
 export class WorkspaceFileStorage {
-  constructor(readonly root: string) {}
+  constructor(private readonly rootSource: string | (() => string), private readonly canWrite = () => true) {}
+  private assertWritable() { if (!this.canWrite()) throw new Error('S3 模式禁止绕过提交协调层写入副本'); }
+  get root(): string { return typeof this.rootSource === 'string' ? this.rootSource : this.rootSource(); }
   readOptionalFile(path: string): string | undefined {
     return existsSync(path) ? readFileSync(path, 'utf8') : undefined;
   }
@@ -35,6 +37,7 @@ export class WorkspaceFileStorage {
   }
 
   deleteWorkspace(workspaceId: string): void {
+    this.assertWritable();
     const directory = this.workspacePath(workspaceId);
     // Validate the actual target before recursive deletion, including junctions.
     const root = realpathSync(this.root);
@@ -47,6 +50,7 @@ export class WorkspaceFileStorage {
   }
 
   writeWorkspaceFiles(directory: string, files: WorkspaceFiles, atomic = false): void {
+    this.assertWritable();
     mkdirSync(directory, { recursive: true, mode: 0o700 });
     for (const path of WORKSPACE_FILES) {
       const target = resolve(directory, path);
@@ -89,6 +93,7 @@ export class WorkspaceFileStorage {
   }
 
   atomicWrite(path: string, content: string | Uint8Array) {
+    this.assertWritable();
     const temporary = resolve(dirname(path), `.${basename(path)}.${randomUUID()}.tmp`);
     if (typeof content === 'string') writeFileSync(temporary, content, { encoding: 'utf8', mode: 0o600 });
     else writeFileSync(temporary, content, { mode: 0o600 });

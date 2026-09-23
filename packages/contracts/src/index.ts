@@ -476,7 +476,7 @@ export const extensionErrorCodeSchema = z.enum([
 export type ExtensionErrorCode = z.infer<typeof extensionErrorCodeSchema>;
 
 export type ContentCommand =
-  | { type: 'editorHeartbeat' }
+  | { type: 'editorHeartbeat'; selectedSourceId?: string }
   | { type: 'deactivateEditor' }
   | { type: 'startSelection' }
   | { type: 'capturePageSnapshot'; includeFrozenStyles?: boolean }
@@ -488,7 +488,7 @@ export type ContentCommand =
   | { type: 'finishScreenshot' };
 
 export type ContentCommandResult =
-  | { ok: true; selection?: PageSelection; snapshot?: StaticSnapshot; workspace?: SourceWorkspaceInfo }
+  | { ok: true; selection?: PageSelection; snapshot?: StaticSnapshot; workspace?: SourceWorkspaceInfo; tabId?: number }
   | { ok: false; code: ExtensionErrorCode; error: string };
 
 export interface BrowserCommandRequest {

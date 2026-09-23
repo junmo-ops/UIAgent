@@ -5,7 +5,8 @@ import { sourceTurnProgressSchema, type SourceTurnProgress } from '@ui-agent/con
 
 /** Task records live inside the workspace, so permanent deletion removes them too. */
 export class TurnProgressStorage {
-  constructor(private readonly root: string) {}
+  constructor(private readonly rootSource: string | (() => string), private readonly canWrite = () => true) {}
+  private get root(): string { return typeof this.rootSource === 'string' ? this.rootSource : this.rootSource(); }
 
   private directory(workspaceId: string): string {
     if (!/^[0-9a-f-]{36}$/i.test(workspaceId)) throw new Error('无效的 Workspace ID');
@@ -25,6 +26,7 @@ export class TurnProgressStorage {
   }
 
   write(value: SourceTurnProgress): void {
+    if (!this.canWrite()) return;
     const directory = this.directory(value.workspaceId);
     // Never recreate a deleted workspace as a side effect of late task events.
     if (!existsSync(resolve(directory, '..', 'workspace.json'))) throw new Error('工作区不存在，无法保存任务状态');

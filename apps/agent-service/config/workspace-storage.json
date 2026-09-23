@@ -1,0 +1,16 @@
+{
+  "mode": "s3",
+  "cacheDirectory": "/tmp/ui-agent/source-workspaces-cache",
+  "s3": {
+    "endpoint": "http://cos.shenzhen.t1ppd.cmbchina.cn",
+    "region": "shenzhen",
+    "bucket": "lv0150-ui-agent-dev-1255000140",
+    "prefix": "uiagent/production",
+    "timeoutMs": 60000
+  },
+  "archive": {
+    "bytes": 268435456,
+    "compressedBytes": 67108864,
+    "files": 20000
+  }
+}

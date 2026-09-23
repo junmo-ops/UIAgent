@@ -155,7 +155,12 @@ export function SidePanelApp() {
   const conversationRequestRef = useRef(0);
   const conversationSwitchRef = useRef(false);
   const draftsRef = useRef<Record<string, string>>({});
-  const [selection, setSelection] = useState<PageSelection>();
+  const [selection, updateSelection] = useState<PageSelection>();
+  const selectionRef = useRef<PageSelection | undefined>(undefined);
+  const setSelection = (value: PageSelection | undefined) => {
+    selectionRef.current = value;
+    updateSelection(value);
+  };
   const [selecting, setSelecting] = useState(false);
   const [notice, setNotice] = useState<string>();
   const [error, setError] = useState<string>();
@@ -188,6 +193,36 @@ export function SidePanelApp() {
   const restoredMessageIdsRef = useRef(new Set<string>());
   const [sessionReady, setSessionReady] = useState(false);
   const busy = snapshotBusy || assistantBusy || conversationLoading || Boolean(activeSourceTurn) || Boolean(sourceWorkspace && !sessionReady);
+  const chatViewportRef = useRef<HTMLElement>(null);
+  const chatContentRef = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    const viewport = chatViewportRef.current;
+    const content = chatContentRef.current;
+    if (!viewport || !content) return;
+    let following = true;
+    let previousTop = viewport.scrollTop;
+    const followBottom = () => {
+      if (!following || viewport.clientHeight === 0) return;
+      viewport.scrollTop = viewport.scrollHeight;
+      previousTop = viewport.scrollTop;
+    };
+    const onScroll = () => {
+      const nearBottom = viewport.scrollHeight - viewport.clientHeight - viewport.scrollTop <= 48;
+      if (nearBottom) following = true;
+      else if (viewport.scrollTop < previousTop) following = false;
+      previousTop = viewport.scrollTop;
+    };
+    // Observe rendered height, including streaming text, progress cards and images.
+    const observer = new ResizeObserver(followBottom);
+    observer.observe(content);
+    observer.observe(viewport);
+    viewport.addEventListener('scroll', onScroll, { passive: true });
+    followBottom();
+    return () => {
+      observer.disconnect();
+      viewport.removeEventListener('scroll', onScroll);
+    };
+  }, [initialization, conversationId, sourceWorkspace?.workspaceId]);
   useEffect(() => {
     const controller = new AbortController();
     setIsAdmin(false);
@@ -261,6 +296,7 @@ export function SidePanelApp() {
           setPendingClarification(unresolved?.clarification);
         }
         if (persisted?.workspace.workspaceId === workspace.workspaceId) {
+          setSelection(persisted.selection);
           setEditSessionId(persisted.editSessionId);
           if ((persisted.conversationId ?? workspaceId) === selected && persisted.activeSourceTurn) setPendingClarification(persisted.pendingClarification);
           setActiveSourceTurn(persisted.activeSourceTurn);
@@ -281,7 +317,6 @@ export function SidePanelApp() {
         if (!workspaceId || workspaceId !== sourceWorkspace.workspaceId || !tab.url) return;
         await command({ type: 'bindEditorTab', tabId, previewUrl: tab.url });
         setSourceWorkspace(current => current ? { ...current, tabId } : current);
-        setSelection(undefined);
         setSelecting(false);
       } catch {
         // Keep the existing binding when the active page is unavailable or not a trusted preview.
@@ -312,6 +347,7 @@ export function SidePanelApp() {
     const { tabId: _tabId, sourceTabId: _sourceTabId, ...workspace } = sourceWorkspace;
     void sourceWorkspaceSessionItem.setValue({
       conversationId,
+      selection,
       drafts: { ...draftsRef.current, ...(conversationId ? { [conversationId]: instruction } : {}) },
       workspace,
       chat,
@@ -320,18 +356,28 @@ export function SidePanelApp() {
       pendingClarification,
       activeSourceTurn
     });
-  }, [sourceWorkspace, chat, editSessionId, pendingClarification, activeSourceTurn, sessionReady, conversationId, instruction]);
+  }, [sourceWorkspace, chat, editSessionId, pendingClarification, activeSourceTurn, sessionReady, conversationId, instruction, selection]);
   useEffect(() => {
-    const heartbeat = () => { void command({ type: 'editorHeartbeat' }).catch(() => undefined); };
+    if (initialization !== 'ready' || !sourceWorkspace) return;
+    let disposed = false;
+    const heartbeat = async () => {
+      const previous = selectionRef.current;
+      try {
+        const result = await command({ type: 'editorHeartbeat', selectedSourceId: previous?.selected.sourceId });
+        if (!disposed && !selecting && selectionRef.current === previous
+          && JSON.stringify(previous) !== JSON.stringify(result.selection)) setSelection(result.selection);
+      } catch { /* A temporarily unavailable tab must not erase the selected target. */ }
+    };
     const deactivate = () => { void command({ type: 'deactivateEditor' }).catch(() => undefined); };
-    heartbeat();
-    const timer = window.setInterval(heartbeat, 3000);
+    void heartbeat();
+    const timer = window.setInterval(() => void heartbeat(), 3000);
     window.addEventListener('pagehide', deactivate);
     return () => {
+      disposed = true;
       window.clearInterval(timer);
       window.removeEventListener('pagehide', deactivate);
     };
-  }, []);
+  }, [initialization, sourceWorkspace?.workspaceId, sourceWorkspace?.tabId, selecting]);
   useEffect(() => onMessage('selectionChanged', message => {
     const sourceId = message.data.selected.sourceId;
     if (sourceId) setSourceWorkspace(current => current ? { ...current, selectedSourceId: sourceId } : current);
@@ -403,6 +449,13 @@ export function SidePanelApp() {
     let streamedEntryId: string | undefined;
     let streamedText = '';
     try {
+      let turnSelection = selectionRef.current;
+      if (sourceWorkspace && turnSelection) {
+        const checked = await command({ type: 'editorHeartbeat', selectedSourceId: turnSelection.selected.sourceId });
+        if (selectionRef.current === turnSelection) setSelection(checked.selection);
+        turnSelection = checked.selection;
+        if (!turnSelection) throw new Error('原先选中的模块已不存在，请重新选择后发送。');
+      }
       const request = assistantTurnRequestSchema.parse({
         protocolVersion: PROTOCOL_VERSION,
         turnId,
@@ -410,13 +463,13 @@ export function SidePanelApp() {
         instruction: text,
         context: {
           hasWorkspace: Boolean(sourceWorkspace),
-          hasSelection: Boolean(selection),
-          ...(selection && {
+          hasSelection: Boolean(turnSelection),
+          ...(turnSelection && {
             selection: {
-              sourceId: selection.selected.sourceId,
-              tag: selection.selected.tag,
-              role: selection.selected.role,
-              text: selection.selected.text.slice(0, 1_000)
+              sourceId: turnSelection.selected.sourceId,
+              tag: turnSelection.selected.tag,
+              role: turnSelection.selected.role,
+              text: turnSelection.selected.text.slice(0, 1_000)
             }
           })
         },
@@ -488,7 +541,7 @@ export function SidePanelApp() {
       await runSourceTurn(
         finalOutcome.instruction,
         sourceWorkspace,
-        finalOutcome.targetScope === 'selection' ? selection?.selected.sourceId : undefined,
+        finalOutcome.targetScope === 'selection' ? turnSelection?.selected.sourceId : undefined,
         turnId,
         { replyToClarificationId, clarificationOptionId, originalInstruction: text, assistantTraceId: request.traceId }
       );
@@ -547,6 +600,7 @@ export function SidePanelApp() {
         await browser.tabs.update(sourceWorkspace.tabId, { url: sourceWorkspace.sourceUrl, active: true });
         await sourceWorkspaceSessionItem.setValue(null);
         setSourceWorkspace(undefined);
+        setSelection(undefined);
         setChat([]);
         setPendingClarification(undefined);
         return;
@@ -583,6 +637,7 @@ export function SidePanelApp() {
       conversationId: activeTurn.conversationId,
       drafts: existing?.drafts ?? draftsRef.current,
       workspace: persistedWorkspace,
+      selection: selectionRef.current,
       chat: existing?.workspace.workspaceId === workspace.workspaceId ? existing.chat : chat,
       editSessionId,
       sourceTabId: workspace.sourceTabId,
@@ -772,8 +827,9 @@ export function SidePanelApp() {
       });
       const workspace = result.workspace;
       if (!workspace) throw new Error('副本已创建，但后台没有返回工作区信息');
-      const [tab] = await browser.tabs.query({ active: true, currentWindow: true });
-      if (!tab?.id) throw new Error('副本已创建，但预览标签页不可用');
+      if (result.tabId === undefined) throw new Error('副本已创建，但后台没有返回预览标签页，请重新打开插件');
+      const tab = await browser.tabs.get(result.tabId);
+      if (tab.id === undefined) throw new Error('副本已创建，但预览标签页不可用');
       // The background persisted this before navigating the tab. It is useful
       // for continuity, but creation must not fail if storage propagation lags.
       const persisted = await sourceWorkspaceSessionItem.getValue(workspace.workspaceId);
@@ -784,6 +840,7 @@ export function SidePanelApp() {
         sourceTabId: persisted?.sourceTabId ?? tab.id
       });
       setChat(persisted?.chat ?? []);
+      setSelection(persisted?.selection);
       setConversationId(persisted?.conversationId ?? workspace.workspaceId);
       setConversations([]);
       setPendingClarification(persisted?.pendingClarification);
@@ -898,7 +955,6 @@ export function SidePanelApp() {
       if (conversationId) draftsRef.current[conversationId] = instruction;
       if (latest.revision !== sourceWorkspace.revision) {
         await command({ type: 'reloadPreview' });
-        setSelection(undefined);
       }
       setSourceWorkspace({ ...sourceWorkspace, ...latest });
       setConversationId(selected.id);
@@ -1071,7 +1127,8 @@ export function SidePanelApp() {
           </div>
         )}
 
-        <section className="chat-list">
+        <section className="chat-list" ref={chatViewportRef}>
+          <div className="chat-list-content" ref={chatContentRef}>
           {!sourceWorkspace && (
             <div className="snapshot-welcome">
               <img className="brand-icon" src="/icons/logo.svg" width="42" height="42" alt="" />
@@ -1140,6 +1197,7 @@ export function SidePanelApp() {
           )}
           {notice && <Alert className="inline-alert" type="info" showIcon message={notice} closable onClose={() => setNotice(undefined)} />}
           {error && <Alert className="inline-alert" type="error" showIcon message={error} closable onClose={() => setError(undefined)} />}
+          </div>
         </section>
 
         {!sourceWorkspace && (

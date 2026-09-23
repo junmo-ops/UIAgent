@@ -1477,28 +1477,11 @@ export class ClineCodingAgentAdapter implements CodingAgentPort {
   }
 }
 
-export function clineCodingAgentFromEnvironment(
-  env: NodeJS.ProcessEnv = process.env
-): ClineCodingAgentAdapter {
-  if (env.MODEL_MODE !== 'remote') {
-    throw new Error('Cline SDK 运行时必须设置 MODEL_MODE=remote');
-  }
-  if (!env.MODEL_BASE_URL || !env.MODEL_API_KEY || !env.MODEL_NAME) {
-    throw new Error('Cline Adapter 必须设置 MODEL_BASE_URL、MODEL_API_KEY 和 MODEL_NAME');
-  }
-  const parsedMaxIterations = Number(env.CLINE_MAX_ITERATIONS ?? DEFAULT_MAX_ITERATIONS);
-  if (!Number.isInteger(parsedMaxIterations) || parsedMaxIterations < 1) {
-    throw new Error('CLINE_MAX_ITERATIONS 必须是大于 0 的整数');
-  }
-  const parsedMaxOutputTokens = Number(env.CLINE_MAX_OUTPUT_TOKENS ?? DEFAULT_MAX_OUTPUT_TOKENS);
-  if (!Number.isInteger(parsedMaxOutputTokens) || parsedMaxOutputTokens < 1) {
-    throw new Error('CLINE_MAX_OUTPUT_TOKENS 必须是大于 0 的整数');
-  }
-  return new ClineCodingAgentAdapter({
-    baseUrl: env.MODEL_BASE_URL,
-    apiKey: env.MODEL_API_KEY,
-    modelName: env.MODEL_NAME,
-    maxIterations: parsedMaxIterations,
-    maxOutputTokens: parsedMaxOutputTokens
-  });
+export function clineCodingAgentFromConfig(options: ClineCodingAgentOptions): ClineCodingAgentAdapter {
+  if (!options.baseUrl || !options.apiKey || !options.modelName) throw new Error('模型配置和密钥不能为空');
+  const maxIterations = options.maxIterations ?? DEFAULT_MAX_ITERATIONS;
+  const maxOutputTokens = options.maxOutputTokens ?? DEFAULT_MAX_OUTPUT_TOKENS;
+  if (!Number.isInteger(maxIterations) || maxIterations < 1) throw new Error('maxIterations 必须是正整数');
+  if (!Number.isInteger(maxOutputTokens) || maxOutputTokens < 1) throw new Error('maxOutputTokens 必须是正整数');
+  return new ClineCodingAgentAdapter({ ...options, maxIterations, maxOutputTokens });
 }

@@ -83,17 +83,3 @@ export class ClineAssistantChatAdapter implements AssistantChatPort {
     }
   }
 }
-
-export function clineAssistantChatFromEnvironment(
-  env: NodeJS.ProcessEnv = process.env
-): ClineAssistantChatAdapter {
-  if (env.MODEL_MODE !== 'remote') throw new Error('普通聊天必须设置 MODEL_MODE=remote');
-  if (!env.MODEL_BASE_URL || !env.MODEL_API_KEY || !env.MODEL_NAME) {
-    throw new Error('普通聊天必须设置 MODEL_BASE_URL、MODEL_API_KEY 和 MODEL_NAME');
-  }
-  return new ClineAssistantChatAdapter({
-    baseUrl: env.MODEL_BASE_URL,
-    apiKey: env.MODEL_API_KEY,
-    modelName: env.MODEL_NAME
-  });
-}

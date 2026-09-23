@@ -159,18 +159,3 @@ export class ClineAssistantRouterAdapter implements AssistantRouterPort {
     }
   }
 }
-
-export function clineAssistantRouterFromEnvironment(
-  env: NodeJS.ProcessEnv = process.env
-): ClineAssistantRouterAdapter {
-  if (env.MODEL_MODE !== 'remote') throw new Error('助手路由必须设置 MODEL_MODE=remote');
-  if (!env.MODEL_BASE_URL || !env.MODEL_API_KEY || !env.MODEL_NAME) {
-    throw new Error('助手路由必须设置 MODEL_BASE_URL、MODEL_API_KEY 和 MODEL_NAME');
-  }
-  return new ClineAssistantRouterAdapter({
-    baseUrl: env.MODEL_BASE_URL,
-    apiKey: env.MODEL_API_KEY,
-    modelName: env.MODEL_NAME,
-    ...(env.MODEL_MAX_ITERATIONS && { maxIterations: Math.min(5, Number(env.MODEL_MAX_ITERATIONS)) })
-  });
-}

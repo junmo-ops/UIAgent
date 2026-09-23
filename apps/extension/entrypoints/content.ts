@@ -20,6 +20,7 @@ export default defineContentScript({
   main() {
     const selection = new SelectionOverlay();
     let selecting = false;
+    let screenshotInProgress = false;
     let editorLeaseTimer: ReturnType<typeof setTimeout> | undefined;
 
     const deactivateEditor = () => {
@@ -54,7 +55,10 @@ export default defineContentScript({
     onMessage('contentCommand', async message => {
       try {
         const command = message.data;
-        if (command.type === 'editorHeartbeat') { refreshEditorLease(); return { ok: true } satisfies ContentCommandResult; }
+        if (command.type === 'editorHeartbeat') {
+          refreshEditorLease();
+          return { ok: true, selection: selection.restore(command.selectedSourceId, !selecting && !screenshotInProgress) } satisfies ContentCommandResult;
+        }
         if (command.type === 'deactivateEditor') { deactivateEditor(); return { ok: true } satisfies ContentCommandResult; }
         if (command.type === 'startSelection') {
           refreshEditorLease();
@@ -65,8 +69,8 @@ export default defineContentScript({
         if (command.type === 'capturePageSnapshot') {
           return { ok: true, snapshot: captureStaticSnapshot(document.body, command.includeFrozenStyles === true) } satisfies ContentCommandResult;
         }
-        if (command.type === 'prepareScreenshot') { selection.hide(); return { ok: true } satisfies ContentCommandResult; }
-        if (command.type === 'finishScreenshot') { selection.refresh(); return { ok: true } satisfies ContentCommandResult; }
+        if (command.type === 'prepareScreenshot') { screenshotInProgress = true; selection.hide(); return { ok: true } satisfies ContentCommandResult; }
+        if (command.type === 'finishScreenshot') { screenshotInProgress = false; selection.refresh(); return { ok: true } satisfies ContentCommandResult; }
         return { ok: false, code: 'PAGE_OPERATION_FAILED', error: '该命令只能由 Background 执行' } satisfies ContentCommandResult;
       } catch (error) {
         return { ok: false, code: 'PAGE_OPERATION_FAILED', error: error instanceof Error ? error.message : '页面操作失败' } satisfies ContentCommandResult;

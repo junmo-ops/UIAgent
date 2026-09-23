@@ -1,3 +1,4 @@
+import type { WorkspacePersistence } from '../workspace/persistence';
 import { SourceTurnProgressStore } from '../progress/source-turn-progress-store';
 
 /** Single-process task ownership. Agent execution is supplied by the application. */
@@ -26,6 +27,25 @@ export class SourceTurnService {
       } catch (failure) {
         console.error('[source-turn] Failed to persist terminal state', failure);
       }
+    }).finally(() => { this.runs.delete(workspaceId); });
+    return 'accepted';
+  }
+
+  async startPersisted(workspaceId: string, turnId: string, conversationId: string,
+    execute: (signal: AbortSignal) => Promise<void>, persistence?: WorkspacePersistence): Promise<'accepted' | 'busy'> {
+    if (!persistence) return this.start(workspaceId, turnId, conversationId, execute);
+    if (this.progress.get(workspaceId, turnId)) return 'accepted';
+    if (this.runs.has(workspaceId)) return 'busy';
+    const controller = new AbortController();
+    this.runs.set(workspaceId, { turnId, conversationId, controller });
+    try {
+      await persistence.run(workspaceId, () => { this.progress.start(workspaceId, turnId); });
+    } catch (error) {
+      this.runs.delete(workspaceId);
+      throw error;
+    }
+    void Promise.resolve().then(() => execute(controller.signal)).catch(() => {
+      this.progress.fail(workspaceId, turnId, '任务执行异常，结果未确认，请检查存储状态');
     }).finally(() => { this.runs.delete(workspaceId); });
     return 'accepted';
   }

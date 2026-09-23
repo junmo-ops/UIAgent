@@ -1,9 +1,12 @@
+import { readServiceConfig, type ServiceConfig } from './configuration/service-config';
+import { readWorkspaceStorageConfig } from './storage/config';
+import { WorkspaceStorageError } from './storage/s3-workspace-storage';
 import { zValidator } from '@hono/zod-validator';
 import { fetchWorkspaceResource, resourceErrorCode } from './workspace/resource-fetch';
 import {
-  clineAssistantChatFromEnvironment,
-  clineAssistantRouterFromEnvironment,
-  clineCodingAgentFromEnvironment,
+  ClineAssistantChatAdapter,
+  ClineAssistantRouterAdapter,
+  clineCodingAgentFromConfig,
   type AssistantChatPort,
   type AssistantRouterPort,
   type CodingAgentPort
@@ -34,7 +37,7 @@ import { Hono, type MiddlewareHandler } from 'hono';
 import { cors } from 'hono/cors';
 import { streamSSE } from 'hono/streaming';
 import {
-  createAuthenticatorFromEnvironment,
+  createAuthenticator,
   type Authenticator,
   type AuthPrincipal
 } from './auth/authenticator';
@@ -53,9 +56,15 @@ export function createApp(
   providedCodingAgent?: CodingAgentPort,
   providedAuthenticator?: Authenticator,
   providedAssistantRouter?: AssistantRouterPort,
-  providedAssistantChat?: AssistantChatPort
+  providedAssistantChat?: AssistantChatPort,
+  providedConfig?: ServiceConfig
 ) {
-  const publicBaseUrl = env.PUBLIC_BASE_URL?.trim().replace(/\/+$/, '');
+  const config = providedConfig ?? readServiceConfig();
+  const storageConfig = readWorkspaceStorageConfig();
+  if (storageConfig.mode === 's3' && !providedWorkspaceStore?.persistence?.ready) {
+    throw new Error('S3 模式必须通过已完成恢复的存储实例启动');
+  }
+  const publicBaseUrl = config.http.publicBaseUrl.replace(/\/+$/, '');
   const publicUrl = (path: string, requestUrl: string) => new URL(path, publicBaseUrl ? `${publicBaseUrl}/` : requestUrl).toString();
   const extensionReleaseDirectory = fileURLToPath(new URL('../extension-release/', import.meta.url));
   const replicaRuntimePath = fileURLToPath(new URL('../replica-runtime/ui-agent-module.js', import.meta.url));
@@ -84,21 +93,15 @@ export function createApp(
     }
   })();
   const logStore = providedLogStore ?? new TurnLogStore({
-    filePath: env.LOG_FILE ?? '.logs/agent-turns.jsonl',
+    filePath: config.logging.file,
     model: {
-      mode: env.MODEL_MODE ?? 'mock',
-      provider: env.MODEL_PROVIDER ?? (env.MODEL_MODE === 'remote' ? 'openai-compatible' : 'mock'),
-      name: env.MODEL_NAME
+      mode: 'remote',
+      provider: config.model.providerLabel,
+      name: config.model.name
     }
   });
-  const identityIsolation = !['false', '0', 'off', 'no'].includes(
-    env.WORKSPACE_IDENTITY_ISOLATION?.trim().toLowerCase() ?? ''
-  );
-  // A is retained as an opt-in diagnostic variant only. Normal replica
-  // generation goes straight to B (captured author rules + overrides).
-  const frozenStyleVariantEnabled = ['1', 'true', 'on', 'yes'].includes(
-    env.REPLICA_A_ENABLED?.trim().toLowerCase() ?? ''
-  );
+  const identityIsolation = true;
+  const frozenStyleVariantEnabled = config.diagnostics.replicaAEnabled;
   const aVariantDisabledMessage = 'A 方案当前已关闭；该副本缺少可用的 B 方案作者样式资源';
   const supportsAuthorRuleVariant = (snapshot: ReturnType<typeof staticSnapshotSchema.parse>) => {
     const capture = snapshot.authorStyles;
@@ -109,33 +112,19 @@ export function createApp(
     ));
   };
   const workspaceStore = providedWorkspaceStore ?? new SourceWorkspaceStore(
-    env.SOURCE_WORKSPACE_DIR ?? '.snapshots/source-workspaces',
+    storageConfig.cacheDirectory,
     { identityIsolation, frozenStyleVariantEnabled }
   );
-  const codingAgent = providedCodingAgent ?? clineCodingAgentFromEnvironment(env);
+  const modelOptions = () => {
+    const apiKey = env.MODEL_API_KEY?.trim();
+    if (!apiKey) throw new Error('缺少 MODEL_API_KEY，请通过 Secret 注入模型密钥');
+    return { baseUrl: config.model.baseUrl, modelName: config.model.name, apiKey };
+  };
+  const codingAgent = providedCodingAgent ?? clineCodingAgentFromConfig({ ...modelOptions(), ...config.model.edit });
   const assistantRouter: AssistantRouterPort = providedAssistantRouter
-    ?? (env.MODEL_MODE === 'remote'
-      ? clineAssistantRouterFromEnvironment(env)
-      : {
-          adapterId: 'assistant-router-unavailable',
-          async route() {
-            return {
-              kind: 'failed',
-              code: 'ASSISTANT_MODEL_UNAVAILABLE',
-              message: '当前服务未配置远程模型，无法使用智能问答'
-            };
-          }
-        });
-  const assistantChat: AssistantChatPort = providedAssistantChat
-    ?? (env.MODEL_MODE === 'remote'
-      ? clineAssistantChatFromEnvironment(env)
-      : {
-          adapterId: 'assistant-chat-unavailable',
-          async answer() {
-            throw new Error('当前服务未配置远程模型，无法使用智能问答');
-          }
-        });
-  const authenticator = providedAuthenticator ?? createAuthenticatorFromEnvironment(env);
+    ?? new ClineAssistantRouterAdapter({ ...modelOptions(), ...config.model.router });
+  const assistantChat: AssistantChatPort = providedAssistantChat ?? new ClineAssistantChatAdapter(modelOptions());
+  const authenticator = providedAuthenticator ?? createAuthenticator(config.auth, env);
   const workspacePreviewUrl = (workspaceId: string, requestUrl: string, principal: AuthPrincipal) => {
     const url = new URL(publicUrl(`/workspaces/${workspaceId}/preview`, requestUrl));
     if (workspaceStore.hasAuthorRuleCandidate(workspaceId)) url.searchParams.set('candidate', 'B');
@@ -144,7 +133,7 @@ export function createApp(
     if (previewToken) url.searchParams.set('preview_token', previewToken);
     return url.toString();
   };
-  const sourceProgress = new SourceTurnProgressStore(new TurnProgressStorage(workspaceStore.root));
+  const sourceProgress = new SourceTurnProgressStore(new TurnProgressStorage(() => workspaceStore.root, () => !workspaceStore.persistence || workspaceStore.persistence.inTransaction), workspaceStore.persistence);
   const sourceTurns = new SourceTurnService(sourceProgress);
   type AppBindings = { Variables: { principal: AuthPrincipal } };
   const authenticate: MiddlewareHandler<AppBindings> = async (c, next) => {
@@ -157,6 +146,7 @@ export function createApp(
   };
   const authorizeWorkspace: MiddlewareHandler<AppBindings> = async (c, next) => {
     const workspaceId = c.req.param('workspaceId');
+    workspaceStore.persistence?.assertAvailable(workspaceId === 'export-all' ? undefined : workspaceId);
     // Collection-level routes share the /v1/workspaces prefix but do not name
     // a workspace. They remain protected by authenticate above.
     if (workspaceId === 'export-all') return next();
@@ -173,11 +163,27 @@ export function createApp(
   };
   const executeSourceTurn = createSourceTurnExecutor({ workspaceStore, codingAgent, sourceProgress, logStore });
 
+  // All ordinary HTTP mutations share the same commit boundary as Agent execution.
+  const persistMutation: MiddlewareHandler<AppBindings> = async (c, next) => {
+    const persistence = workspaceStore.persistence;
+    if (!persistence || persistence.inTransaction) return next();
+    const id = c.req.param('workspaceId');
+    persistence.assertAvailable(id === 'export-all' ? undefined : id);
+    if (['GET', 'HEAD', 'OPTIONS'].includes(c.req.method) || /\/turns(?:\/|$)/.test(c.req.path)) return next();
+    if (id && sourceTurns.has(id)) return c.json({ code: 'WORKSPACE_BUSY', message: '副本正在修改，请等待任务完成或先停止任务' }, 409);
+    await persistence.run(id, () => next(), { commit: () => c.res.status < 400 });
+  };
+
   return new Hono<AppBindings>()
+    .onError((error, c) => {
+      if (error instanceof WorkspaceStorageError) return c.json({ code: error.code, message: error.message }, ['WORKSPACE_BUSY', 'WORKSPACE_ARCHIVE_INVALID'].includes(error.code) ? 409 : 503);
+      console.error('[agent-service] request failed', error.name);
+      return c.json({ code: 'INTERNAL_ERROR', message: '服务处理失败' }, 500);
+    })
     .use('*', cors({
-      origin: env.CORS_ORIGIN?.trim() || '*',
+      origin: config.http.corsOrigin || '*',
       allowHeaders: ['Authorization', 'Content-Type', 'traceparent'],
-      credentials: Boolean(env.CORS_ORIGIN?.trim())
+      credentials: Boolean(config.http.corsOrigin)
     }))
     .use('/v1/workspaces', authenticate)
     .use('/v1/workspaces/*', authenticate)
@@ -194,6 +200,10 @@ export function createApp(
     .use('/logs', authorizeAdmin)
     .use('/v1/logs', authorizeAdmin)
     .use('/v1/logs/*', authorizeAdmin)
+    .use('/v1/workspaces', persistMutation)
+    .use('/v1/workspaces/:workspaceId', persistMutation)
+    .use('/v1/workspaces/:workspaceId/*', persistMutation)
+    .get('/ready', c => c.json({ ready: workspaceStore.persistence?.healthy ?? true }, (workspaceStore.persistence?.healthy ?? true) ? 200 : 503))
     .get('/v1/auth/me', c => c.json(c.get('principal')))
     .get('/logs', c => c.html(logPageHtml))
     .get('/v1/logs', c => c.json(logStore.list()))
@@ -204,11 +214,9 @@ export function createApp(
     .get('/health', c => c.json({
       ok: true,
       replicaAEnabled: frozenStyleVariantEnabled,
-      modelMode: env.MODEL_MODE ?? 'mock',
-      ...(env.MODEL_MODE === 'remote' && {
-        modelProvider: env.MODEL_PROVIDER ?? 'openai-compatible',
-        modelName: env.MODEL_NAME
-      }),
+      modelMode: 'remote',
+      modelProvider: config.model.providerLabel,
+      modelName: config.model.name,
       codingAgentAdapter: codingAgent.adapterId,
       assistantRouterAdapter: assistantRouter.adapterId,
       assistantChatAdapter: assistantChat.adapterId,
@@ -588,8 +596,8 @@ export function createApp(
       if (existing) return c.json(sourceTurnAcceptedSchema.parse({ kind: 'accepted', turnId: request.turnId }), 202);
       try { workspaceStore.assertConversation(workspaceId, request.conversationId); }
       catch { return c.json({ code: 'CONVERSATION_NOT_FOUND', message: '会话不存在或不属于该副本' }, 404); }
-      const admission = sourceTurns.start(workspaceId, request.turnId, request.conversationId ?? workspaceId,
-        signal => executeSourceTurn(workspaceId, request, signal));
+      const admission = await sourceTurns.startPersisted(workspaceId, request.turnId, request.conversationId ?? workspaceId,
+        signal => executeSourceTurn(workspaceId, request, signal), workspaceStore.persistence);
       if (admission === 'busy') return c.json({ code: 'WORKSPACE_BUSY', message: '该副本已有修改任务正在运行，请等待完成或先停止该任务' }, 409);
       return c.json(sourceTurnAcceptedSchema.parse({ kind: 'accepted', turnId: request.turnId }), 202);
     })

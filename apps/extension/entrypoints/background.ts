@@ -209,7 +209,7 @@ async function createWorkspaceFromViewport(tab: Browser.tabs.Tab): Promise<Sourc
       editSessionId: crypto.randomUUID(),
       sourceTabId: tab.id
     });
-    await browser.tabs.update(tab.id, { url: created.previewUrl, active: true });
+    await browser.tabs.update(tab.id, { url: created.previewUrl });
     return {
       ...created,
       sourceUrl: hydratedSnapshot.sourceUrl,
@@ -330,7 +330,7 @@ export default defineBackground(() => {
         throw new BrowserCommandError('TAB_CHANGED', '插件仍绑定在打开它时的页面。请切回原页面，或在当前页面重新点击插件图标。');
       }
       if (command.type === 'createWorkspaceFromVisibleViewport') {
-        return { ok: true, workspace: await createWorkspaceFromViewport(tab) };
+        return { ok: true, workspace: await createWorkspaceFromViewport(tab), tabId: tab.id };
       }
       if (command.type === 'exportScreenshot') return await exportScreenshot(tab);
       return await sendToContent(tab, command);

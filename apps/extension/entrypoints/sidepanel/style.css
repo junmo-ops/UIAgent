@@ -183,8 +183,10 @@ button, textarea { font: inherit; }
   overflow-y: auto;
   /* Keep message widths stable when expanded history introduces a scrollbar. */
   scrollbar-gutter: stable;
-  scroll-behavior: smooth;
+  scroll-behavior: auto;
 }
+
+.chat-list-content { display: flex; flex-direction: column; gap: 14px; flex: 0 0 auto; min-width: 0; }
 
 .chat-list::-webkit-scrollbar { width: 5px; }
 .chat-list::-webkit-scrollbar-thumb { background: #ddd9d6; border-radius: 999px; }

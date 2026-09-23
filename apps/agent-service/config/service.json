@@ -1,0 +1,36 @@
+{
+  "model": {
+    "baseUrl": "http://open-llm.uat.cmbchina.cn/llm/deepseek-v4-flash-284b-a13b-w8a8/v1",
+    "name": "deepseek-v4-flash-284b-a13b-w8a8",
+    "providerLabel": "deepseek",
+    "edit": {
+      "maxIterations": 45,
+      "maxOutputTokens": 8192
+    },
+    "router": {
+      "maxIterations": 3
+    }
+  },
+  "auth": {
+    "mode": "installation",
+    "installation": {
+      "tenantId": "ui-agent-dev",
+      "tokenTtlSeconds": 31536000,
+      "previewTokenTtlSeconds": 604800
+    },
+    "development": {
+      "userId": "local-developer",
+      "tenantId": "local"
+    }
+  },
+  "http": {
+    "publicBaseUrl": "https://ui-agent-dev.paas.cmbchina.cn/",
+    "corsOrigin": "*"
+  },
+  "logging": {
+    "file": "/tmp/ui-agent/logs/agent-turns.jsonl"
+  },
+  "diagnostics": {
+    "replicaAEnabled": false
+  }
+}

@@ -7,7 +7,6 @@ import { jsonSchema, streamText, stepCountIs } from 'ai';
 const asError = value => value instanceof Error ? value : new Error(String(value));
 const RATE_LIMIT_RETRY_LIMIT = 10;
 const RATE_LIMIT_DELAY_MS = 10_000;
-const OUTPUT_LIMIT_RECOVERY_BUDGET = 2_048;
 const outputStallError = () => Object.assign(
   new Error('模型未能完成修改计划，已停止本轮修改；请重试。'),
   { code: 'MODEL_OUTPUT_STALLED' }
@@ -81,7 +80,7 @@ export class Agent {
     let rateLimitRetries = 0;
     const usage = {};
     const runtimeStarted = Date.now();
-    const diagnostics = { version: 1, runtimeRevision: '2026-09-17-auto-tool-recovery-v15',
+    const diagnostics = { version: 1, runtimeRevision: '2026-09-23-normal-budget-recovery-v16',
       countingBasis: 'model decision rounds; rate-limit request retries are recorded separately per call',
       maxIterations: this.config.maxIterations ?? 12, maxOutputTokens: this.config.maxOutputTokens,
       requiredCompletionTool: this.config.completionPolicy?.requireCompletionTool === true,
@@ -153,9 +152,9 @@ export class Agent {
         const callStarted = Date.now();
         const tools = runtimeTools();
         const recoveringOutputLimit = outputLimitRecoveryStreak > 0;
-        const outputBudget = recoveringOutputLimit
-          ? Math.min(this.config.maxOutputTokens ?? OUTPUT_LIMIT_RECOVERY_BUDGET, OUTPUT_LIMIT_RECOVERY_BUDGET)
-          : this.config.maxOutputTokens;
+        // Recovery also needs room for reasoning and a complete tool payload.
+        // Narrow the next action in the prompt, not the configured output budget.
+        const outputBudget = this.config.maxOutputTokens;
         // Thinking endpoints may reject forced tool choice. Recovery is guided
         // by the continuation message and bounded by the progress check below;
         // completion still requires the configured completion tool.
@@ -308,7 +307,7 @@ export class Agent {
             diagnostics.outputLimitRecoveryCount = outputLimitRecoveryCount;
             diagnostics.continuationCount++;
             currentCall.continuationReason = 'output_limit_without_tool';
-            messages.push({ role: 'user', content: '刚才达到输出上限但未执行工具。现在是一次短预算恢复：不要复述需求、比较方案或重写完整计划。若仍不能确定影响结果的位置、范围或交互要求，立即调用澄清工具，只问一个关键问题，不自行改写用户的位置要求。否则只调用一个能推进任务的工具；未声明意图时先声明，不跳过现有修改和校验规则。' });
+            messages.push({ role: 'user', content: '刚才达到输出上限但未执行工具。本轮保留正常输出预算，请把下一步收敛为一次具体工具调用，不要复述需求、反复比较方案或在一轮中设计并输出整个实现。沿用已有工具结果，只决定当前最小且必要的一步：存在影响结果的需求歧义时，调用澄清工具，只问一个关键问题，不自行改写用户要求；若任务要求声明意图且尚未成功声明，先调用声明意图工具；前置条件已满足时，执行一个最小、完整的修改；缺少必要信息时，仅补充该步骤必需的信息；修改完成后按既有规则校验并提交。只使用当前可用工具，参数必须完整且符合 schema，不重复已被拒绝的读取，不跳过意图、修改、校验或完成规则。' });
             continue;
           }
           const attemptedToolWithoutExecution = calls + inputErrors > 0;

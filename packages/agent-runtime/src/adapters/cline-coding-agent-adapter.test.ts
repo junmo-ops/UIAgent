@@ -4,7 +4,7 @@ import { PROTOCOL_VERSION, type SourceTurnRequest } from '@ui-agent/contracts';
 import type { CodingAgentEvent, CodingWorkspaceTools } from '../core/coding-agent-port';
 import {
   ClineCodingAgentAdapter,
-  clineCodingAgentFromEnvironment,
+  clineCodingAgentFromConfig,
   type ClineAgentFactoryInput
 } from './cline-coding-agent-adapter';
 
@@ -724,16 +724,15 @@ describe('ClineCodingAgentAdapter', () => {
     expect(workspace.state().rolledBack).toBe(true);
   });
 
-  it('validates environment configuration without contacting a model', () => {
-    expect(() => clineCodingAgentFromEnvironment({
-      MODEL_MODE: 'mock'
-    })).toThrow('MODEL_MODE=remote');
-    expect(clineCodingAgentFromEnvironment({
-      MODEL_MODE: 'remote',
-      MODEL_BASE_URL: 'https://example.test',
-      MODEL_API_KEY: 'test-key',
-      MODEL_NAME: 'test-model',
-      CLINE_MAX_ITERATIONS: '12'
+  it('validates explicit configuration without contacting a model', () => {
+    expect(() => clineCodingAgentFromConfig({
+      baseUrl: '', apiKey: '', modelName: ''
+    })).toThrow('模型配置和密钥不能为空');
+    expect(clineCodingAgentFromConfig({
+      baseUrl: 'https://example.test',
+      apiKey: 'test-key',
+      modelName: 'test-model',
+      maxIterations: 12
     }).adapterId).toBe('cline-sdk');
   });
 });

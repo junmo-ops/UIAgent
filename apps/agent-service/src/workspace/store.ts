@@ -1,3 +1,4 @@
+import type { WorkspacePersistence } from './persistence';
 import { WorkspaceRevisionHistory } from './revision-history';
 import type { WorkspaceConversation } from '@ui-agent/contracts';
 import { validateWorkspaceFiles } from './workspace-validation';
@@ -21,7 +22,9 @@ import { diagnoseSnapshotPackage, type SnapshotDiagnostics } from './snapshot-di
 export class SourceWorkspaceStore {
   private readonly storage: WorkspaceFileStorage;
   private readonly history: WorkspaceRevisionHistory;
-  readonly root: string;
+  private readonly localRoot: string;
+  persistence?: WorkspacePersistence;
+  get root(): string { return this.persistence?.root ?? this.localRoot; }
   private readonly identityIsolation: boolean;
   private readonly frozenStyleVariantEnabled: boolean;
   private readonly active = new Set<string>();
@@ -31,8 +34,8 @@ export class SourceWorkspaceStore {
   private sheetCacheWeight = 0;
 
   constructor(root = '.snapshots/source-workspaces', options: SourceWorkspaceStoreOptions = {}) {
-    this.root = resolve(root);
-    this.storage = new WorkspaceFileStorage(this.root);
+    this.localRoot = resolve(root);
+    this.storage = new WorkspaceFileStorage(() => this.root, () => !this.persistence || this.persistence.inTransaction);
     this.history = new WorkspaceRevisionHistory(this.storage);
     this.identityIsolation = options.identityIsolation ?? true;
     this.frozenStyleVariantEnabled = options.frozenStyleVariantEnabled ?? true;
@@ -40,6 +43,7 @@ export class SourceWorkspaceStore {
   }
 
   create(input: unknown, owner: WorkspaceOwner = LOCAL_WORKSPACE_OWNER): SourceWorkspace {
+    if (this.persistence && !this.persistence.inTransaction) throw new Error('S3 模式必须通过提交协调层创建副本');
     const snapshot = staticSnapshotSchema.parse(input);
     if (!this.frozenStyleVariantEnabled) {
       const authorCapture = snapshot.authorStyles;

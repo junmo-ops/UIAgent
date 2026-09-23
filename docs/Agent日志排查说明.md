@@ -30,6 +30,7 @@
 
 ## 常见判断
 
+- 输出耗尽但没有执行工具：`continuationReason=output_limit_without_tool` 后会尝试一次恢复，下一轮 `recoveringOutputLimit=true`。从 `2026-09-23-normal-budget-recovery-v16` 起，恢复轮沿用配置的 `maxOutputTokens`，可通过 `outputBudget` 核对（配置为 8192 时，恢复轮也为 8192）。恢复提示要求执行一个最小必要的工具步骤；若仍无成功执行的工具，则以 `output_limit_recovery_failed` 和 `MODEL_OUTPUT_STALLED` 退出。成功执行工具后恢复正常循环；总轮数仍受 `maxIterations` 限制。正常预算恢复可能延长失败前的等待时间，不保证模型一定能恢复。
 - 无工具调用便失败：检查首轮 error、finishReason、outputTextChars 和续跑次数，区分接口异常、空响应及只返回文字。
 - 等待较久：比较每轮 durationMs、firstOutputMs 和工具 durationMs，区分输出等待、工具执行及反复检索。
 - 页面未保留修改：检查 finish 尝试对应的工具错误、最终 result 以及 rollback 状态。

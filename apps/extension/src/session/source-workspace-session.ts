@@ -1,4 +1,4 @@
-import type { ClarificationOption, SourceWorkspaceInfo, SourceTurnTranscript } from '@ui-agent/contracts';
+import type { ClarificationOption, PageSelection, SourceWorkspaceInfo, SourceTurnTranscript } from '@ui-agent/contracts';
 import { storage } from 'wxt/utils/storage';
 
 /**
@@ -35,6 +35,7 @@ export interface ActiveSourceTurnSession {
 }
 
 export interface PersistedWorkspaceSession {
+  selection?: PageSelection;
   conversationId?: string;
   drafts?: Record<string, string>;
   workspace: SourceWorkspaceInfo;

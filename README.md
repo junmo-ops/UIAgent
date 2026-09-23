@@ -23,7 +23,7 @@
 pnpm install --frozen-lockfile
 ```
 
-将 `apps/agent-service/.env.example` 复制为同目录下的 `.env`，填写 `MODEL_API_KEY`。模型地址和名称也在此配置，凭证不要提交到仓库。
+将 `apps/agent-service/.env.example` 复制为同目录下的 `.env`，填写 `MODEL_API_KEY`。模型地址、名称和其他普通参数填写 `apps/agent-service/config/service.json`，凭证不要提交到仓库。详见[服务配置说明](docs/服务配置说明.md)。
 
 ```bash
 # 同时启动 Agent Service 和插件开发构建
@@ -63,7 +63,7 @@ React 模块直接挂载在副本文档中，共享 React 和 Ant Design。编�
 
 部署时配置安装身份、持久化数据目录及稳定的身份签名密钥，确保重启后仍可访问历史副本。当前 Dockerfile 的数据目录为 `/opt/deployments/data`。
 
-安装身份默认没有全局日志权限；管理员通过 `INSTALLATION_ADMIN_USER_IDS` 明确指定，详见 `.env.example`。修改任务状态随副本持久化，服务重启后未完成任务显示为“已中断”，不会自动重跑；已保存版本仍可继续编辑。当前采用单实例任务互斥，不支持多进程共享数据目录执行任务。
+安装身份默认没有全局日志权限；管理员通过环境变量 `INSTALLATION_ADMIN_USER_IDS` 指定，多个用户 ID 用英文逗号分隔。修改任务状态随副本持久化，服务重启后未完成任务显示为“已中断”，不会自动重跑；已保存版本仍可继续编辑。当前采用单实例任务互斥，不支持多进程共享数据目录执行任务。
 
 依赖以行内已验证锁文件为基线，不随安装或导出升级。新增依赖或变更版本前，需确认行内源提供对应版本及平台包；导出成功不代表依赖预检通过。
 
@@ -98,3 +98,5 @@ pnpm build        # 构建
 - [更多资料](docs/) · [历史方案归档](docs/archive/)
 
 专题文档包含阶段性设计与历史记录；当前命令、配置和行为以代码为准。
+
+副本对象存储支持与旧数据迁移见 [部署说明](docs/副本对象存储部署说明.md)。普通存储参数统一填写 `apps/agent-service/config/workspace-storage.json`，行内部署设置 `mode: "s3"`，本地开发默认 `local`；只有存储凭证通过环境变量注入，插件无需设置。
