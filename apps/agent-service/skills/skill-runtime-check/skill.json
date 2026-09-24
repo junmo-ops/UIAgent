@@ -1,0 +1,11 @@
+{
+  "id": "skill-runtime-check",
+  "description": "当用户要求验证技能加载、Python 脚本执行或脚本产物回传链路时，实际运行 Python 生成执行报告。仅用于技能运行验证，不处理页面修改或普通问答。",
+  "scripts": [
+    {
+      "path": "scripts/report.py",
+      "runtime": "python"
+    }
+  ],
+  "displayName": "运行验证"
+}

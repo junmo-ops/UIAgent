@@ -9,9 +9,12 @@ playwright-report/
 test-results/
 .playwright-cli/
 .env
+apps/agent-service/config/*.local.json
+apps/agent-service/.local-workspaces/
 .logs/
 apps/agent-service/.snapshots/
 apps/agent-service/extension-release/
 .DS_Store
 *.log
 *.tsbuildinfo
+.codespot/

@@ -7,8 +7,9 @@ export const agentServiceUrlItem = storage.defineItem<string>('local:agentServic
 
 export async function getAgentServiceUrl(): Promise<string> {
   const stored = await agentServiceUrlItem.getValue();
-  const localDefault = 'http://127.0.0.1:8787';
-  if (stored === localDefault && DEFAULT_AGENT_SERVICE_URL !== localDefault) {
+  // Host permissions are compiled for this service. A stored address from a
+  // different build must not keep a local build connected to production.
+  if (stored !== DEFAULT_AGENT_SERVICE_URL) {
     await agentServiceUrlItem.setValue(DEFAULT_AGENT_SERVICE_URL);
     return DEFAULT_AGENT_SERVICE_URL;
   }

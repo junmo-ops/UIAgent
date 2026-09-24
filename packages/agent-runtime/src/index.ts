@@ -6,3 +6,5 @@ export * from './source-editing/interaction-instructions';
 export * from './adapters/cline-coding-agent-adapter';
 export * from './adapters/cline-assistant-router-adapter';
 export * from './adapters/cline-assistant-chat-adapter';
+
+export * from './core/skill-port';

@@ -4,6 +4,7 @@ import {
   type ClarificationOption
 } from '@ui-agent/contracts';
 import type { AssistantRouteResult, AssistantRouterPort } from '../core/assistant-router-port';
+import type { SkillProvider } from '../core/skill-port';
 
 const objectSchema = (
   properties: Record<string, unknown>,
@@ -48,6 +49,7 @@ export type AssistantRouterAgentFactory = (
 ) => AssistantRouterAgentInstance;
 
 export interface ClineAssistantRouterOptions {
+  skills?: SkillProvider;
   baseUrl: string;
   apiKey: string;
   modelName: string;
@@ -77,27 +79,38 @@ export class ClineAssistantRouterAdapter implements AssistantRouterPort {
 
   async route(request: AssistantTurnRequest): Promise<AssistantRouteResult> {
     let completion: AssistantRouteResult | undefined;
+    const catalog = this.options.skills?.list() ?? [];
+    const skillProperty = { type: 'string', description: '可选主技能 ID，只在用途匹配时选择；用户指定时沿用。' };
+    const chooseSkill = (id?: string) => {
+      const selectedId = request.skillId ?? id;
+      if (!selectedId) return {};
+      const skill = catalog.find(item => item.id === selectedId);
+      if (!skill) throw new Error('指定技能不可用');
+      if (request.skillVersion && request.skillVersion !== skill.version) throw new Error('技能版本已更新，请重新选择');
+      return { skillId: skill.id, skillVersion: skill.version };
+    };
     const tools: AgentTool<any, any>[] = [
-      createTool<Record<string, never>, string>({
+      createTool<{ skillId?: string }, string>({
         name: 'chat',
         description: '把不需要实际修改当前页面的问题交给无 DOM 权限的聊天 Agent。',
-        inputSchema: objectSchema({}),
+        inputSchema: objectSchema({ skillId: skillProperty }),
         lifecycle: { completesRun: true },
-        execute: async () => {
-          completion = { kind: 'chat' };
+        execute: async input => {
+          completion = { kind: 'chat', ...chooseSkill(input.skillId) };
           return '普通聊天意图已确认。';
         }
       }),
-      createTool<{ instruction: string; targetScope: 'selection' | 'workspace' }, string>({
+      createTool<{ instruction: string; targetScope: 'selection' | 'workspace'; skillId?: string }, string>({
         name: 'edit_page',
         description: '把明确的页面修改需求交给受控源码编辑 Agent。',
         inputSchema: objectSchema({
           instruction: stringProperty('忠实整理用户原文与已确认对话，仅补全必要指代；不新增风格、尺寸、布局或功能约束，不静默缩减需求。'),
-          targetScope: { type: 'string', enum: ['selection', 'workspace'] }
+          targetScope: { type: 'string', enum: ['selection', 'workspace'] },
+          skillId: skillProperty
         }, ['instruction', 'targetScope']),
         lifecycle: { completesRun: true },
         execute: async input => {
-          completion = { kind: 'page_edit', ...input };
+          completion = { kind: 'page_edit', instruction: input.instruction, targetScope: input.targetScope, ...chooseSkill(input.skillId) };
           return '页面修改意图已确认。';
         }
       }),
@@ -140,7 +153,7 @@ export class ClineAssistantRouterAdapter implements AssistantRouterPort {
         modelId: this.options.modelName,
         apiKey: this.options.apiKey,
         baseUrl: this.options.baseUrl,
-        systemPrompt: ROUTER_RULES,
+        systemPrompt: `${ROUTER_RULES}\n技能只补充任务流程，不改变用户意图或页面权限。根据描述选择匹配的一个主技能，在 chat/edit_page 中传 skillId；无适用项可省略。目录：${JSON.stringify(catalog)}`,
         tools,
         maxIterations: this.maxIterations
       });

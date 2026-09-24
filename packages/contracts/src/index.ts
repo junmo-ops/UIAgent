@@ -193,6 +193,8 @@ export const domOperationSchema = z.discriminatedUnion('kind', [
 export type DomOperation = z.infer<typeof domOperationSchema>;
 
 export const sourceTurnRequestSchema = z.object({
+  skillId: z.string().regex(/^[a-z0-9]+(?:-[a-z0-9]+)*$/).max(64).optional(),
+  skillVersion: z.string().regex(/^[a-f0-9]{64}$/).optional(),
   conversationId: z.string().uuid().optional(),
   protocolVersion: z.literal(PROTOCOL_VERSION),
   editSessionId: z.string().min(1),
@@ -251,6 +253,8 @@ export const assistantConversationEntrySchema = z.object({
 export type AssistantConversationEntry = z.infer<typeof assistantConversationEntrySchema>;
 
 export const assistantTurnRequestSchema = z.object({
+  skillId: z.string().regex(/^[a-z0-9]+(?:-[a-z0-9]+)*$/).max(64).optional(),
+  skillVersion: z.string().regex(/^[a-f0-9]{64}$/).optional(),
   protocolVersion: z.literal(PROTOCOL_VERSION),
   turnId: z.string().uuid(),
   traceId: z.string().uuid(),
@@ -271,6 +275,14 @@ export const assistantTurnRequestSchema = z.object({
 });
 export type AssistantTurnRequest = z.infer<typeof assistantTurnRequestSchema>;
 
+export const skillCatalogSchema = z.object({
+  pythonAvailable: z.boolean(),
+  skills: z.array(z.object({
+    id: z.string(), displayName: z.string().optional(), description: z.string(), version: z.string(),
+    scripts: z.array(z.object({ path: z.string(), runtime: z.enum(['node', 'python']), available: z.boolean() }))
+  }))
+});
+
 export const assistantTurnResponseSchema = z.discriminatedUnion('kind', [
   z.object({
     kind: z.literal('answered'),
@@ -278,6 +290,8 @@ export const assistantTurnResponseSchema = z.discriminatedUnion('kind', [
   }),
   z.object({
     kind: z.literal('page_edit'),
+    skillId: z.string().optional(),
+    skillVersion: z.string().optional(),
     instruction: z.string().min(1).max(10_000),
     targetScope: z.enum(['selection', 'workspace'])
   }),

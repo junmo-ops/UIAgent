@@ -1,7 +1,8 @@
 import { useEffect, useRef, useState } from 'react';
-import { Alert, Button, Input, Modal, Tooltip, message } from 'antd';
+import { Alert, Button, Dropdown, Input, Modal, Tooltip, message } from 'antd';
 import type { TextAreaRef } from 'antd/es/input/TextArea';
 import {
+  skillCatalogSchema,
   type SourceTurnRequest,
   PROTOCOL_VERSION,
   assistantTurnRequestSchema,
@@ -143,6 +144,9 @@ export function SidePanelApp() {
   const [feedback, feedbackHolder] = message.useMessage();
   const copyingUserIdRef = useRef(false);
   const [instruction, setInstruction] = useState('');
+  const [skills, setSkills] = useState<Array<{ id: string; displayName?: string; description: string; version: string; scripts: Array<{ runtime: 'node' | 'python'; available: boolean }> }>>([]);
+  const [selectedSkillId, setSelectedSkillId] = useState('');
+  const [skillLoadError, setSkillLoadError] = useState(false);
   const [chat, setChat] = useState<ChatEntry[]>([]);
   const [conversationId, setConversationId] = useState<string>();
   const [conversations, setConversations] = useState<WorkspaceConversation[]>([]);
@@ -193,6 +197,18 @@ export function SidePanelApp() {
   const restoredMessageIdsRef = useRef(new Set<string>());
   const [sessionReady, setSessionReady] = useState(false);
   const busy = snapshotBusy || assistantBusy || conversationLoading || Boolean(activeSourceTurn) || Boolean(sourceWorkspace && !sessionReady);
+  useEffect(() => {
+    if (initialization !== 'ready') return;
+    const controller = new AbortController();
+    setSkillLoadError(false);
+    void fetchAgentService(`${serviceUrl.replace(/\/$/, '')}/v1/skills`, { signal: controller.signal })
+      .then(async response => {
+        if (!response.ok) throw new Error('技能目录加载失败');
+        const catalog = skillCatalogSchema.parse(await response.json());
+        if (!controller.signal.aborted) setSkills(catalog.skills);
+      }).catch(() => { if (!controller.signal.aborted) setSkillLoadError(true); });
+    return () => controller.abort();
+  }, [initialization, serviceUrl]);
   const chatViewportRef = useRef<HTMLElement>(null);
   const chatContentRef = useRef<HTMLDivElement>(null);
   useEffect(() => {
@@ -461,6 +477,7 @@ export function SidePanelApp() {
         turnId,
         traceId: crypto.randomUUID(),
         instruction: text,
+        ...(selectedSkillId ? { skillId: selectedSkillId, skillVersion: skills.find(skill => skill.id === selectedSkillId)?.version } : {}),
         context: {
           hasWorkspace: Boolean(sourceWorkspace),
           hasSelection: Boolean(turnSelection),
@@ -537,13 +554,14 @@ export function SidePanelApp() {
         return;
       }
       if (!sourceWorkspace) throw new Error('需要先进入副本编辑，才能执行页面修改');
+      if (finalOutcome.skillId) setNotice(`本轮使用技能：${finalOutcome.skillId}`);
       setAssistantBusy(false);
       await runSourceTurn(
         finalOutcome.instruction,
         sourceWorkspace,
         finalOutcome.targetScope === 'selection' ? turnSelection?.selected.sourceId : undefined,
         turnId,
-        { replyToClarificationId, clarificationOptionId, originalInstruction: text, assistantTraceId: request.traceId }
+        { replyToClarificationId, clarificationOptionId, originalInstruction: text, assistantTraceId: request.traceId, skillId: finalOutcome.skillId, skillVersion: finalOutcome.skillVersion }
       );
     } catch (error) {
       if (assistantAbort.signal.aborted) {
@@ -670,7 +688,7 @@ export function SidePanelApp() {
     workspace: ActiveWorkspace,
     sourceId?: string,
     turnId = crypto.randomUUID(),
-    requestContext: Pick<SourceTurnRequest, 'replyToClarificationId' | 'clarificationOptionId' | 'originalInstruction' | 'assistantTraceId'> = {}
+    requestContext: Pick<SourceTurnRequest, 'replyToClarificationId' | 'clarificationOptionId' | 'originalInstruction' | 'assistantTraceId' | 'skillId' | 'skillVersion'> = {}
   ) => {
     setSnapshotBusy(true);
     let settled = false;
@@ -1235,11 +1253,35 @@ export function SidePanelApp() {
           />
           <div className="composer-toolbar">
             {sourceWorkspace ? (
+              <div className="composer-actions">
               <div className="history-actions">
                 <Tooltip title="撤销"><Button type="text" shape="circle" aria-label="撤销" disabled={!sourceWorkspace.canUndo || busy} icon={<UiIcon name="undo" />} onClick={() => history('undo')} /></Tooltip>
                 <Tooltip title="重做"><Button type="text" shape="circle" aria-label="重做" disabled={!sourceWorkspace.canRedo || busy} icon={<UiIcon name="redo" />} onClick={() => history('redo')} /></Tooltip>
                 <Tooltip title="恢复初始"><Button type="text" shape="circle" aria-label="恢复初始" disabled={!sourceWorkspace.canUndo || busy} icon={<UiIcon name="reset" />} onClick={() => history('reset')} /></Tooltip>
                 <Tooltip title="导出当前可视区域"><Button className="export-action" type="text" shape="circle" aria-label="导出截图" disabled={busy} icon={<UiIcon name="download" />} onClick={exportScreenshot} /></Tooltip>
+              </div>
+              <Dropdown trigger={['click']} placement="top" disabled={busy}
+                align={{ overflow: { adjustX: true, adjustY: true, shiftX: true, shiftY: true } }}
+                getPopupContainer={trigger => trigger.ownerDocument.body}
+                styles={{ root: { width: 'min(280px, calc(100vw - 24px))', maxWidth: 'calc(100vw - 24px)' } }}
+                menu={{ style: { width: '100%', maxHeight: 'min(360px, 60vh)', overflowY: 'auto' }, selectedKeys: [selectedSkillId || '__auto'],
+                  onClick: ({ key }) => { setSelectedSkillId(key === '__auto' ? '' : key); composerRef.current?.focus(); },
+                  items: [
+                    { key: '__auto', label: <div className="skill-menu-item"><strong>自动选择</strong><span>根据本轮需求使用合适的技能</span></div> },
+                    { type: 'divider' },
+                    ...skills.map(skill => ({ key: skill.id, label: <div className="skill-menu-item" title={skill.description}>
+                      <strong>{skill.displayName ?? skill.id}</strong><span>{skill.description}</span>
+                      {skill.scripts.some(script => !script.available) && <small>部分脚本运行环境不可用</small>}
+                    </div> })),
+                    ...(skillLoadError ? [{ key: '__unavailable', disabled: true, label: '技能目录暂不可用，请重新打开面板' }] : [])
+                  ] }}>
+                <Button type="text" className={`skill-trigger${selectedSkillId ? ' is-selected' : ''}`}
+                  aria-label={`选择技能：${skills.find(skill => skill.id === selectedSkillId)?.displayName ?? (selectedSkillId || '自动')}`}
+                  title={skills.find(skill => skill.id === selectedSkillId)?.displayName ?? (selectedSkillId || '自动选择技能')}>
+                  <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.6" aria-hidden="true"><path d="m12 3 2.5 6.5L21 12l-6.5 2.5L12 21l-2.5-6.5L3 12l6.5-2.5Z" /></svg>
+                  <span>{selectedSkillId ? skills.find(skill => skill.id === selectedSkillId)?.displayName ?? selectedSkillId : '技能'}</span>
+                </Button>
+              </Dropdown>
               </div>
             ) : <div />}
             {assistantBusy || sourceProgress && (sourceProgress.status === 'running' || sourceProgress.status === 'cancelling') ? (

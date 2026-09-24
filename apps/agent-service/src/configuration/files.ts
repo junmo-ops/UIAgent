@@ -13,6 +13,9 @@ export function serviceDirectory() {
   }
 }
 export function readConfigurationFile(name: string): unknown {
-  try { return JSON.parse(readFileSync(resolve(serviceDirectory(), 'config', name), 'utf8')); }
-  catch { throw new Error(`无法读取 config/${name}，请检查文件和 JSON 格式`); }
+  const directory = resolve(serviceDirectory(), 'config');
+  const localName = name.replace(/\.json$/, '.local.json');
+  const selected = process.env.NODE_ENV !== 'production' && existsSync(resolve(directory, localName)) ? localName : name;
+  try { return JSON.parse(readFileSync(resolve(directory, selected), 'utf8')); }
+  catch { throw new Error(`无法读取 config/${selected}，请检查文件和 JSON 格式`); }
 }

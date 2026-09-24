@@ -1,0 +1,10 @@
+{
+  "directory": "skills",
+  "pythonExecutable": "python3",
+  "timeoutMs": 30000,
+  "maxConcurrentScripts": 2,
+  "maxOutputBytes": 131072,
+  "maxFiles": 20,
+  "maxInputBytes": 262144,
+  "maxRunsPerTurn": 3
+}

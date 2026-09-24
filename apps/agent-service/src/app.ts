@@ -1,4 +1,5 @@
 import { readServiceConfig, type ServiceConfig } from './configuration/service-config';
+import { SkillRegistry } from './skills/registry';
 import { readWorkspaceStorageConfig } from './storage/config';
 import { WorkspaceStorageError } from './storage/s3-workspace-storage';
 import { zValidator } from '@hono/zod-validator';
@@ -8,11 +9,13 @@ import {
   ClineAssistantRouterAdapter,
   clineCodingAgentFromConfig,
   type AssistantChatPort,
+  type AssistantChatRun,
   type AssistantRouterPort,
   type CodingAgentPort
 } from '@ui-agent/agent-runtime';
 import {
   assistantTurnRequestSchema,
+  type AssistantTurnResponse,
   assistantTurnResponseSchema,
   sourceTurnRequestSchema,
   sourceTurnAcceptedSchema,
@@ -120,10 +123,31 @@ export function createApp(
     if (!apiKey) throw new Error('缺少 MODEL_API_KEY，请通过 Secret 注入模型密钥');
     return { baseUrl: config.model.baseUrl, modelName: config.model.name, apiKey };
   };
-  const codingAgent = providedCodingAgent ?? clineCodingAgentFromConfig({ ...modelOptions(), ...config.model.edit });
+  const skills = new SkillRegistry();
+  for (const issue of skills.issues) console.warn('[skills] Disabled package:', issue);
+  const codingAgent = providedCodingAgent ?? clineCodingAgentFromConfig({ ...modelOptions(), ...config.model.edit, skills });
   const assistantRouter: AssistantRouterPort = providedAssistantRouter
-    ?? new ClineAssistantRouterAdapter({ ...modelOptions(), ...config.model.router });
-  const assistantChat: AssistantChatPort = providedAssistantChat ?? new ClineAssistantChatAdapter(modelOptions());
+    ?? new ClineAssistantRouterAdapter({ ...modelOptions(), ...config.model.router, skills });
+  const assistantChat: AssistantChatPort = providedAssistantChat ?? new ClineAssistantChatAdapter({ ...modelOptions(), skills });
+  const answerWithLog: AssistantChatPort['answer'] = async (request, observeText, signal) => {
+    const startedAt = Date.now();
+    let run: AssistantChatRun | undefined;
+    let response: AssistantTurnResponse | undefined;
+    try {
+      const answer = await assistantChat.answer(request, observeText, signal, value => { run = value; });
+      response = { kind: 'answered', answer };
+      return answer;
+    } catch (error) {
+      response = { kind: 'failed', code: signal?.aborted ? 'ASSISTANT_CANCELLED' : 'ASSISTANT_CHAT_ERROR',
+        message: signal?.aborted ? '用户已停止本轮问答' : error instanceof Error ? error.message : '问答执行失败' };
+      throw error;
+    } finally {
+      if (response) {
+        try { logStore.recordAssistantTurn(request, response, Date.now() - startedAt, assistantChat.adapterId, run); }
+        catch { console.error('[assistant-log] Failed to write diagnostic log'); }
+      }
+    }
+  };
   const authenticator = providedAuthenticator ?? createAuthenticator(config.auth, env);
   const workspacePreviewUrl = (workspaceId: string, requestUrl: string, principal: AuthPrincipal) => {
     const url = new URL(publicUrl(`/workspaces/${workspaceId}/preview`, requestUrl));
@@ -188,6 +212,7 @@ export function createApp(
     .use('/v1/workspaces', authenticate)
     .use('/v1/workspaces/*', authenticate)
     .use('/v1/assistant/*', authenticate)
+    .use('/v1/skills', authenticate)
     .use('/v1/auth/installations/refresh', authenticate)
     .use('/v1/auth/me', authenticate)
     .use('/workspaces/*', authenticate)
@@ -205,6 +230,7 @@ export function createApp(
     .use('/v1/workspaces/:workspaceId/*', persistMutation)
     .get('/ready', c => c.json({ ready: workspaceStore.persistence?.healthy ?? true }, (workspaceStore.persistence?.healthy ?? true) ? 200 : 503))
     .get('/v1/auth/me', c => c.json(c.get('principal')))
+    .get('/v1/skills', c => c.json({ skills: skills.list(), pythonAvailable: skills.pythonAvailable }))
     .get('/logs', c => c.html(logPageHtml))
     .get('/v1/logs', c => c.json(logStore.list()))
     .get('/v1/logs/:id', c => {
@@ -262,7 +288,7 @@ export function createApp(
       const request = c.req.valid('json');
       const route = await assistantRouter.route(request);
       const response = route.kind === 'chat'
-        ? { kind: 'answered' as const, answer: await assistantChat.answer(request, undefined, c.req.raw.signal) }
+        ? { kind: 'answered' as const, answer: await answerWithLog({ ...request, skillId: route.skillId, skillVersion: route.skillVersion }, undefined, c.req.raw.signal) }
         : route;
       return c.json(
         assistantTurnResponseSchema.parse(response),
@@ -274,6 +300,9 @@ export function createApp(
       c.header('Cache-Control', 'no-cache, no-transform');
       c.header('X-Accel-Buffering', 'no');
       return streamSSE(c, async stream => {
+        const disconnected = new AbortController();
+        stream.onAbort(() => disconnected.abort());
+        const signal = AbortSignal.any([c.req.raw.signal, disconnected.signal]);
         const send = (event: unknown) => stream.writeSSE({ data: JSON.stringify(event) });
         try {
           const route = await assistantRouter.route(request);
@@ -285,10 +314,10 @@ export function createApp(
           }
           let emittedText = false;
           let pendingWrite = Promise.resolve();
-          const answer = await assistantChat.answer(request, text => {
+          const answer = await answerWithLog({ ...request, skillId: route.skillId, skillVersion: route.skillVersion }, text => {
             emittedText = true;
             pendingWrite = pendingWrite.then(() => send({ type: 'answer_delta', text }));
-          }, c.req.raw.signal);
+          }, signal);
           await pendingWrite;
           if (!emittedText) await send({ type: 'answer_delta', text: answer });
           await send({ type: 'result', result: { kind: 'answered', answer } });

@@ -4,8 +4,8 @@ import type {
 } from '@ui-agent/contracts';
 
 export type AssistantRouteResult =
-  | { kind: 'chat' }
-  | { kind: 'page_edit'; instruction: string; targetScope: 'selection' | 'workspace' }
+  | { kind: 'chat'; skillId?: string; skillVersion?: string }
+  | { kind: 'page_edit'; instruction: string; targetScope: 'selection' | 'workspace'; skillId?: string; skillVersion?: string }
   | {
       kind: 'clarification';
       clarificationId: string;

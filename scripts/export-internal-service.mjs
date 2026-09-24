@@ -48,9 +48,9 @@ if (existsSync(outputDirectory)) {
 }
 mkdirSync(outputDirectory, { recursive: true });
 
-const excludedDirectoryNames = new Set(['node_modules', 'dist', 'coverage', '.output', '.wxt', '.logs', '.snapshots']);
+const excludedDirectoryNames = new Set(['node_modules', 'dist', 'coverage', '.output', '.wxt', '.logs', '.snapshots', '.local-workspaces']);
 const excludedFileNames = new Set(['.DS_Store']);
-const excludedFilePattern = /(?:\.test\.ts$|\.spec\.ts$|\.env(?:\..+)?$|\.tsbuildinfo$|\.log$)/;
+const excludedFilePattern = /(?:\.test\.ts$|\.spec\.ts$|\.env(?:\..+)?$|\.local\.json$|\.tsbuildinfo$|\.log$)/;
 
 function shouldCopy(sourcePath) {
   const name = sourcePath.split('/').at(-1) ?? '';
@@ -95,7 +95,8 @@ const servicePackage = readJson('apps/agent-service/package.json');
 servicePackage.scripts = {
   dev: servicePackage.scripts.dev,
   start: servicePackage.scripts.start,
-  'package:extension': servicePackage.scripts['package:extension']
+  'package:extension': servicePackage.scripts['package:extension'],
+  'skills:check': servicePackage.scripts['skills:check']
 };
 delete servicePackage.devDependencies;
 writeJson('apps/agent-service/package.json', servicePackage);
@@ -127,6 +128,7 @@ writeFileSync(
 cpSync(resolve(projectRoot, 'apps/agent-service/.env.example'), resolve(outputDirectory, 'apps/agent-service/.env.example'));
 cpSync(resolve(projectRoot, 'docs/副本对象存储部署说明.md'), resolve(outputDirectory, 'STORAGE.md'));
 cpSync(resolve(projectRoot, 'docs/服务配置说明.md'), resolve(outputDirectory, 'CONFIGURATION.md'));
+cpSync(resolve(projectRoot, 'docs/技能接入与脚本执行.md'), resolve(outputDirectory, 'SKILLS.md'));
 writeFileSync(resolve(outputDirectory, 'pnpm-lock.yaml'), deploymentLockfile);
 
 const exportedExtensionManifestPath = resolve(outputDirectory, 'apps/agent-service/extension-release/manifest.json');

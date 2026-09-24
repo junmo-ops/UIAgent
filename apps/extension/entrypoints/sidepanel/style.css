@@ -188,6 +188,19 @@ button, textarea { font: inherit; }
 
 .chat-list-content { display: flex; flex-direction: column; gap: 14px; flex: 0 0 auto; min-width: 0; }
 
+/* Skill details live in the menu, keeping the composer focused on typing. */
+.composer-actions { display: flex; align-items: center; gap: 4px; flex: 1; min-width: 0; }
+.skill-trigger.ant-btn { display: inline-flex; align-items: center; gap: 5px; min-width: 32px; max-width: 108px; padding: 4px 7px; height: 30px; border-radius: 8px; color: #77716b; }
+.skill-trigger.ant-btn > span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.skill-trigger svg { flex-shrink: 0; }
+.skill-trigger.is-selected.ant-btn { color: #655344; background: #f3eee8; }
+.skill-menu-item { padding: 5px 2px; white-space: normal; }
+.skill-menu-item strong { display: block; font-size: 13px; font-weight: 500; overflow-wrap: anywhere; }
+.skill-menu-item span { display: block; overflow-wrap: anywhere; margin-top: 4px; color: #8c8781; font-size: 12px; line-height: 1.5; }
+.skill-menu-item small { display: block; margin-top: 4px; color: #986b35; }
+@media (max-width: 360px) { .composer-actions .history-actions { gap: 0; } .composer-toolbar { gap: 6px; } }
+
+
 .chat-list::-webkit-scrollbar { width: 5px; }
 .chat-list::-webkit-scrollbar-thumb { background: #ddd9d6; border-radius: 999px; }
 

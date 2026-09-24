@@ -4,12 +4,15 @@ import { toolCallStatistics, type ToolCallStatistics } from '@ui-agent/agent-run
 import type {
   SourceTurnRequest,
   SourceTurnResponse,
+  AssistantTurnRequest,
+  AssistantTurnResponse,
 } from '@ui-agent/contracts';
 import type {
   CodingAgentStep,
   CodingAgentCheckpoint,
   CodingAgentConversationTurn
 } from '@ui-agent/agent-runtime';
+import type { AssistantChatRun } from '@ui-agent/agent-runtime';
 
 export interface TurnLogEntry {
   id: string;
@@ -17,9 +20,12 @@ export interface TurnLogEntry {
   updatedAt: string;
   status: 'running' | 'completed' | 'failed';
   model: { mode: string; provider: string; name?: string };
-  request: SourceTurnRequest;
-  conversation: CodingAgentConversationTurn[];
-  result?: SourceTurnResponse;
+  request: Omit<SourceTurnRequest, 'editSessionId'> & { editSessionId?: string };
+  conversation: CodingAgentConversationTurn[] | AssistantTurnRequest['conversation'];
+  result?: SourceTurnResponse | AssistantTurnResponse;
+  kind?: 'source_turn' | 'assistant_turn';
+  assistant?: { adapterId: string; runtime?: AssistantChatRun['runtime'] };
+  assistantSteps?: AssistantChatRun['steps'];
   sourceWorkspaceId?: string;
   codingAgent?: { adapterId: string; checkpoint: CodingAgentCheckpoint };
   sourceSteps?: CodingAgentStep[];
@@ -32,7 +38,7 @@ export interface TurnLogSummary {
   id: string;
   timestamp: string;
   status: TurnLogEntry['status'];
-  editSessionId: string;
+  editSessionId?: string;
   turnId: string;
   traceId: string;
   instruction: string;
@@ -100,6 +106,23 @@ export class TurnLogStore {
 
   get(id: string): TurnLogEntry | undefined {
     return this.entries.find(entry => entry.id === id);
+  }
+
+  recordAssistantTurn(request: AssistantTurnRequest, response: AssistantTurnResponse, durationMs: number,
+    adapterId: string, run?: AssistantChatRun): void {
+    const timestamp = new Date().toISOString();
+    const { conversation, ...requestContext } = request;
+    const entry = redact({
+      id: `log-${crypto.randomUUID()}`, kind: 'assistant_turn', timestamp, updatedAt: timestamp,
+      status: response.kind === 'failed' ? 'failed' : 'completed', model: this.model,
+      request: requestContext, conversation, result: response, durationMs,
+      assistant: { adapterId, runtime: run?.runtime }, assistantSteps: run?.steps ?? [],
+      toolStatistics: toolCallStatistics(run?.runtime, run?.steps ?? []),
+      ...(response.kind === 'failed' ? { error: response.message } : {})
+    }) as TurnLogEntry;
+    this.entries.push(entry);
+    this.trim();
+    this.persist(entry);
   }
 
   recordSourceTurn(

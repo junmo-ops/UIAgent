@@ -1,3 +1,5 @@
+import type { SkillProvider } from '../core/skill-port';
+import { skillTools } from './skill-tools';
 import {
   Agent,
   createTool as createRuntimeTool,
@@ -286,6 +288,7 @@ export interface ClineAgentFactoryInput {
 export type ClineAgentFactory = (input: ClineAgentFactoryInput) => ClineAgentInstance;
 
 export interface ClineCodingAgentOptions {
+  skills?: SkillProvider;
   baseUrl: string;
   apiKey: string;
   modelName: string;
@@ -1320,6 +1323,8 @@ export class ClineCodingAgentAdapter implements CodingAgentPort {
     let unsubscribe: (() => void) | undefined;
     try {
       throwIfCancelled();
+      const skill = this.options.skills?.open(turn.request.skillId, turn.request.skillVersion);
+      if (skill) tools.push(...skillTools(skill, record));
       const files = await workspace.listFiles();
       let selectedElementContext: string | undefined;
       if (turn.request.sourceId) {
@@ -1337,7 +1342,7 @@ export class ClineCodingAgentAdapter implements CodingAgentPort {
         modelId: this.options.modelName,
         apiKey: this.options.apiKey,
         baseUrl: this.options.baseUrl,
-        systemPrompt: `${modeRules}\n单轮最多 ${this.maxIterations} 次模型决策；从第 ${Math.max(1, this.maxIterations - FINALIZATION_WINDOW + 1)} 轮起必须停止扩展读取，只能完成必要修改并 finish，或 clarify。`,
+        systemPrompt: `${modeRules}\n${skill?.prompt ?? ''}\n单轮最多 ${this.maxIterations} 次模型决策；从第 ${Math.max(1, this.maxIterations - FINALIZATION_WINDOW + 1)} 轮起必须停止扩展读取，只能完成必要修改并 finish，或 clarify。`,
         tools,
         maxIterations: this.maxIterations,
         maxOutputTokens: this.maxOutputTokens

@@ -9,6 +9,7 @@
     "package:extension": "node --import tsx scripts/package-extension-release.mjs",
     "build": "tsc -p tsconfig.build.json",
     "typecheck": "tsc --noEmit",
+    "skills:check": "node --import tsx src/skills/check.ts",
     "storage:migrate": "node --import tsx src/storage/migrate-workspaces.ts"
   },
   "dependencies": {
