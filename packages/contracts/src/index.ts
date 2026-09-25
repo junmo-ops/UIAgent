@@ -280,7 +280,7 @@ export type AssistantTurnRequest = z.infer<typeof assistantTurnRequestSchema>;
 export const skillCatalogSchema = z.object({
   pythonAvailable: z.boolean(),
   skills: z.array(z.object({
-    id: z.string(), displayName: z.string().optional(), description: z.string(), version: z.string(),
+    id: z.string(), displayName: z.string().optional(), defaultEnabled: z.boolean().default(true), description: z.string(), version: z.string(),
     scripts: z.array(z.object({ path: z.string(), runtime: z.enum(['node', 'python']), available: z.boolean() }))
   }))
 });
@@ -493,6 +493,7 @@ export type ContentCommand =
   | { type: 'editorHeartbeat'; selectedSourceId?: string }
   | { type: 'deactivateEditor' }
   | { type: 'startSelection' }
+  | { type: 'clearSelection' }
   | { type: 'capturePageSnapshot'; includeFrozenStyles?: boolean }
   | { type: 'createWorkspaceFromVisibleViewport' }
   | { type: 'bindEditorTab'; tabId: number; previewUrl: string }
@@ -511,6 +512,7 @@ export interface ExtensionProtocolMap {
   browserCommand(data: BrowserCommandRequest): ContentCommandResult;
   contentCommand(data: ContentCommand): ContentCommandResult;
   selectionChanged(data: PageSelection): void;
+  selectionCleared(data: null): void;
 }
 // Capture-time facts only: these must never be treated as post-edit geometry.
 export const CAPTURED_LAYOUT_PROPERTIES = [

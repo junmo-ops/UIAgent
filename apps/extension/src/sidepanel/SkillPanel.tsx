@@ -17,7 +17,7 @@ export function SkillPanel({ skills, loading, error, disabledIds, saving, onTogg
       <button className="history-icon-button" type="button" aria-label="关闭技能面板" onClick={onClose}><svg className="ui-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.6" aria-hidden="true"><path d="m6 6 12 12M18 6 6 18" /></svg></button>
     </header>
     <Input className="history-search" autoFocus allowClear aria-label="搜索技能" placeholder="搜索技能" value={search} onChange={event => setSearch(event.target.value)} />
-    <p className="history-hint">默认全部开启，助手按需使用。更改从下一轮生效。</p>
+    <p className="history-hint">助手按需使用已开启的技能。更改从下一轮生效。</p>
     {error && <Alert type="error" message={error} action={<Button size="small" onClick={onRetry}>重试</Button>} />}
     <div className="conversation-list" aria-busy={loading}>
       {loading ? <p className="history-empty" role="status">正在加载…</p> : <>

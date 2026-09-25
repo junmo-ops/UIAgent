@@ -17,6 +17,7 @@ const configSchema = z.object({
   maxRunsPerTurn: z.number().int().min(1).max(10)
 }).strict();
 const manifestSchema = z.object({
+  defaultEnabled: z.boolean().default(true),
   id: z.string().regex(/^[a-z0-9]+(?:-[a-z0-9]+)*$/).max(64),
   displayName: z.string().trim().min(1).max(40).optional(),
   description: z.string().min(1).max(1024),
@@ -82,13 +83,13 @@ export class SkillRegistry implements SkillProvider {
         }
         const hash = createHash('sha256');
         for (const [path, content] of files) hash.update(`${path.length}:${path}:${content.length}:`).update(content);
-        const summary = { id: manifest.id, displayName: manifest.displayName, description: manifest.description, version: hash.digest('hex'), scripts: manifest.scripts.map(script => ({ ...script, available: script.runtime === 'node' || this.pythonAvailable })) };
+        const summary = { id: manifest.id, displayName: manifest.displayName, defaultEnabled: manifest.defaultEnabled, description: manifest.description, version: hash.digest('hex'), scripts: manifest.scripts.map(script => ({ ...script, available: script.runtime === 'node' || this.pythonAvailable })) };
         this.packages.set(manifest.id, { summary, files });
       } catch (error) { this.issues.push(`${entry.name}: ${error instanceof Error ? error.message : '技能包无效'}`); }
     }
   }
   list(): SkillSummary[] { return [...this.packages.values()].map(item => structuredClone(item.summary)); }
-  open(id?: string, version?: string, disabledSkillIds: readonly string[] = []): SkillSession {
+  open(id?: string, version?: string, disabledSkillIds: readonly string[] = this.list().filter(skill => skill.defaultEnabled === false).map(skill => skill.id)): SkillSession {
     const disabled = new Set(disabledSkillIds);
     if (id && disabled.has(id)) throw new Error('该技能已关闭');
     if (version && (!id || this.packages.get(id)?.summary.version !== version)) throw new Error('技能版本已更新，请重新发送任务');

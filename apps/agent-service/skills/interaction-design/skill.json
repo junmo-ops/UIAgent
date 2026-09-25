@@ -1,0 +1,7 @@
+{
+  "id": "interaction-design",
+  "displayName": "交互设计",
+  "defaultEnabled": false,
+  "description": "为包含多步操作、控件联动或多个状态的 UI 示意梳理交互并指导实现；也可用于明确的交互方案咨询。不用于单纯改文案、外观、删除或原样复制，不自行补充用户未要求的业务流程。",
+  "scripts": []
+}

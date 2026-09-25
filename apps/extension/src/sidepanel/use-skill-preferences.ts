@@ -3,15 +3,19 @@ import { browser } from 'wxt/browser';
 import { agentServiceFetch } from '../service/agent-service-client';
 
 /** Per installation identity and service; never a shared service-wide setting. */
-export function useSkillPreferences(serviceUrl: string, enabled: boolean) {
-  const [disabledIds, setDisabledIds] = useState<string[]>([]);
+export function useSkillPreferences(serviceUrl: string, enabled: boolean, skills: Array<{ id: string; defaultEnabled?: boolean }>) {
+  const [overrides, setOverrides] = useState<Record<string, boolean>>({});
+  const disabledIds = [...new Set([
+    ...Object.keys(overrides).filter(id => overrides[id] === false),
+    ...skills.filter(skill => !(overrides[skill.id] ?? skill.defaultEnabled ?? true)).map(skill => skill.id)
+  ])];
   const [ready, setReady] = useState(false);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState('');
   const [retry, setRetry] = useState(0);
   const prefixRef = useRef('');
   useEffect(() => {
-    if (!enabled) return;
+    if (!enabled) { setReady(false); return; }
     const controller = new AbortController();
     let revision = 0;
     setReady(false);
@@ -21,7 +25,7 @@ export function useSkillPreferences(serviceUrl: string, enabled: boolean) {
       const current = ++revision;
       const values = await browser.storage.local.get(null);
       if (!controller.signal.aborted && current === revision) {
-        setDisabledIds(Object.keys(values).filter(key => key.startsWith(prefix) && values[key] === false).map(key => key.slice(prefix.length)));
+        setOverrides(Object.fromEntries(Object.keys(values).filter(key => key.startsWith(prefix) && typeof values[key] === 'boolean').map(key => [key.slice(prefix.length), values[key] as boolean])));
         setReady(true);
       }
     };
@@ -50,9 +54,9 @@ export function useSkillPreferences(serviceUrl: string, enabled: boolean) {
     setError('');
     try {
       await browser.storage.local.set({ [`${prefix}${id}`]: checked });
-      if (prefixRef.current === prefix) setDisabledIds(ids => checked ? ids.filter(value => value !== id) : [...new Set([...ids, id])]);
+      if (prefixRef.current === prefix) setOverrides(values => ({ ...values, [id]: checked }));
     } catch { setError('技能设置保存失败，请重试。'); }
     finally { setSaving(false); }
   };
-  return { disabledIds, ready, saving, error, toggle, retry: () => setRetry(value => value + 1) };
+  return { disabledIds, ready: ready && enabled, saving, error, toggle, retry: () => setRetry(value => value + 1) };
 }

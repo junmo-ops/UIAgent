@@ -145,7 +145,7 @@ export function SidePanelApp() {
   const [feedback, feedbackHolder] = message.useMessage();
   const copyingUserIdRef = useRef(false);
   const [instruction, setInstruction] = useState('');
-  const [skills, setSkills] = useState<Array<{ id: string; displayName?: string; description: string; version: string; scripts: Array<{ runtime: 'node' | 'python'; available: boolean }> }>>([]);
+  const [skills, setSkills] = useState<Array<{ id: string; displayName?: string; defaultEnabled?: boolean; description: string; version: string; scripts: Array<{ runtime: 'node' | 'python'; available: boolean }> }>>([]);
   const [skillsOpen, setSkillsOpen] = useState(false);
   const [skillReload, setSkillReload] = useState(0);
   const [skillsLoading, setSkillsLoading] = useState(true);
@@ -166,7 +166,9 @@ export function SidePanelApp() {
   const draftsRef = useRef<Record<string, string>>({});
   const [selection, updateSelection] = useState<PageSelection>();
   const selectionRef = useRef<PageSelection | undefined>(undefined);
+  const selectionEpochRef = useRef(0);
   const setSelection = (value: PageSelection | undefined) => {
+    selectionEpochRef.current++;
     selectionRef.current = value;
     updateSelection(value);
   };
@@ -202,7 +204,7 @@ export function SidePanelApp() {
   const restoredMessageIdsRef = useRef(new Set<string>());
   const [sessionReady, setSessionReady] = useState(false);
   const busy = snapshotBusy || assistantBusy || conversationLoading || Boolean(activeSourceTurn) || Boolean(sourceWorkspace && !sessionReady);
-  const skillPreferences = useSkillPreferences(serviceUrl, initialization === 'ready');
+  const skillPreferences = useSkillPreferences(serviceUrl, initialization === 'ready' && !skillsLoading && !skillLoadError, skills);
   useEffect(() => {
     if (initialization !== 'ready') return;
     const controller = new AbortController();
@@ -386,9 +388,10 @@ export function SidePanelApp() {
     let disposed = false;
     const heartbeat = async () => {
       const previous = selectionRef.current;
+      const epoch = selectionEpochRef.current;
       try {
         const result = await command({ type: 'editorHeartbeat', selectedSourceId: previous?.selected.sourceId });
-        if (!disposed && !selecting && selectionRef.current === previous
+        if (!disposed && !selecting && selectionEpochRef.current === epoch && selectionRef.current === previous
           && JSON.stringify(previous) !== JSON.stringify(result.selection)) setSelection(result.selection);
       } catch { /* A temporarily unavailable tab must not erase the selected target. */ }
     };
@@ -403,12 +406,32 @@ export function SidePanelApp() {
     };
   }, [initialization, sourceWorkspace?.workspaceId, sourceWorkspace?.tabId, selecting]);
   useEffect(() => onMessage('selectionChanged', message => {
+    if (message.sender.tab?.id !== sourceWorkspace?.tabId) return;
     const sourceId = message.data.selected.sourceId;
     if (sourceId) setSourceWorkspace(current => current ? { ...current, selectedSourceId: sourceId } : current);
     setSelection(message.data);
     setSelecting(false);
     setError(undefined);
-  }), []);
+  }), [sourceWorkspace?.tabId]);
+  useEffect(() => {
+    const clearLocal = () => {
+      setSelection(undefined);
+      setSelecting(false);
+      setSourceWorkspace(current => current ? { ...current, selectedSourceId: '' } : current);
+    };
+    const unsubscribe = onMessage('selectionCleared', message => {
+      if (message.sender.tab?.id === sourceWorkspace?.tabId) clearLocal();
+    });
+    const escape = (event: KeyboardEvent) => {
+      if (event.key !== 'Escape' || !sourceWorkspace || (!selectionRef.current && !selecting)) return;
+      clearLocal();
+      void command({ type: 'clearSelection' }).catch(error => {
+        setError(error instanceof Error ? error.message : '取消选区失败，请重试');
+      });
+    };
+    window.addEventListener('keydown', escape);
+    return () => { unsubscribe(); window.removeEventListener('keydown', escape); };
+  }, [sourceWorkspace?.tabId, selecting]);
 
   const persistWorkspaceChat = async (
     entry: ChatEntry,

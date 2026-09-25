@@ -79,7 +79,8 @@ export class ClineAssistantRouterAdapter implements AssistantRouterPort {
 
   async route(request: AssistantTurnRequest): Promise<AssistantRouteResult> {
     let completion: AssistantRouteResult | undefined;
-    const catalog = (this.options.skills?.list() ?? []).filter(skill => !request.disabledSkillIds?.includes(skill.id));
+    const catalog = (this.options.skills?.list() ?? []).filter(skill => request.disabledSkillIds
+      ? !request.disabledSkillIds.includes(skill.id) : skill.defaultEnabled !== false);
     const skillProperty = { type: 'string', description: '可选主技能 ID，只在用途匹配时选择；用户指定时沿用。' };
     const chooseSkill = (id?: string) => {
       const selectedId = request.skillId ?? id;

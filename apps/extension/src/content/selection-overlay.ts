@@ -4,6 +4,7 @@ export class SelectionOverlay {
   private selected: HTMLElement | null = null;
   private readonly overlay: HTMLDivElement;
   private enabled = false;
+  private explicitlyCleared = false;
 
   constructor() {
     document.querySelectorAll('[data-ui-agent-overlay]').forEach(node => node.remove());
@@ -23,6 +24,7 @@ export class SelectionOverlay {
   }
 
   select(element: HTMLElement): PageSelection {
+    this.explicitlyCleared = false;
     this.enabled = true;
     this.selected = element;
     this.show(element);
@@ -39,6 +41,8 @@ export class SelectionOverlay {
   }
 
   restore(sourceId?: string, visible = true): PageSelection | undefined {
+    // An in-flight heartbeat may still carry the target from before Escape.
+    if (this.explicitlyCleared) return undefined;
     const id = sourceId ?? this.selected?.getAttribute('data-ui-source-id');
     if (id) this.selected = document.querySelector<HTMLElement>(`[data-ui-source-id="${CSS.escape(id)}"]`);
     if (!this.selected?.isConnected) {
@@ -57,6 +61,23 @@ export class SelectionOverlay {
     this.enabled = false;
     this.overlay.style.display = 'none';
   }
+
+  clear(): void {
+    // Release only focus inside the cancelled target. Do not remove the site's
+    // focus styles or blur unrelated controls (including the chat composer).
+    let focused = document.activeElement;
+    while (focused?.shadowRoot?.activeElement) focused = focused.shadowRoot.activeElement;
+    let ancestor: Node | null = focused;
+    while (ancestor && ancestor !== this.selected) {
+      ancestor = ancestor.parentNode ?? (ancestor instanceof ShadowRoot ? ancestor.host : null);
+    }
+    if (this.selected && ancestor === this.selected && focused instanceof HTMLElement) focused.blur();
+    this.selected = null;
+    this.explicitlyCleared = true;
+    this.disable();
+  }
+
+  get hasSelection(): boolean { return this.enabled && Boolean(this.selected); }
 
   hide(): void {
     this.overlay.style.display = 'none';

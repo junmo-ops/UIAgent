@@ -1,4 +1,5 @@
 export interface SkillSummary {
+  defaultEnabled?: boolean;
   id: string;
   displayName?: string;
   description: string;

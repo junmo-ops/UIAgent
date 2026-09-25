@@ -1,6 +1,6 @@
 {
   "id": "requirements-outline",
-  "description": "将用户提供的需求和验收要点整理为结构化 Markdown 文档；需要确定性生成文档时调用随包发布的 Python 或 Node.js 脚本。",
+  "description": "当用户要求整理需求说明、评审材料或研发交付清单时，根据已确认需求和当前可读记录生成 Markdown，区分交付范围、报告的修改、待验证和未实现项。不执行页面修改，不将对话总结当作当前页面验证证据。",
   "scripts": [
     {
       "path": "scripts/render.py",
@@ -11,5 +11,5 @@
       "runtime": "node"
     }
   ],
-  "displayName": "需求整理"
+  "displayName": "需求交付"
 }

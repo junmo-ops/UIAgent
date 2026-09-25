@@ -46,8 +46,25 @@ export default defineContentScript({
       event.preventDefault(); event.stopImmediatePropagation(); selecting = false;
       sendMessage('selectionChanged', selection.select(target)).catch(() => undefined);
     };
+    // Focus is assigned on pointer/mouse down, before the click we use to pick.
+    // Selection mode must not also activate the underlying page control.
+    const preventSelectionFocus = (event: MouseEvent) => {
+      if (!selecting || event.button !== 0 || !selectionTarget(event.target)) return;
+      event.preventDefault();
+      event.stopImmediatePropagation();
+    };
+    document.addEventListener('pointerdown', preventSelectionFocus, true);
+    document.addEventListener('mousedown', preventSelectionFocus, true);
     document.addEventListener('mousemove', hover, true);
     document.addEventListener('click', choose, true);
+    const clearSelection = () => {
+      selecting = false;
+      selection.clear();
+      void sendMessage('selectionCleared', null).catch(() => undefined);
+    };
+    document.addEventListener('keydown', event => {
+      if (event.key === 'Escape' && (selecting || selection.hasSelection)) clearSelection();
+    }, true);
     addEventListener('scroll', () => selection.refresh(), true);
     addEventListener('resize', () => selection.refresh());
 
@@ -59,6 +76,7 @@ export default defineContentScript({
           return { ok: true, selection: selection.restore(command.selectedSourceId, !selecting) } satisfies ContentCommandResult;
         }
         if (command.type === 'deactivateEditor') { deactivateEditor(); return { ok: true } satisfies ContentCommandResult; }
+        if (command.type === 'clearSelection') { clearSelection(); return { ok: true } satisfies ContentCommandResult; }
         if (command.type === 'startSelection') {
           refreshEditorLease();
           selection.enable();
