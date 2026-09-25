@@ -1323,7 +1323,7 @@ export class ClineCodingAgentAdapter implements CodingAgentPort {
     let unsubscribe: (() => void) | undefined;
     try {
       throwIfCancelled();
-      const skill = this.options.skills?.open(turn.request.skillId, turn.request.skillVersion);
+      const skill = this.options.skills?.open(turn.request.skillId, turn.request.skillVersion, turn.request.disabledSkillIds);
       if (skill) tools.push(...skillTools(skill, record));
       const files = await workspace.listFiles();
       let selectedElementContext: string | undefined;

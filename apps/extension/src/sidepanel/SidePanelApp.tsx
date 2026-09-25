@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'react';
-import { Alert, Button, Dropdown, Input, Modal, Tooltip, message } from 'antd';
+import { Alert, Button, Input, Modal, Tooltip, message } from 'antd';
 import type { TextAreaRef } from 'antd/es/input/TextArea';
 import {
   skillCatalogSchema,
@@ -28,6 +28,8 @@ import {
 } from '@ui-agent/contracts';
 import { onMessage, sendMessage } from '../messaging';
 import { SourceTurnProgressCard } from './SourceTurnProgressCard';
+import { SkillPanel, SkillIcon } from './SkillPanel';
+import { useSkillPreferences } from './use-skill-preferences';
 import { MarkdownMessage } from './MarkdownMessage';
 import { createSourceTurnResultHandler } from './source-turn-result';
 import { DEFAULT_AGENT_SERVICE_URL, getAgentServiceUrl } from '../service/agent-service-config';
@@ -55,7 +57,7 @@ interface ActiveWorkspace extends SourceWorkspaceInfo {
   tabId: number;
   sourceTabId?: number;
 }
-type IconName = 'sparkle' | 'target' | 'edit' | 'snapshot' | 'undo' | 'redo' | 'reset' | 'download' | 'upload' | 'arrow' | 'stop' | 'back' | 'history' | 'logs' | 'userId' | 'newChat' | 'search' | 'trash' | 'close';
+type IconName = 'sparkle' | 'target' | 'edit' | 'snapshot' | 'undo' | 'redo' | 'reset' | 'upload' | 'arrow' | 'stop' | 'back' | 'history' | 'logs' | 'userId' | 'newChat' | 'search' | 'trash' | 'close';
 
 function UiIcon({ name }: { name: IconName }) {
   const paths: Record<IconName, React.ReactNode> = {
@@ -69,7 +71,6 @@ function UiIcon({ name }: { name: IconName }) {
     undo: <><path d="m9 7-5 5 5 5" /><path d="M5 12h8a6 6 0 0 1 6 6" /></>,
     redo: <><path d="m15 7 5 5-5 5" /><path d="M19 12h-8a6 6 0 0 0-6 6" /></>,
     reset: <><path d="M4.8 8A8 8 0 1 1 4 15" /><path d="M4 4v5h5" /></>,
-    download: <><path d="M12 3v12" /><path d="m7.5 11 4.5 4.5 4.5-4.5" /><path d="M5 21h14" /></>,
     upload: <><path d="M12 21V9" /><path d="m7.5 13.5 4.5-4.5 4.5 4.5" /><path d="M5 3h14" /></>,
     arrow: <><path d="M12 19V5" /><path d="m6.5 10.5 5.5-5.5 5.5 5.5" /></>,
     stop: <rect x="7.5" y="7.5" width="9" height="9" rx="1.25" fill="currentColor" stroke="none" />,
@@ -145,7 +146,11 @@ export function SidePanelApp() {
   const copyingUserIdRef = useRef(false);
   const [instruction, setInstruction] = useState('');
   const [skills, setSkills] = useState<Array<{ id: string; displayName?: string; description: string; version: string; scripts: Array<{ runtime: 'node' | 'python'; available: boolean }> }>>([]);
-  const [selectedSkillId, setSelectedSkillId] = useState('');
+  const [skillsOpen, setSkillsOpen] = useState(false);
+  const [skillReload, setSkillReload] = useState(0);
+  const [skillsLoading, setSkillsLoading] = useState(true);
+  const skillButtonRef = useRef<HTMLButtonElement>(null);
+  const closeSkills = () => { setSkillsOpen(false); skillButtonRef.current?.focus(); };
   const [skillLoadError, setSkillLoadError] = useState(false);
   const [chat, setChat] = useState<ChatEntry[]>([]);
   const [conversationId, setConversationId] = useState<string>();
@@ -197,18 +202,21 @@ export function SidePanelApp() {
   const restoredMessageIdsRef = useRef(new Set<string>());
   const [sessionReady, setSessionReady] = useState(false);
   const busy = snapshotBusy || assistantBusy || conversationLoading || Boolean(activeSourceTurn) || Boolean(sourceWorkspace && !sessionReady);
+  const skillPreferences = useSkillPreferences(serviceUrl, initialization === 'ready');
   useEffect(() => {
     if (initialization !== 'ready') return;
     const controller = new AbortController();
     setSkillLoadError(false);
+    setSkillsLoading(true);
     void fetchAgentService(`${serviceUrl.replace(/\/$/, '')}/v1/skills`, { signal: controller.signal })
       .then(async response => {
         if (!response.ok) throw new Error('技能目录加载失败');
         const catalog = skillCatalogSchema.parse(await response.json());
         if (!controller.signal.aborted) setSkills(catalog.skills);
-      }).catch(() => { if (!controller.signal.aborted) setSkillLoadError(true); });
+      }).catch(() => { if (!controller.signal.aborted) setSkillLoadError(true); })
+      .finally(() => { if (!controller.signal.aborted) setSkillsLoading(false); });
     return () => controller.abort();
-  }, [initialization, serviceUrl]);
+  }, [initialization, serviceUrl, skillReload]);
   const chatViewportRef = useRef<HTMLElement>(null);
   const chatContentRef = useRef<HTMLDivElement>(null);
   useEffect(() => {
@@ -454,6 +462,8 @@ export function SidePanelApp() {
     clarificationOptionId?: string
   ) => {
     if (!text || busy) return;
+    if (!skillPreferences.ready || skillPreferences.saving) { setError('技能设置尚未就绪，请打开技能面板检查。'); return; }
+    const disabledSkillIds = [...skillPreferences.disabledIds];
     setSourceProgress(undefined);
     const turnId = crypto.randomUUID();
     await appendChat('user', text, undefined, undefined, turnId);
@@ -477,7 +487,7 @@ export function SidePanelApp() {
         turnId,
         traceId: crypto.randomUUID(),
         instruction: text,
-        ...(selectedSkillId ? { skillId: selectedSkillId, skillVersion: skills.find(skill => skill.id === selectedSkillId)?.version } : {}),
+        disabledSkillIds,
         context: {
           hasWorkspace: Boolean(sourceWorkspace),
           hasSelection: Boolean(turnSelection),
@@ -561,7 +571,7 @@ export function SidePanelApp() {
         sourceWorkspace,
         finalOutcome.targetScope === 'selection' ? turnSelection?.selected.sourceId : undefined,
         turnId,
-        { replyToClarificationId, clarificationOptionId, originalInstruction: text, assistantTraceId: request.traceId, skillId: finalOutcome.skillId, skillVersion: finalOutcome.skillVersion }
+        { replyToClarificationId, clarificationOptionId, originalInstruction: text, assistantTraceId: request.traceId, disabledSkillIds, skillId: finalOutcome.skillId, skillVersion: finalOutcome.skillVersion }
       );
     } catch (error) {
       if (assistantAbort.signal.aborted) {
@@ -610,7 +620,6 @@ export function SidePanelApp() {
     finally { setSnapshotBusy(false); }
   };
 
-  const exportScreenshot = async () => { try { await command({ type: 'exportScreenshot' }); } catch (error) { fail(error); } };
   const returnToSource = async () => {
     if (!sourceWorkspace?.sourceTabId) return;
     try {
@@ -688,7 +697,7 @@ export function SidePanelApp() {
     workspace: ActiveWorkspace,
     sourceId?: string,
     turnId = crypto.randomUUID(),
-    requestContext: Pick<SourceTurnRequest, 'replyToClarificationId' | 'clarificationOptionId' | 'originalInstruction' | 'assistantTraceId' | 'skillId' | 'skillVersion'> = {}
+    requestContext: Pick<SourceTurnRequest, 'replyToClarificationId' | 'clarificationOptionId' | 'originalInstruction' | 'assistantTraceId' | 'skillId' | 'skillVersion' | 'disabledSkillIds'> = {}
   ) => {
     setSnapshotBusy(true);
     let settled = false;
@@ -923,6 +932,7 @@ export function SidePanelApp() {
     historyButtonRef.current?.focus();
   };
   const openConversations = async () => {
+    setSkillsOpen(false);
     if (!sourceWorkspace) return;
     const requestId = ++conversationRequestRef.current;
     setConversationsOpen(true);
@@ -1113,7 +1123,12 @@ export function SidePanelApp() {
           </div>
         </>}
       </section>}
-      <section className="workspace" hidden={conversationsOpen}>
+      {skillsOpen && <SkillPanel skills={skills} loading={skillsLoading || (!skillPreferences.ready && !skillPreferences.error)}
+        error={skillLoadError ? '技能目录加载失败，请重试。' : skillPreferences.error}
+        disabledIds={skillPreferences.disabledIds} saving={skillPreferences.saving}
+        onToggle={(id, checked) => void skillPreferences.toggle(id, checked)} onClose={closeSkills}
+        onRetry={() => { setSkillReload(value => value + 1); skillPreferences.retry(); }} />}
+      <section className="workspace" hidden={conversationsOpen || skillsOpen}>
         <header className="conversation-header">
           <div className="conversation-heading">
             <h1 title={sourceWorkspace ? conversationTitle : undefined}>{sourceWorkspace ? conversationTitle : 'UI需求助手'}</h1>
@@ -1258,30 +1273,7 @@ export function SidePanelApp() {
                 <Tooltip title="撤销"><Button type="text" shape="circle" aria-label="撤销" disabled={!sourceWorkspace.canUndo || busy} icon={<UiIcon name="undo" />} onClick={() => history('undo')} /></Tooltip>
                 <Tooltip title="重做"><Button type="text" shape="circle" aria-label="重做" disabled={!sourceWorkspace.canRedo || busy} icon={<UiIcon name="redo" />} onClick={() => history('redo')} /></Tooltip>
                 <Tooltip title="恢复初始"><Button type="text" shape="circle" aria-label="恢复初始" disabled={!sourceWorkspace.canUndo || busy} icon={<UiIcon name="reset" />} onClick={() => history('reset')} /></Tooltip>
-                <Tooltip title="导出当前可视区域"><Button className="export-action" type="text" shape="circle" aria-label="导出截图" disabled={busy} icon={<UiIcon name="download" />} onClick={exportScreenshot} /></Tooltip>
               </div>
-              <Dropdown trigger={['click']} placement="top" disabled={busy}
-                align={{ overflow: { adjustX: true, adjustY: true, shiftX: true, shiftY: true } }}
-                getPopupContainer={trigger => trigger.ownerDocument.body}
-                styles={{ root: { width: 'min(280px, calc(100vw - 24px))', maxWidth: 'calc(100vw - 24px)' } }}
-                menu={{ style: { width: '100%', maxHeight: 'min(360px, 60vh)', overflowY: 'auto' }, selectedKeys: [selectedSkillId || '__auto'],
-                  onClick: ({ key }) => { setSelectedSkillId(key === '__auto' ? '' : key); composerRef.current?.focus(); },
-                  items: [
-                    { key: '__auto', label: <div className="skill-menu-item"><strong>自动选择</strong><span>根据本轮需求使用合适的技能</span></div> },
-                    { type: 'divider' },
-                    ...skills.map(skill => ({ key: skill.id, label: <div className="skill-menu-item" title={skill.description}>
-                      <strong>{skill.displayName ?? skill.id}</strong><span>{skill.description}</span>
-                      {skill.scripts.some(script => !script.available) && <small>部分脚本运行环境不可用</small>}
-                    </div> })),
-                    ...(skillLoadError ? [{ key: '__unavailable', disabled: true, label: '技能目录暂不可用，请重新打开面板' }] : [])
-                  ] }}>
-                <Button type="text" className={`skill-trigger${selectedSkillId ? ' is-selected' : ''}`}
-                  aria-label={`选择技能：${skills.find(skill => skill.id === selectedSkillId)?.displayName ?? (selectedSkillId || '自动')}`}
-                  title={skills.find(skill => skill.id === selectedSkillId)?.displayName ?? (selectedSkillId || '自动选择技能')}>
-                  <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.6" aria-hidden="true"><path d="m12 3 2.5 6.5L21 12l-6.5 2.5L12 21l-2.5-6.5L3 12l6.5-2.5Z" /></svg>
-                  <span>{selectedSkillId ? skills.find(skill => skill.id === selectedSkillId)?.displayName ?? selectedSkillId : '技能'}</span>
-                </Button>
-              </Dropdown>
               </div>
             ) : <div />}
             {assistantBusy || sourceProgress && (sourceProgress.status === 'running' || sourceProgress.status === 'cancelling') ? (
@@ -1320,6 +1312,8 @@ export function SidePanelApp() {
       </section>
 
       <nav className="side-tools" aria-label="辅助工具">
+        <Tooltip title="技能" placement="left"><button type="button" ref={skillButtonRef} aria-label="技能" aria-pressed={skillsOpen}
+          onClick={() => { if (skillsOpen) closeSkills(); else { setConversationsOpen(false); setSkillsOpen(true); } }}><SkillIcon /></button></Tooltip>
         <Tooltip title="历史会话" placement="left"><button type="button" aria-label="历史会话"
           ref={historyButtonRef} disabled={!sourceWorkspace} aria-pressed={conversationsOpen} onClick={() => conversationsOpen ? closeConversations() : void openConversations()}><UiIcon name="history" /></button></Tooltip>
         <Tooltip title="副本管理" placement="left"><button type="button" aria-label="副本管理" onClick={() => void openWorkspaceManager()}><UiIcon name="snapshot" /></button></Tooltip>

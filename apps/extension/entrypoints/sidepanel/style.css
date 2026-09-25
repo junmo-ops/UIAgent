@@ -190,14 +190,13 @@ button, textarea { font: inherit; }
 
 /* Skill details live in the menu, keeping the composer focused on typing. */
 .composer-actions { display: flex; align-items: center; gap: 4px; flex: 1; min-width: 0; }
-.skill-trigger.ant-btn { display: inline-flex; align-items: center; gap: 5px; min-width: 32px; max-width: 108px; padding: 4px 7px; height: 30px; border-radius: 8px; color: #77716b; }
-.skill-trigger.ant-btn > span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.skill-trigger svg { flex-shrink: 0; }
-.skill-trigger.is-selected.ant-btn { color: #655344; background: #f3eee8; }
-.skill-menu-item { padding: 5px 2px; white-space: normal; }
-.skill-menu-item strong { display: block; font-size: 13px; font-weight: 500; overflow-wrap: anywhere; }
-.skill-menu-item span { display: block; overflow-wrap: anywhere; margin-top: 4px; color: #8c8781; font-size: 12px; line-height: 1.5; }
-.skill-menu-item small { display: block; margin-top: 4px; color: #986b35; }
+.skill-setting-row { display: flex; align-items: flex-start; gap: 16px; padding: 14px 12px; border-radius: 14px; }
+.skill-setting-row:hover, .skill-setting-row:focus-within { background: #f5f5f5; }
+.skill-setting-copy { flex: 1; min-width: 0; overflow-wrap: anywhere; }
+.skill-setting-copy strong { font-size: 13px; font-weight: 600; color: #242424; }
+.skill-setting-copy p { margin: 5px 0 0; font-size: 12px; line-height: 1.6; color: #737373; }
+.skill-setting-copy small { display: block; margin-top: 5px; color: #986b35; }
+.skill-setting-row .ant-switch { flex-shrink: 0; margin-top: 2px; }
 @media (max-width: 360px) { .composer-actions .history-actions { gap: 0; } .composer-toolbar { gap: 6px; } }
 
 
@@ -644,29 +643,50 @@ button, textarea { font: inherit; }
 
 .history-actions .ant-btn:not(:disabled):hover { color: #242220 !important; background: #f2f0ee !important; }
 .history-actions .ant-btn:disabled { color: #c4c1be; }
-.history-actions .export-action { margin-left: 4px; }
 
 .send-button.ant-btn {
-  width: 38px;
-  min-width: 38px;
-  height: 38px;
+  --send-bg: #3b82f6;
+  --send-hover: #2775eb;
+  --send-active: #2166d4;
+  --send-muted: #9fc1fb;
+  width: 32px;
+  min-width: 32px;
+  height: 32px;
+  flex-shrink: 0;
+  padding: 0;
+  border: 0;
+  border-radius: 50%;
   color: #fff;
-  background: #262626;
-  border-color: #262626;
+  background: var(--send-bg);
   box-shadow: none;
+  transition: background-color 150ms ease;
 }
 
 .send-button.ant-btn:not(:disabled):hover {
   color: #fff !important;
-  background: #101010 !important;
-  border-color: #101010 !important;
+  background: var(--send-hover) !important;
+}
+
+.send-button.ant-btn:not(:disabled):active {
+  background: var(--send-active) !important;
+}
+
+.send-button.ant-btn:focus-visible {
+  outline: 2px solid var(--send-bg);
+  outline-offset: 3px;
+}
+
+.send-button.stop-button.ant-btn {
+  background: var(--send-muted);
 }
 
 .send-button.ant-btn:disabled {
   color: #fff;
-  background: #aaa;
-  border-color: #aaa;
+  background: var(--send-muted);
 }
+
+.send-button.ant-btn .ui-icon { width: 20px; height: 20px; stroke-width: 1.6; }
+.send-button.stop-button.ant-btn .ui-icon { width: 24px; height: 24px; }
 
 .ui-icon { width: 17px; height: 17px; display: block; }
 
@@ -684,7 +704,6 @@ button, textarea { font: inherit; }
   .source-workspace-primary .ant-btn { width: 100%; }
   .composer-shell { min-height: 106px; margin: 0 9px 9px; padding: 13px 12px 9px; }
   .history-actions { gap: 2px; }
-  .history-actions .export-action { margin-left: 1px; }
   .selection-action.ant-btn span:not(.ant-btn-icon) { display: none; }
   .selection-actions { gap: 0; }
 }

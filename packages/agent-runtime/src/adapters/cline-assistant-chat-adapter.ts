@@ -64,7 +64,7 @@ export class ClineAssistantChatAdapter implements AssistantChatPort {
     observeRun?: (run: AssistantChatRun) => void
   ): Promise<string> {
     const run: AssistantChatRun = { steps: [] };
-    const skill = this.options.skills?.open(request.skillId, request.skillVersion);
+    const skill = this.options.skills?.open(request.skillId, request.skillVersion, request.disabledSkillIds);
     const skillNotice = request.skillId ? `正在使用技能：${request.skillId}\n\n` : '';
     const agent = this.factory({
       providerId: 'openai-compatible',

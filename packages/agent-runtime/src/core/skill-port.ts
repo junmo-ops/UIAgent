@@ -16,5 +16,5 @@ export interface SkillSession {
 
 export interface SkillProvider {
   list(): SkillSummary[];
-  open(id?: string, version?: string): SkillSession;
+  open(id?: string, version?: string, disabledSkillIds?: readonly string[]): SkillSession;
 }

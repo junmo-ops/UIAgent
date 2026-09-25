@@ -147,28 +147,6 @@ async function hydrateAuthorStyles(tab: Browser.tabs.Tab, snapshot: NonNullable<
   };
 }
 
-async function exportScreenshot(tab: Browser.tabs.Tab): Promise<ContentCommandResult> {
-  await sendToContent(tab, { type: 'prepareScreenshot' });
-  try {
-    await new Promise(resolve => setTimeout(resolve, 80));
-    let dataUrl: string;
-    try {
-      dataUrl = await browser.tabs.captureVisibleTab(tab.windowId, { format: 'png' });
-    } catch (error) {
-      const message = error instanceof Error ? error.message : String(error);
-      if (/activeTab|<all_urls>/i.test(message)) {
-        throw new BrowserCommandError('SCREENSHOT_PERMISSION_REQUIRED', '当前页面的截图授权已失效。请先点击一次 Chrome 工具栏中的插件图标，再重新导出；页面跳转后需要重新授权。');
-      }
-      throw new BrowserCommandError('SCREENSHOT_FAILED', message);
-    }
-    const title = (tab.title ?? 'ui-demo').replace(/[\\/:*?"<>|]/g, '-').slice(0, 60);
-    await browser.downloads.download({ url: dataUrl, filename: `${title}-${new Date().toISOString().replace(/[:.]/g, '-')}.png`, saveAs: true });
-    return { ok: true };
-  } finally {
-    await sendToContent(tab, { type: 'finishScreenshot' }).catch(() => undefined);
-  }
-}
-
 async function createWorkspaceFromViewport(tab: Browser.tabs.Tab): Promise<SourceWorkspaceInfo> {
   if (!tab.id) throw new BrowserCommandError('TAB_UNAVAILABLE', '当前标签页不可用');
   try {
@@ -332,7 +310,6 @@ export default defineBackground(() => {
       if (command.type === 'createWorkspaceFromVisibleViewport') {
         return { ok: true, workspace: await createWorkspaceFromViewport(tab), tabId: tab.id };
       }
-      if (command.type === 'exportScreenshot') return await exportScreenshot(tab);
       return await sendToContent(tab, command);
     } catch (error) {
       if (error instanceof BrowserCommandError) return failure(error.code, error.message);

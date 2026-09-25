@@ -193,6 +193,7 @@ export const domOperationSchema = z.discriminatedUnion('kind', [
 export type DomOperation = z.infer<typeof domOperationSchema>;
 
 export const sourceTurnRequestSchema = z.object({
+  disabledSkillIds: z.array(z.string().regex(/^[a-z0-9]+(?:-[a-z0-9]+)*$/).max(64)).max(1000).optional(),
   skillId: z.string().regex(/^[a-z0-9]+(?:-[a-z0-9]+)*$/).max(64).optional(),
   skillVersion: z.string().regex(/^[a-f0-9]{64}$/).optional(),
   conversationId: z.string().uuid().optional(),
@@ -253,6 +254,7 @@ export const assistantConversationEntrySchema = z.object({
 export type AssistantConversationEntry = z.infer<typeof assistantConversationEntrySchema>;
 
 export const assistantTurnRequestSchema = z.object({
+  disabledSkillIds: z.array(z.string().regex(/^[a-z0-9]+(?:-[a-z0-9]+)*$/).max(64)).max(1000).optional(),
   skillId: z.string().regex(/^[a-z0-9]+(?:-[a-z0-9]+)*$/).max(64).optional(),
   skillVersion: z.string().regex(/^[a-f0-9]{64}$/).optional(),
   protocolVersion: z.literal(PROTOCOL_VERSION),
@@ -482,8 +484,6 @@ export const extensionErrorCodeSchema = z.enum([
   'INVALID_PAGE_URL',
   'ACCESS_REQUIRED',
   'CONTENT_UNAVAILABLE',
-  'SCREENSHOT_PERMISSION_REQUIRED',
-  'SCREENSHOT_FAILED',
   'PAGE_OPERATION_FAILED',
   'BROWSER_COMMAND_FAILED'
 ]);
@@ -496,10 +496,7 @@ export type ContentCommand =
   | { type: 'capturePageSnapshot'; includeFrozenStyles?: boolean }
   | { type: 'createWorkspaceFromVisibleViewport' }
   | { type: 'bindEditorTab'; tabId: number; previewUrl: string }
-  | { type: 'reloadPreview' }
-  | { type: 'exportScreenshot' }
-  | { type: 'prepareScreenshot' }
-  | { type: 'finishScreenshot' };
+  | { type: 'reloadPreview' };
 
 export type ContentCommandResult =
   | { ok: true; selection?: PageSelection; snapshot?: StaticSnapshot; workspace?: SourceWorkspaceInfo; tabId?: number }
