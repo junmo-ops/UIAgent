@@ -7,13 +7,21 @@ export class EditorTabRegistry {
   private readonly editorTabs = new Map<string, number>();
   private readonly tabEditors = new Map<number, Set<string>>();
 
+  constructor(private readonly onPresenceChange?: (tabId: number, open: boolean) => void) {}
+
+  hasEditor(tabId: number): boolean {
+    return Boolean(this.tabEditors.get(tabId)?.size);
+  }
+
   bind(editorClientId: string, tabId: number): boolean {
     const existingTabId = this.editorTabs.get(editorClientId);
     if (existingTabId !== undefined) return existingTabId === tabId;
     this.editorTabs.set(editorClientId, tabId);
     const editors = this.tabEditors.get(tabId) ?? new Set<string>();
+    const wasOpen = editors.size > 0;
     editors.add(editorClientId);
     this.tabEditors.set(tabId, editors);
+    if (!wasOpen) this.onPresenceChange?.(tabId, true);
     return true;
   }
 
@@ -45,7 +53,10 @@ export class EditorTabRegistry {
     const editors = this.tabEditors.get(tabId);
     editors?.delete(editorClientId);
     const lastEditorForTab = !editors?.size;
-    if (lastEditorForTab) this.tabEditors.delete(tabId);
+    if (lastEditorForTab) {
+      this.tabEditors.delete(tabId);
+      this.onPresenceChange?.(tabId, false);
+    }
     return { tabId, lastEditorForTab };
   }
 

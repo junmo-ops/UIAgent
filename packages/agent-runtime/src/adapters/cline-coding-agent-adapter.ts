@@ -279,6 +279,8 @@ export interface ClineAgentFactoryInput {
   modelId: string;
   apiKey: string;
   baseUrl: string;
+  enableThinking?: boolean;
+  apiProtocol?: 'chat-completions' | 'responses';
   systemPrompt: string;
   tools: readonly AgentTool<any, any>[];
   maxIterations: number;
@@ -290,6 +292,8 @@ export type ClineAgentFactory = (input: ClineAgentFactoryInput) => ClineAgentIns
 export interface ClineCodingAgentOptions {
   skills?: SkillProvider;
   baseUrl: string;
+  enableThinking?: boolean;
+  apiProtocol?: 'chat-completions' | 'responses';
   apiKey: string;
   modelName: string;
   maxIterations?: number;
@@ -378,6 +382,8 @@ export class ClineCodingAgentAdapter implements CodingAgentPort {
       modelId: input.modelId,
       apiKey: input.apiKey,
       baseUrl: input.baseUrl,
+      enableThinking: input.enableThinking,
+      apiProtocol: input.apiProtocol,
       systemPrompt: input.systemPrompt,
       tools: input.tools,
       maxIterations: input.maxIterations,
@@ -1342,6 +1348,8 @@ export class ClineCodingAgentAdapter implements CodingAgentPort {
         modelId: this.options.modelName,
         apiKey: this.options.apiKey,
         baseUrl: this.options.baseUrl,
+        enableThinking: this.options.enableThinking,
+        apiProtocol: this.options.apiProtocol,
         systemPrompt: `${modeRules}\n${skill?.prompt ?? ''}\n单轮最多 ${this.maxIterations} 次模型决策；从第 ${Math.max(1, this.maxIterations - FINALIZATION_WINDOW + 1)} 轮起必须停止扩展读取，只能完成必要修改并 finish，或 clarify。`,
         tools,
         maxIterations: this.maxIterations,

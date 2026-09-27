@@ -111,66 +111,31 @@ button, textarea { font: inherit; }
 }
 
 
-.selection-strip {
-  margin: 12px 14px 0;
-  padding: 9px 9px 9px 11px;
-  display: flex;
-  align-items: center;
-  gap: 9px;
-  flex: 0 0 auto;
-  background: #faf9f8;
-  border: 1px solid #efedeb;
-  border-radius: 13px;
-  transition: border-color .18s ease, background .18s ease;
-}
-
-.selection-strip.has-selection {
-  background: #f7faf8;
-  border-color: #e2ece5;
-}
-
-.selection-symbol {
-  width: 29px;
-  height: 29px;
+.composer-context-row { display: flex; align-items: center; gap: 8px; margin-bottom: 10px; min-width: 0; }
+.composer-selection {
   display: inline-flex;
   align-items: center;
-  justify-content: center;
-  flex: 0 0 auto;
-  color: #696662;
-  background: #fff;
-  border: 1px solid #ebe8e5;
-  border-radius: 9px;
+  gap: 6px;
+  min-width: 0;
+  max-width: 100%;
+  min-height: 30px;
+  padding: 4px 8px;
+  border: 1px solid var(--composer-line);
+  border-radius: 8px;
+  background: var(--composer-soft);
+  color: var(--composer-secondary);
+  font: inherit;
+  font-size: 12px;
+  cursor: pointer;
 }
-
-.selection-symbol .ui-icon { width: 16px; height: 16px; }
-.selection-copy { min-width: 0; flex: 1; display: flex; flex-direction: column; gap: 1px; }
-.selection-label { color: #343230; font-size: 11px; font-weight: 600; }
-.selection-value {
-  overflow: hidden;
-  color: #8b8885;
-  font-size: 11px;
-  line-height: 1.35;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.selection-action.ant-btn {
-  height: 30px;
-  padding: 0 8px;
-  color: #52504e;
-  border-radius: 9px;
-  font-size: 11px;
-}
-
-.selection-actions {
-  display: flex;
-  align-items: center;
-  gap: 2px;
-  flex: 0 0 auto;
-}
-
-.selection-action.ant-btn:hover { color: #1f1f1f !important; background: #efedeb !important; }
-.selection-action .ui-icon { width: 14px; height: 14px; }
+.composer-selection.has-selection { border-color: #c9dcfa; background: #f2f7ff; color: #285b9e; }
+.composer-selection > .ui-icon { width: 14px; height: 14px; flex-shrink: 0; }
+.composer-selection > span:first-of-type { min-width: 0; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
+.composer-selection .selection-reselect { flex-shrink: 0; font-size: 11px; }
+.composer-selection:not(:disabled):hover { border-color: #9fc1fb; background: #edf4ff; }
+.composer-selection:disabled { cursor: default; opacity: .6; }
+.composer-selection:focus-visible, .starter-tasks button:focus-visible { outline: 2px solid #3b82f6; outline-offset: 2px; }
+.composer-context-row .history-actions { margin-left: auto; flex-shrink: 0; gap: 0; }
 
 .chat-list {
   min-height: 0;
@@ -189,7 +154,6 @@ button, textarea { font: inherit; }
 .chat-list-content { display: flex; flex-direction: column; gap: 14px; flex: 0 0 auto; min-width: 0; }
 
 /* Skill details live in the menu, keeping the composer focused on typing. */
-.composer-actions { display: flex; align-items: center; gap: 4px; flex: 1; min-width: 0; }
 .skill-setting-row { display: flex; align-items: flex-start; gap: 16px; padding: 14px 12px; border-radius: 14px; }
 .skill-setting-row:hover, .skill-setting-row:focus-within { background: #f5f5f5; }
 .skill-setting-copy { flex: 1; min-width: 0; overflow-wrap: anywhere; }
@@ -197,7 +161,6 @@ button, textarea { font: inherit; }
 .skill-setting-copy p { margin: 5px 0 0; font-size: 12px; line-height: 1.6; color: #737373; }
 .skill-setting-copy small { display: block; margin-top: 5px; color: #986b35; }
 .skill-setting-row .ant-switch { flex-shrink: 0; margin-top: 2px; }
-@media (max-width: 360px) { .composer-actions .history-actions { gap: 0; } .composer-toolbar { gap: 6px; } }
 
 
 .chat-list::-webkit-scrollbar { width: 5px; }
@@ -253,25 +216,31 @@ button, textarea { font: inherit; }
 .empty-tip strong { color: #2a2826; font-size: 15px; font-weight: 650; }
 .empty-tip p { max-width: 280px; margin: 7px 0 18px; color: #96918d; font-size: 12px; line-height: 1.65; }
 
-.example-list { width: 100%; display: flex; flex-direction: column; gap: 7px; }
-.example-list button {
+.starter-tasks { width: 100%; display: flex; flex-direction: column; gap: 8px; }
+.starter-tasks button {
+  display: flex;
+  align-items: center;
+  gap: 10px;
   width: 100%;
-  padding: 8px 11px;
+  min-height: 40px;
+  padding: 10px 12px;
   color: #66615e;
   background: #fff;
   border: 1px solid #ebe8e5;
   border-radius: 10px;
-  font-size: 11px;
+  font-size: 13px;
+  font-family: inherit;
   text-align: left;
   cursor: pointer;
-  transition: background .16s ease, border-color .16s ease, transform .16s ease;
+  transition: background .16s ease, border-color .16s ease;
 }
 
-.example-list button:hover {
+.starter-tasks button:not(:disabled):hover {
   background: #faf8f7;
   border-color: #dcd8d4;
-  transform: translateY(-1px);
 }
+.starter-tasks button:disabled { opacity: .5; cursor: default; }
+.starter-tasks .ui-icon { flex-shrink: 0; color: #77716d; }
 
 .bubble {
   max-width: 88%;
@@ -466,14 +435,6 @@ button, textarea { font: inherit; }
 .clarification-options span { color: #77716d; font-size: 11px; line-height: 1.45; }
 .clarification-resolved { display: block; margin-top: 6px; color: #9a948f; font-size: 11px; }
 
-.bubble.working {
-  display: flex;
-  align-items: center;
-  gap: 9px;
-  color: #77726e;
-  font-size: 12px;
-}
-
 .agent-activity {
   --activity-text: #393633;
   --activity-muted: #6f6862;
@@ -512,6 +473,16 @@ button, textarea { font: inherit; }
 @keyframes activity-breathe { 0%, 100% { opacity: 1; } 50% { opacity: .45; } }
 .agent-activity-status { margin: 8px 0; color: var(--activity-muted); font-size: 13px; line-height: 1.7; }
 .agent-activity-status:empty { display: none; }
+.agent-working-status {
+  box-sizing: border-box;
+  min-height: 38px;
+  margin: 0;
+  padding: 8px 0;
+  color: var(--activity-muted);
+  font-size: 13px;
+  line-height: 22px;
+  animation: none;
+}
 .agent-activity-notice, .agent-activity-tool.is-failed, .agent-activity-tool.is-blocked { color: var(--activity-warning); }
 .agent-activity-notice { margin: 10px 0; font-size: 12px; line-height: 1.7; }
 .bubble.assistant > .agent-activity { margin-bottom: 14px; }
@@ -580,7 +551,17 @@ button, textarea { font: inherit; }
   line-height: 1.35;
 }
 
+.composer-model-select.ant-select { width: 180px; min-width: 0; max-width: calc(100% - 46px); font-size: 12px; }
+.model-option { white-space: normal; overflow-wrap: anywhere; font-size: 12px; }
+.model-option small { display: block; margin-top: 3px; font-size: 11px; color: #77716d; line-height: 1.5; }
+.composer-model-error { display: flex; align-items: baseline; gap: 8px; margin-top: 6px; color: #a33c31; font-size: 12px; }
+.composer-model-error span { min-width: 0; overflow-wrap: anywhere; }
+.composer-model-error button { flex-shrink: 0; padding: 4px; border: 0; background: none; color: inherit; font: inherit; text-decoration: underline; cursor: pointer; }
+
 .composer-shell {
+  --composer-line: #ebe8e5;
+  --composer-soft: #faf9f8;
+  --composer-secondary: #66615e;
   min-height: 112px;
   margin: 0 14px 14px;
   padding: 15px 15px 11px;
@@ -697,15 +678,12 @@ button, textarea { font: inherit; }
 
 @media (max-width: 350px) {
   .conversation-header { padding-inline: 10px; gap: 6px; }
-  .selection-strip { margin: 9px 9px 0; }
   .chat-list { padding-inline: 12px; }
   .source-workspace-cta { margin: 0 9px 8px; }
   .source-workspace-primary > span { display: none; }
   .source-workspace-primary .ant-btn { width: 100%; }
   .composer-shell { min-height: 106px; margin: 0 9px 9px; padding: 13px 12px 9px; }
   .history-actions { gap: 2px; }
-  .selection-action.ant-btn span:not(.ant-btn-icon) { display: none; }
-  .selection-actions { gap: 0; }
 }
 
 @media (prefers-reduced-motion: reduce) {

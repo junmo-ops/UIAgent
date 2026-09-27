@@ -20,6 +20,7 @@ const ROUTER_RULES = [
   '当 context.hasWorkspace=true 时，用户以用户故事、验收条件或结构化业务规则描述当前页面期望呈现的状态和交互，也属于页面修改意图；不要因为表达没有使用命令式动词就降级为 chat。目标范围明确且可在静态副本中示意时调用 edit_page。',
   '若这类需求包含静态副本无法真实承载的业务能力，例如服务端数据筛选、接口调用、权限校验、浏览器持久化或跨页面状态，则调用 clarify，说明可以制作哪些页面交互示意、不能承诺哪些真实业务效果；不得把它路由为 chat，也不得假装已实现真实业务能力。',
   '用户在咨询知识、讨论方案、询问原因或进行日常对话，并未要求实际改变当前页面时调用 chat。',
+  '询问当前页面内容、已有功能、模块含义或分析改进建议也调用 chat。context.workspaceId 存在时，聊天 Agent 可按需只读查询副本源码；不必要求用户粘贴完整页面，也不要为了读取页面而调用 edit_page。实时浏览器状态不在此读取能力内。',
   '如果一句话既可能是讨论也可能是执行修改，或者修改目标、范围会显著影响结果且无法从上下文确定，调用 clarify。',
   '若用户要求修改，但 context.hasWorkspace=false，应调用 clarify，明确告知需先点击“进入副本编辑”；不要询问一个系统无法直接执行的确认动作。',
   '若修改只可能针对具体局部元素但 context.hasSelection=false，应调用 clarify；若用户清楚要求修改整个副本，则可使用 workspace 范围。',
@@ -39,6 +40,8 @@ export interface AssistantRouterAgentFactoryInput {
   modelId: string;
   apiKey: string;
   baseUrl: string;
+  enableThinking?: boolean;
+  apiProtocol?: 'chat-completions' | 'responses';
   systemPrompt: string;
   tools: readonly AgentTool<any, any>[];
   maxIterations: number;
@@ -51,6 +54,8 @@ export type AssistantRouterAgentFactory = (
 export interface ClineAssistantRouterOptions {
   skills?: SkillProvider;
   baseUrl: string;
+  enableThinking?: boolean;
+  apiProtocol?: 'chat-completions' | 'responses';
   apiKey: string;
   modelName: string;
   maxIterations?: number;
@@ -69,6 +74,8 @@ export class ClineAssistantRouterAdapter implements AssistantRouterPort {
       modelId: input.modelId,
       apiKey: input.apiKey,
       baseUrl: input.baseUrl,
+      enableThinking: input.enableThinking,
+      apiProtocol: input.apiProtocol,
       systemPrompt: input.systemPrompt,
       tools: input.tools,
       maxIterations: input.maxIterations,
@@ -154,6 +161,8 @@ export class ClineAssistantRouterAdapter implements AssistantRouterPort {
         modelId: this.options.modelName,
         apiKey: this.options.apiKey,
         baseUrl: this.options.baseUrl,
+      enableThinking: this.options.enableThinking,
+      apiProtocol: this.options.apiProtocol,
         systemPrompt: `${ROUTER_RULES}\n技能只补充任务流程，不改变用户意图或页面权限。根据描述选择匹配的一个主技能，在 chat/edit_page 中传 skillId；无适用项可省略。目录：${JSON.stringify(catalog)}`,
         tools,
         maxIterations: this.maxIterations

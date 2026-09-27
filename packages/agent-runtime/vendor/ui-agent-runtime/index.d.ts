@@ -1,9 +1,9 @@
 /**
- * UIAgent's DeepSeek-compatible Agent Runtime public surface.
+ * UIAgent's OpenAI-compatible Agent Runtime public surface.
  *
  * This declaration intentionally contains only the Cline Agent API subset
  * consumed by packages/agent-runtime. The implementation is the adjacent
- * Node ESM file and supports OpenAI-compatible DeepSeek endpoints only.
+ * Node ESM file and supports Chat Completions-compatible endpoints.
  */
 export interface AgentToolContext {
   sessionId?: string;
@@ -101,6 +101,8 @@ export interface AgentOptions {
   modelId: string;
   apiKey?: string;
   baseUrl?: string;
+  enableThinking?: boolean;
+  apiProtocol?: 'chat-completions' | 'responses';
   headers?: Record<string, string>;
   systemPrompt?: string;
   tools?: readonly AgentTool<any, any>[];

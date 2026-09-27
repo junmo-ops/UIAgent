@@ -1,13 +1,11 @@
 import { readServiceConfig, type ServiceConfig } from './configuration/service-config';
+import { createModelRegistry } from './configuration/model-registry';
 import { SkillRegistry } from './skills/registry';
 import { readWorkspaceStorageConfig } from './storage/config';
 import { WorkspaceStorageError } from './storage/s3-workspace-storage';
 import { zValidator } from '@hono/zod-validator';
 import { fetchWorkspaceResource, resourceErrorCode } from './workspace/resource-fetch';
 import {
-  ClineAssistantChatAdapter,
-  ClineAssistantRouterAdapter,
-  clineCodingAgentFromConfig,
   type AssistantChatPort,
   type AssistantChatRun,
   type AssistantRouterPort,
@@ -95,7 +93,13 @@ export function createApp(
       return undefined;
     }
   })();
+  const skills = new SkillRegistry();
+  for (const issue of skills.issues) console.warn('[skills] Disabled package:', issue);
+  const models = createModelRegistry(config, env, skills, {
+    chat: providedAssistantChat, router: providedAssistantRouter, coding: providedCodingAgent
+  });
   const logStore = providedLogStore ?? new TurnLogStore({
+    resolveModel: models.metadata,
     filePath: config.logging.file,
     model: {
       mode: 'remote',
@@ -118,23 +122,23 @@ export function createApp(
     storageConfig.cacheDirectory,
     { identityIsolation, frozenStyleVariantEnabled }
   );
-  const modelOptions = () => {
-    const apiKey = env.MODEL_API_KEY?.trim();
-    if (!apiKey) throw new Error('缺少 MODEL_API_KEY，请通过 Secret 注入模型密钥');
-    return { baseUrl: config.model.baseUrl, modelName: config.model.name, apiKey };
+  const defaults = models.get();
+  const codingAgent: CodingAgentPort = {
+    adapterId: defaults.coding.adapterId,
+    run: (turn, ...args) => models.get(turn.request.modelId).coding.run(turn, ...args)
   };
-  const skills = new SkillRegistry();
-  for (const issue of skills.issues) console.warn('[skills] Disabled package:', issue);
-  const codingAgent = providedCodingAgent ?? clineCodingAgentFromConfig({ ...modelOptions(), ...config.model.edit, skills });
-  const assistantRouter: AssistantRouterPort = providedAssistantRouter
-    ?? new ClineAssistantRouterAdapter({ ...modelOptions(), ...config.model.router, skills });
-  const assistantChat: AssistantChatPort = providedAssistantChat ?? new ClineAssistantChatAdapter({ ...modelOptions(), skills });
-  const answerWithLog: AssistantChatPort['answer'] = async (request, observeText, signal) => {
+  const assistantRouter: AssistantRouterPort = {
+    adapterId: defaults.router.adapterId,
+    route: request => models.get(request.modelId).router.route(request)
+  };
+  const assistantChat = defaults.chat;
+  const answerWithLog: AssistantChatPort['answer'] = async (request, observeText, signal, _observeRun, page) => {
+    const selectedChat = models.get(request.modelId).chat;
     const startedAt = Date.now();
     let run: AssistantChatRun | undefined;
     let response: AssistantTurnResponse | undefined;
     try {
-      const answer = await assistantChat.answer(request, observeText, signal, value => { run = value; });
+      const answer = await selectedChat.answer(request, observeText, signal, value => { run = value; }, page);
       response = { kind: 'answered', answer };
       return answer;
     } catch (error) {
@@ -143,7 +147,7 @@ export function createApp(
       throw error;
     } finally {
       if (response) {
-        try { logStore.recordAssistantTurn(request, response, Date.now() - startedAt, assistantChat.adapterId, run); }
+        try { logStore.recordAssistantTurn(request, response, Date.now() - startedAt, selectedChat.adapterId, run); }
         catch { console.error('[assistant-log] Failed to write diagnostic log'); }
       }
     }
@@ -213,6 +217,7 @@ export function createApp(
     .use('/v1/workspaces/*', authenticate)
     .use('/v1/assistant/*', authenticate)
     .use('/v1/skills', authenticate)
+    .use('/v1/models', authenticate)
     .use('/v1/auth/installations/refresh', authenticate)
     .use('/v1/auth/me', authenticate)
     .use('/workspaces/*', authenticate)
@@ -284,11 +289,19 @@ export function createApp(
         ? c.json(installationCredentialSchema.parse(credential))
         : c.json({ code: 'INSTALLATION_REFRESH_UNAVAILABLE', message: '当前身份不能续期' }, 409);
     })
+    .get('/v1/models', c => c.json(models.catalog()))
     .post('/v1/assistant/turns', zValidator('json', assistantTurnRequestSchema), async c => {
       const request = c.req.valid('json');
+      try { models.get(request.modelId); }
+      catch (error) { return c.json({ code: 'MODEL_UNAVAILABLE', message: error instanceof Error ? error.message : '模型不可用' }, 400); }
+      if (request.context.workspaceId && !workspaceStore.owns(request.context.workspaceId, c.get('principal'))) {
+        return c.json({ code: 'WORKSPACE_NOT_FOUND', message: '工作区不存在或无权访问' }, 404);
+      }
       const route = await assistantRouter.route(request);
+      const page = route.kind === 'chat' && request.context.workspaceId
+        ? workspaceStore.readContext(request.context.workspaceId, c.get('principal')) : undefined;
       const response = route.kind === 'chat'
-        ? { kind: 'answered' as const, answer: await answerWithLog({ ...request, skillId: route.skillId, skillVersion: route.skillVersion }, undefined, c.req.raw.signal) }
+        ? { kind: 'answered' as const, answer: await answerWithLog({ ...request, skillId: route.skillId, skillVersion: route.skillVersion }, undefined, c.req.raw.signal, undefined, page) }
         : route;
       return c.json(
         assistantTurnResponseSchema.parse(response),
@@ -297,6 +310,11 @@ export function createApp(
     })
     .post('/v1/assistant/turns/stream', zValidator('json', assistantTurnRequestSchema), async c => {
       const request = c.req.valid('json');
+      try { models.get(request.modelId); }
+      catch (error) { return c.json({ code: 'MODEL_UNAVAILABLE', message: error instanceof Error ? error.message : '模型不可用' }, 400); }
+      if (request.context.workspaceId && !workspaceStore.owns(request.context.workspaceId, c.get('principal'))) {
+        return c.json({ code: 'WORKSPACE_NOT_FOUND', message: '工作区不存在或无权访问' }, 404);
+      }
       c.header('Cache-Control', 'no-cache, no-transform');
       c.header('X-Accel-Buffering', 'no');
       return streamSSE(c, async stream => {
@@ -313,11 +331,13 @@ export function createApp(
             return;
           }
           let emittedText = false;
+          const page = request.context.workspaceId
+            ? workspaceStore.readContext(request.context.workspaceId, c.get('principal')) : undefined;
           let pendingWrite = Promise.resolve();
           const answer = await answerWithLog({ ...request, skillId: route.skillId, skillVersion: route.skillVersion }, text => {
             emittedText = true;
             pendingWrite = pendingWrite.then(() => send({ type: 'answer_delta', text }));
-          }, signal);
+          }, signal, undefined, page);
           await pendingWrite;
           if (!emittedText) await send({ type: 'answer_delta', text: answer });
           await send({ type: 'result', result: { kind: 'answered', answer } });
@@ -623,6 +643,8 @@ export function createApp(
       const workspaceId = c.req.param('workspaceId');
       const existing = sourceProgress.get(workspaceId, request.turnId);
       if (existing) return c.json(sourceTurnAcceptedSchema.parse({ kind: 'accepted', turnId: request.turnId }), 202);
+      try { models.get(request.modelId); }
+      catch (error) { return c.json({ code: 'MODEL_UNAVAILABLE', message: error instanceof Error ? error.message : '模型不可用' }, 400); }
       try { workspaceStore.assertConversation(workspaceId, request.conversationId); }
       catch { return c.json({ code: 'CONVERSATION_NOT_FOUND', message: '会话不存在或不属于该副本' }, 404); }
       const admission = await sourceTurns.startPersisted(workspaceId, request.turnId, request.conversationId ?? workspaceId,

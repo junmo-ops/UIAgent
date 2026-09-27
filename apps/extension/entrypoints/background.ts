@@ -203,7 +203,10 @@ async function createWorkspaceFromViewport(tab: Browser.tabs.Tab): Promise<Sourc
 }
 
 export default defineBackground(() => {
-  const editorTabs = new EditorTabRegistry();
+  const editorTabs = new EditorTabRegistry((tabId, open) => {
+    void browser.tabs.sendMessage(tabId, { type: 'ui-agent:side-panel-state', open }, { frameId: 0 })
+      .catch(() => undefined); // The page may be navigating or may not support the launcher.
+  });
   // The manifest path is a global fallback. Disable it so Chrome hides this
   // extension's panel on every tab that has not explicitly opened its own.
   void disableGlobalSidePanel(browser.sidePanel).catch(error => {
@@ -251,6 +254,36 @@ export default defineBackground(() => {
     if (tab.id) void openTabScopedSidePanel(browser.sidePanel, tab.id).catch(error => {
       console.error(`[ui-agent] Failed to open the side panel for tab ${tab.id}`, error);
     });
+  });
+
+  // Use the sender tab, never a tab ID supplied by page content. Keep opening in
+  // this message callback so the content-script click retains user activation.
+  browser.runtime.onMessage.addListener((message, sender, reply) => {
+    if (message?.type !== 'ui-agent:open-side-panel' && message?.type !== 'ui-agent:get-side-panel-state') return;
+    if (sender.id !== browser.runtime.id || sender.frameId !== 0 || sender.tab?.id === undefined) {
+      reply({ ok: false });
+      return;
+    }
+    if (message.type === 'ui-agent:get-side-panel-state') {
+      reply({ open: editorTabs.hasEditor(sender.tab.id) });
+      return;
+    }
+    void openTabScopedSidePanel(browser.sidePanel, sender.tab.id).then(
+      () => reply({ ok: true }),
+      error => { console.error('[ui-agent] Failed to open side panel from launcher', error); reply({ ok: false }); }
+    );
+    return true;
+  });
+
+  // Declarative scripts cover future navigations; also show the entry on tabs
+  // already open when the extension is installed or updated, where permitted.
+  browser.runtime.onInstalled.addListener(() => {
+    void browser.tabs.query({ url: ['http://*/*', 'https://*/*'] }).then(tabs =>
+      Promise.all(tabs.filter(tab => tab.id !== undefined).map(tab =>
+        browser.scripting.executeScript({ target: { tabId: tab.id! }, files: ['/content-scripts/launcher.js'] })
+          .catch(() => undefined) // Browser-protected pages cannot be injected.
+      ))
+    ).catch(error => console.warn('[ui-agent] Could not initialize page launchers', error));
   });
 
   onMessage('browserCommand', async message => {

@@ -193,6 +193,7 @@ export const domOperationSchema = z.discriminatedUnion('kind', [
 export type DomOperation = z.infer<typeof domOperationSchema>;
 
 export const sourceTurnRequestSchema = z.object({
+  modelId: z.string().regex(/^[a-z0-9][a-z0-9-]{0,63}$/).optional(),
   disabledSkillIds: z.array(z.string().regex(/^[a-z0-9]+(?:-[a-z0-9]+)*$/).max(64)).max(1000).optional(),
   skillId: z.string().regex(/^[a-z0-9]+(?:-[a-z0-9]+)*$/).max(64).optional(),
   skillVersion: z.string().regex(/^[a-f0-9]{64}$/).optional(),
@@ -254,6 +255,7 @@ export const assistantConversationEntrySchema = z.object({
 export type AssistantConversationEntry = z.infer<typeof assistantConversationEntrySchema>;
 
 export const assistantTurnRequestSchema = z.object({
+  modelId: z.string().regex(/^[a-z0-9][a-z0-9-]{0,63}$/).optional(),
   disabledSkillIds: z.array(z.string().regex(/^[a-z0-9]+(?:-[a-z0-9]+)*$/).max(64)).max(1000).optional(),
   skillId: z.string().regex(/^[a-z0-9]+(?:-[a-z0-9]+)*$/).max(64).optional(),
   skillVersion: z.string().regex(/^[a-f0-9]{64}$/).optional(),
@@ -263,6 +265,7 @@ export const assistantTurnRequestSchema = z.object({
   instruction: z.string().trim().min(1).max(10_000),
   context: z.object({
     hasWorkspace: z.boolean(),
+    workspaceId: z.string().uuid().optional(),
     hasSelection: z.boolean(),
     selection: z.object({
       sourceId: z.string().min(1).max(100).optional(),
@@ -276,6 +279,10 @@ export const assistantTurnRequestSchema = z.object({
   clarificationOptionId: z.string().min(1).max(100).optional()
 });
 export type AssistantTurnRequest = z.infer<typeof assistantTurnRequestSchema>;
+
+export const modelCatalogSchema = z.object({ defaultId: z.string(), models: z.array(z.object({
+  id: z.string(), label: z.string(), name: z.string(), available: z.boolean()
+})) });
 
 export const skillCatalogSchema = z.object({
   pythonAvailable: z.boolean(),

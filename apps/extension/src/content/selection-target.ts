@@ -22,6 +22,7 @@ const interactiveSelector = [
  */
 export function selectionTarget(target: EventTarget | null): HTMLElement | undefined {
   if (!(target instanceof Element)) return undefined;
+  if (target.closest('[data-ui-agent-launcher]')) return undefined;
   // Generated React descendants are not persisted HTML source nodes.
   const moduleHost = target.closest('ui-agent-module');
   if (moduleHost instanceof HTMLElement) return moduleHost;

@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'react';
-import { Alert, Button, Input, Modal, Tooltip, message } from 'antd';
+import { Alert, Button, Input, Modal, Select, Tooltip, message } from 'antd';
 import type { TextAreaRef } from 'antd/es/input/TextArea';
 import {
   skillCatalogSchema,
@@ -28,8 +28,10 @@ import {
 } from '@ui-agent/contracts';
 import { onMessage, sendMessage } from '../messaging';
 import { SourceTurnProgressCard } from './SourceTurnProgressCard';
+import { AgentThinkingPlaceholder } from './AgentWorkingStatus';
 import { SkillPanel, SkillIcon } from './SkillPanel';
 import { useSkillPreferences } from './use-skill-preferences';
+import { useModelChoice } from './use-model-choice';
 import { MarkdownMessage } from './MarkdownMessage';
 import { createSourceTurnResultHandler } from './source-turn-result';
 import { DEFAULT_AGENT_SERVICE_URL, getAgentServiceUrl } from '../service/agent-service-config';
@@ -205,6 +207,7 @@ export function SidePanelApp() {
   const [sessionReady, setSessionReady] = useState(false);
   const busy = snapshotBusy || assistantBusy || conversationLoading || Boolean(activeSourceTurn) || Boolean(sourceWorkspace && !sessionReady);
   const skillPreferences = useSkillPreferences(serviceUrl, initialization === 'ready' && !skillsLoading && !skillLoadError, skills);
+  const modelChoice = useModelChoice(serviceUrl, initialization === 'ready');
   useEffect(() => {
     if (initialization !== 'ready') return;
     const controller = new AbortController();
@@ -485,6 +488,8 @@ export function SidePanelApp() {
     clarificationOptionId?: string
   ) => {
     if (!text || busy) return;
+    if (!modelChoice.available) { setError('所选模型尚未就绪，请检查模型配置或重新选择。'); return; }
+    const modelId = modelChoice.id;
     if (!skillPreferences.ready || skillPreferences.saving) { setError('技能设置尚未就绪，请打开技能面板检查。'); return; }
     const disabledSkillIds = [...skillPreferences.disabledIds];
     setSourceProgress(undefined);
@@ -506,6 +511,7 @@ export function SidePanelApp() {
         if (!turnSelection) throw new Error('原先选中的模块已不存在，请重新选择后发送。');
       }
       const request = assistantTurnRequestSchema.parse({
+        modelId,
         protocolVersion: PROTOCOL_VERSION,
         turnId,
         traceId: crypto.randomUUID(),
@@ -513,6 +519,7 @@ export function SidePanelApp() {
         disabledSkillIds,
         context: {
           hasWorkspace: Boolean(sourceWorkspace),
+          workspaceId: sourceWorkspace?.workspaceId,
           hasSelection: Boolean(turnSelection),
           ...(turnSelection && {
             selection: {
@@ -594,7 +601,7 @@ export function SidePanelApp() {
         sourceWorkspace,
         finalOutcome.targetScope === 'selection' ? turnSelection?.selected.sourceId : undefined,
         turnId,
-        { replyToClarificationId, clarificationOptionId, originalInstruction: text, assistantTraceId: request.traceId, disabledSkillIds, skillId: finalOutcome.skillId, skillVersion: finalOutcome.skillVersion }
+        { modelId, replyToClarificationId, clarificationOptionId, originalInstruction: text, assistantTraceId: request.traceId, disabledSkillIds, skillId: finalOutcome.skillId, skillVersion: finalOutcome.skillVersion }
       );
     } catch (error) {
       if (assistantAbort.signal.aborted) {
@@ -720,7 +727,7 @@ export function SidePanelApp() {
     workspace: ActiveWorkspace,
     sourceId?: string,
     turnId = crypto.randomUUID(),
-    requestContext: Pick<SourceTurnRequest, 'replyToClarificationId' | 'clarificationOptionId' | 'originalInstruction' | 'assistantTraceId' | 'skillId' | 'skillVersion' | 'disabledSkillIds'> = {}
+    requestContext: Pick<SourceTurnRequest, 'modelId' | 'replyToClarificationId' | 'clarificationOptionId' | 'originalInstruction' | 'assistantTraceId' | 'skillId' | 'skillVersion' | 'disabledSkillIds'> = {}
   ) => {
     setSnapshotBusy(true);
     let settled = false;
@@ -945,7 +952,16 @@ export function SidePanelApp() {
       copyingUserIdRef.current = false;
     }
   };
-  const examples = ['把按钮文案改成“确定”', '在右侧增加一个筛选项', '点击按钮时展开下方内容'];
+  const starterTasks = [
+    { label: '描述修改需求', icon: 'edit' as const, prompt: '我想调整这个页面。请先和我确认要修改的区域、期望的效果和需要保留的内容，确认需求后再修改。' },
+    { label: '整理页面内容', icon: 'logs' as const, prompt: '请根据当前页面可读取的内容，按模块整理主要信息，只做内容梳理，不修改页面。' },
+    { label: '梳理交互逻辑', icon: 'target' as const, prompt: '请梳理当前页面可确认的交互入口和操作流程，区分已有证据和待确认的行为，不修改页面。' }
+  ];
+  const fillStarterTask = (prompt: string) => {
+    if (busy || instruction.trim() || pendingClarification) return;
+    setInstruction(prompt);
+    composerRef.current?.focus({ cursor: 'end' });
+  };
 
   const closeConversations = () => {
     ++conversationRequestRef.current;
@@ -1161,28 +1177,6 @@ export function SidePanelApp() {
               disabled={busy} onClick={() => void changeConversation()}>新建会话</Button>
           </Tooltip>}
         </header>
-        {sourceWorkspace && (
-          <div className={`selection-strip ${selection ? 'has-selection' : ''}`}>
-            <span className="selection-symbol"><UiIcon name="target" /></span>
-            <div className="selection-copy">
-              <span className="selection-label">{selection ? '当前选区' : '选择编辑区域'}</span>
-              <span className="selection-value">
-                {selection ? `${selection.selected.tag} · ${selection.selected.text || '无文本内容'}` : '在静态副本中选择需要调整的元素'}
-              </span>
-            </div>
-            <div className="selection-actions">
-              <Button type="text"
-                className="selection-action"
-                icon={<UiIcon name="edit" />}
-                disabled={busy}
-                onClick={startSelection}
-              >
-                {selecting ? '选择中…' : selection ? '重选' : '选择'}
-              </Button>
-            </div>
-          </div>
-        )}
-
         <section className="chat-list" ref={chatViewportRef}>
           <div className="chat-list-content" ref={chatContentRef}>
           {!sourceWorkspace && (
@@ -1192,13 +1186,15 @@ export function SidePanelApp() {
               <p>确认后会将当前标签页切换为静态副本。进入副本后再选择区域、描述改动，原页面不会受到影响。</p>
             </div>
           )}
-          {sourceWorkspace && chat.length === 0 && (
+          {sourceWorkspace && chat.length === 0 && !busy && !pendingClarification && (
             <div className="empty-tip">
               <img className="brand-icon" src="/icons/logo.svg" width="42" height="42" alt="" />
-              <strong>{selection ? '描述你想看到的页面效果' : '先选择需要调整的区域'}</strong>
-              <p>{selection ? '可以修改内容、样式和布局，或添加安全的点击交互。' : '点击上方“选择”，然后在静态副本页面中点击目标元素。'}</p>
-              <div className="example-list">
-                {examples.map(example => <button key={example} type="button" onClick={() => setInstruction(example)}>{example}</button>)}
+              <strong>围绕这个页面，开始你的需求</strong>
+              <p>{selection ? '已选中区域，直接描述想调整的效果。也可以先提问、梳理需求。' : '可以直接问页面问题；想改局部时，先在下方选择区域。'}</p>
+              <div className="starter-tasks" aria-label="开始一个任务">
+                {starterTasks.map(task => <button key={task.label} type="button"
+                  disabled={Boolean(instruction.trim())} title={instruction.trim() ? '已有草稿，请先编辑或清空输入框' : '填入输入框，编辑后发送'}
+                  onClick={() => fillStarterTask(task.prompt)}><UiIcon name={task.icon} /><span>{task.label}</span></button>)}
               </div>
             </div>
           )}
@@ -1243,13 +1239,9 @@ export function SidePanelApp() {
             && (snapshotBusy || !busy) ? (
             <SourceTurnProgressCard key={sourceProgress.turnId} progress={sourceProgress} />
           ) : sourceWorkspace && assistantBusy && !streamingAnswerId ? (
-            <div className="bubble assistant working">
-              <span role="status">正在思考…</span>
-            </div>
+            <AgentThinkingPlaceholder />
           ) : snapshotBusy && sourceWorkspace && (
-            <div className="bubble assistant working">
-              <span role="status">正在思考…</span>
-            </div>
+            <AgentThinkingPlaceholder />
           )}
           {notice && <Alert className="inline-alert" type="info" showIcon message={notice} closable onClose={() => setNotice(undefined)} />}
           {error && <Alert className="inline-alert" type="error" showIcon message={error} closable onClose={() => setError(undefined)} />}
@@ -1275,8 +1267,27 @@ export function SidePanelApp() {
         )}
 
         {sourceWorkspace && <footer className="composer-shell">
+          <div className="composer-context-row">
+            <Tooltip title={selecting ? '在页面中点击目标元素；按 Esc 退出选择' : selection
+              ? `当前选区：${selection.selected.tag} · ${selection.selected.text || '无文本内容'}。点击重选，按 Esc 取消选中`
+              : '在副本页面中选择要修改的区域；页面问答无需选区'}>
+              <button type="button" className={`composer-selection${selection ? ' has-selection' : ''}`}
+                disabled={busy || selecting} onClick={startSelection}
+                aria-label={selecting ? '正在选择区域' : selection ? '当前选区，点击重选' : '选择区域'}>
+                <UiIcon name="target" />
+                <span>{selecting ? '选择中…' : selection ? selection.selected.text || selection.selected.tag : '选择区域'}</span>
+                {selection && !selecting && <span className="selection-reselect">重选</span>}
+              </button>
+            </Tooltip>
+            <div className="history-actions" role="group" aria-label="页面版本操作">
+              <Tooltip title="撤销页面修改"><Button type="text" shape="circle" aria-label="撤销页面修改" disabled={!sourceWorkspace.canUndo || busy} icon={<UiIcon name="undo" />} onClick={() => history('undo')} /></Tooltip>
+              <Tooltip title="重做页面修改"><Button type="text" shape="circle" aria-label="重做页面修改" disabled={!sourceWorkspace.canRedo || busy} icon={<UiIcon name="redo" />} onClick={() => history('redo')} /></Tooltip>
+              <Tooltip title="恢复初始"><Button type="text" shape="circle" aria-label="恢复初始" disabled={!sourceWorkspace.canUndo || busy} icon={<UiIcon name="reset" />} onClick={() => history('reset')} /></Tooltip>
+            </div>
+          </div>
           <Input.TextArea
             ref={composerRef}
+            aria-label="提问或描述页面修改需求"
             value={instruction}
             variant="borderless"
             onChange={event => setInstruction(event.target.value)}
@@ -1290,15 +1301,16 @@ export function SidePanelApp() {
             onPressEnter={event => { if (!event.shiftKey) { event.preventDefault(); void submit(); } }}
           />
           <div className="composer-toolbar">
-            {sourceWorkspace ? (
-              <div className="composer-actions">
-              <div className="history-actions">
-                <Tooltip title="撤销"><Button type="text" shape="circle" aria-label="撤销" disabled={!sourceWorkspace.canUndo || busy} icon={<UiIcon name="undo" />} onClick={() => history('undo')} /></Tooltip>
-                <Tooltip title="重做"><Button type="text" shape="circle" aria-label="重做" disabled={!sourceWorkspace.canRedo || busy} icon={<UiIcon name="redo" />} onClick={() => history('redo')} /></Tooltip>
-                <Tooltip title="恢复初始"><Button type="text" shape="circle" aria-label="恢复初始" disabled={!sourceWorkspace.canUndo || busy} icon={<UiIcon name="reset" />} onClick={() => history('reset')} /></Tooltip>
-              </div>
-              </div>
-            ) : <div />}
+            <Select className="composer-model-select" aria-label="选择模型" size="small" variant="borderless"
+              value={modelChoice.ready ? modelChoice.id : undefined} placeholder={modelChoice.error ? '模型加载失败' : '加载模型…'} loading={!modelChoice.ready && !modelChoice.error}
+              disabled={busy || !modelChoice.ready || modelChoice.saving}
+              onChange={value => void modelChoice.choose(value)}
+              placement="topLeft"
+              optionRender={option => <div className="model-option"><span>{option.label}</span>
+                {option.data.disabled && <small>请检查服务端是否已配置该模型及密钥</small>}</div>}
+              options={modelChoice.models.map(model => ({ value: model.id,
+                label: `${model.label}${model.available ? '' : '（未就绪）'}`, disabled: !model.available }))}
+            />
             {assistantBusy || sourceProgress && (sourceProgress.status === 'running' || sourceProgress.status === 'cancelling') ? (
               <Tooltip title={sourceProgress?.status === 'cancelling' ? '正在停止' : '停止生成'}>
                 <Button
@@ -1321,6 +1333,7 @@ export function SidePanelApp() {
                   aria-label="发送"
                   disabled={
                     busy
+                    || !modelChoice.available
                     || !instruction.trim()
                     || Boolean(pendingClarification && !pendingClarification.allowFreeText)
                   }
@@ -1331,6 +1344,9 @@ export function SidePanelApp() {
               </Tooltip>
             )}
           </div>
+          {modelChoice.error && <div className="composer-model-error" role="alert">
+            <span>{modelChoice.error}</span><button type="button" disabled={busy} onClick={modelChoice.retry}>重试</button>
+          </div>}
         </footer>}
       </section>
 

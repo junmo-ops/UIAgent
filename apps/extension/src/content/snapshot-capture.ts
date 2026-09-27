@@ -225,7 +225,7 @@ function sanitizeTree(sourceRoot: HTMLElement, cloneRoot: HTMLElement, registry:
     const source = sourceElements[index];
     const clone = cloneElements[index];
     if (!source || !clone) continue;
-    if (BLOCKED_TAGS.has(clone.tagName) || clone.hasAttribute('data-ui-agent-overlay')) {
+    if (BLOCKED_TAGS.has(clone.tagName) || clone.hasAttribute('data-ui-agent-overlay') || clone.hasAttribute('data-ui-agent-launcher')) {
       clone.remove();
       continue;
     }

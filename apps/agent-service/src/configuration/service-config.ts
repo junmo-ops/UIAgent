@@ -10,6 +10,13 @@ const httpUrl = z.string().trim().refine(value => {
 }, '必须是无凭证的 HTTP/HTTPS 地址');
 const schema = z.object({
   model: z.object({ baseUrl: httpUrl, name: text, providerLabel: text,
+    alternatives: z.array(z.object({
+      id: z.string().regex(/^[a-z0-9][a-z0-9-]{0,63}$/).refine(id => id !== 'default'),
+      label: text, baseUrl: httpUrl, name: text, providerLabel: text,
+      apiKeyEnv: z.string().regex(/^[A-Z][A-Z0-9_]*$/), enableThinking: z.boolean().optional(),
+      apiProtocol: z.enum(['chat-completions', 'responses']).optional()
+    }).strict().refine(item => item.apiProtocol !== 'responses' || item.enableThinking === undefined,
+      'Responses 不支持 enableThinking，请使用模型的推理设置')).optional(),
     edit: z.object({ maxIterations: positiveInteger, maxOutputTokens: positiveInteger }).strict(),
     router: z.object({ maxIterations: positiveInteger.max(5) }).strict()
   }).strict(),

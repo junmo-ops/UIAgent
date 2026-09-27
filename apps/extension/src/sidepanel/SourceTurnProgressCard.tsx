@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react';
 import type { SourceTurnTranscript } from '@ui-agent/contracts';
 import { MarkdownMessage } from './MarkdownMessage';
+import { AgentWorkingStatus } from './AgentWorkingStatus';
 
 const skipLabels = {
   read_budget: '已达到读取额度',
@@ -52,12 +53,12 @@ export function SourceTurnProgressCard({ progress }: { progress: SourceTurnTrans
   return <section className="agent-activity" aria-label="本轮处理过程">
     {active ? <>
       {hasProcess && <><div className="agent-activity-heading">已处理 {duration}</div>{content}</>}
-      <div className="agent-activity-status" role="status" aria-live="polite">
+      <AgentWorkingStatus>
         {progress.status === 'cancelling' ? '正在停止…'
           : progress.execution === 'tool' && timeline.at(-1)?.status === 'running' ? null
             : progress.execution === 'model' && progress.message.includes('繁忙') ? '服务繁忙，等待重试…'
               : '正在思考…'}
-      </div>
+      </AgentWorkingStatus>
     </> : hasProcess && <details className="agent-activity-disclosure">
       <summary>用时 {duration}<svg className="agent-activity-chevron" viewBox="0 0 16 16" aria-hidden="true"><path d="m6 4 4 4-4 4" /></svg></summary>
       {content}

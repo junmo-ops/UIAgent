@@ -52,6 +52,7 @@ export interface TurnLogSummary {
 }
 
 interface LogStoreOptions {
+  resolveModel?: (id?: string) => TurnLogEntry['model'];
   filePath?: string;
   persist?: boolean;
   maxEntries?: number;
@@ -76,12 +77,14 @@ export class TurnLogStore {
   private readonly maxEntries: number;
   private readonly maxFileBytes: number;
   private readonly model: TurnLogEntry['model'];
+  private readonly resolveModel?: LogStoreOptions['resolveModel'];
 
   constructor(options: LogStoreOptions = {}) {
     this.filePath = options.persist === false ? undefined : resolve(options.filePath ?? '.logs/agent-turns.jsonl');
     this.maxEntries = options.maxEntries ?? 200;
     this.maxFileBytes = options.maxFileBytes ?? 5_000_000;
     this.model = options.model ?? { mode: 'mock', provider: 'mock' };
+    this.resolveModel = options.resolveModel;
     this.load();
   }
 
@@ -114,7 +117,7 @@ export class TurnLogStore {
     const { conversation, ...requestContext } = request;
     const entry = redact({
       id: `log-${crypto.randomUUID()}`, kind: 'assistant_turn', timestamp, updatedAt: timestamp,
-      status: response.kind === 'failed' ? 'failed' : 'completed', model: this.model,
+      status: response.kind === 'failed' ? 'failed' : 'completed', model: this.resolveModel?.(request.modelId) ?? this.model,
       request: requestContext, conversation, result: response, durationMs,
       assistant: { adapterId, runtime: run?.runtime }, assistantSteps: run?.steps ?? [],
       toolStatistics: toolCallStatistics(run?.runtime, run?.steps ?? []),
@@ -140,7 +143,7 @@ export class TurnLogStore {
       timestamp,
       updatedAt: timestamp,
       status: response.kind === 'failed' ? 'failed' : 'completed',
-      model: this.model,
+      model: this.resolveModel?.(request.modelId) ?? this.model,
       request,
       conversation,
       result: response,

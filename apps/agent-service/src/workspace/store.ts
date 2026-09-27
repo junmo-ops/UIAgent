@@ -4,6 +4,9 @@ import type { WorkspaceConversation } from '@ui-agent/contracts';
 import { validateWorkspaceFiles } from './workspace-validation';
 import { renderWorkspacePreview } from './preview';
 import { createEditingSession } from './editing-session';
+import { createWorkspaceReader } from './workspace-reader';
+import { createPageContentReader } from './page-content-reader';
+import type { AssistantPageContext } from '@ui-agent/agent-runtime';
 import { WorkspaceFileStorage } from './file-storage';
 import { type WorkspaceFiles, type CapturedLayoutIndex, LAYOUT_INDEX_FILE, type WorkspaceManifest, type SourceWorkspace, type WorkspaceOwner, LOCAL_WORKSPACE_OWNER, type ManagedSourceWorkspace, type WorkspaceListOptions, type SourceWorkspaceStoreOptions } from './workspace-types';
 import { compileModuleSource } from './module-compiler';
@@ -620,6 +623,29 @@ export class SourceWorkspaceStore {
       ].filter((turn, index, turns) => (turn.conversationId ?? workspaceId) !== conversationId
         || turns.slice(index).filter(item => (item.conversationId ?? workspaceId) === conversationId).length <= 40)
     });
+  }
+
+  readContext(workspaceId: string, owner: WorkspaceOwner): AssistantPageContext {
+    this.persistence?.assertAvailable(workspaceId);
+    if (!this.owns(workspaceId, owner)) throw new Error('工作区不存在或无权访问');
+    const workspace = this.get(workspaceId);
+    if (!workspace) throw new Error('工作区不存在或无权访问');
+    // Synchronous capture; no edit lock, disk writes, or commit capability.
+    const files = this.storage.readWorkspaceFiles(this.storage.workspacePath(workspaceId));
+    const layout = this.capturedLayoutIndex(workspaceId);
+    const authorRuleMode = this.hasAuthorRuleCandidate(workspaceId);
+    return {
+      workspaceId,
+      revision: workspace.revision,
+      readContent: createPageContentReader(files['index.html'], Boolean(files['module.jsx'].trim())),
+      tools: createWorkspaceReader({
+        files: () => files,
+        authorRuleMode,
+        authorCssContent: authorRuleMode ? this.authorCss(workspaceId) ?? '' : '',
+        unreadableStyleSources: this.unreadableAuthorStyleSources(workspaceId),
+        layoutIndex: () => layout
+      })
+    };
   }
 
   tools(workspaceId: string): CodingWorkspaceTools {
