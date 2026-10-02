@@ -130,7 +130,23 @@ export function createWorkspaceReader(session: WorkspaceReaderOptions): Workspac
         .filter(candidate => candidate !== sourceId)
         .slice(0, 12);
       const layoutIndex = session.layoutIndex();
+      // Walk the real ancestry; the peer count caps are output budgets, not
+      // assumptions about which ancestor controls layout.
+      let peerBudget = full ? 12 : 6;
+      const ancestorPeers = ancestry.slice(0, -1).reverse().map(item => {
+        const ancestor = outline.nodes.find(candidate => candidate.sourceId === item.sourceId);
+        const container = outline.nodes.find(candidate => candidate.sourceId === ancestor?.parentSourceId);
+        const ids = (container?.childrenSourceIds ?? []).filter(id => id !== item.sourceId);
+        const included = ids.slice(0, Math.min(peerBudget, full ? 4 : 3));
+        peerBudget -= included.length;
+        return { ancestorSourceId: item.sourceId, containerSourceId: container?.sourceId,
+          totalPeers: ids.length, omittedCount: ids.length - included.length,
+          omittedSourceIds: ids.slice(included.length, included.length + 6),
+          peers: included.map(id => sourceLayoutFacts(html, session.files()['snapshot.css'], layoutIndex, id, 'context')) };
+      }).filter(item => item.totalPeers > 0);
       const layoutContext = {
+        evidence: 'capture-time geometry; source ancestry is current; not post-edit rendering',
+        ancestorPeers,
         target: sourceLayoutFacts(html, session.files()['snapshot.css'], layoutIndex, sourceId, full ? 'full' : 'target'),
         children: (node?.childrenSourceIds ?? []).slice(0, full ? 8 : 6).map(child => sourceLayoutFacts(html, session.files()['snapshot.css'], layoutIndex, child, full ? 'full' : 'context')),
         ancestors: ancestry

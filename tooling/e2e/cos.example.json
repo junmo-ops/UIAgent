@@ -1,0 +1,6 @@
+{
+  "endpoint": "https://your-test-s3-endpoint.example",
+  "region": "your-test-region",
+  "bucket": "your-dedicated-test-bucket",
+  "prefix": "uiagent-e2e/persistence"
+}

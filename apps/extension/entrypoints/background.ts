@@ -62,7 +62,9 @@ async function sendToContent(tab: Browser.tabs.Tab, command: ContentCommand): Pr
     return await sendMessage('contentCommand', command, tab.id);
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
-    if (!/Receiving end does not exist|Could not establish connection/i.test(message)) throw error;
+    // The launcher can receive messages before the editing script is loaded.
+    // In that case messaging returns an empty response instead of a missing receiver.
+    if (!/Receiving end does not exist|Could not establish connection|^No response$/i.test(message)) throw error;
     const injectionIssue = pageInjectionIssue(tab.url);
     if (injectionIssue) throw new BrowserCommandError(injectionIssue.code, injectionIssue.message);
     try {
@@ -74,7 +76,15 @@ async function sendToContent(tab: Browser.tabs.Tab, command: ContentCommand): Pr
       }
       throw new BrowserCommandError('CONTENT_UNAVAILABLE', injectionMessage);
     }
-    return await sendMessage('contentCommand', command, tab.id);
+    try {
+      return await sendMessage('contentCommand', command, tab.id);
+    } catch (retryError) {
+      const retryMessage = retryError instanceof Error ? retryError.message : String(retryError);
+      if (/Receiving end does not exist|Could not establish connection|^No response$/i.test(retryMessage)) {
+        throw new BrowserCommandError('CONTENT_UNAVAILABLE', '页面采集脚本未响应。请等待页面加载完成；如果刚重载过插件，请刷新当前网页并重新打开侧栏后重试。');
+      }
+      throw retryError;
+    }
   }
 }
 

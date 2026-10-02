@@ -16,6 +16,7 @@
     "typecheck": "pnpm -r --if-present typecheck",
     "test": "vitest run",
     "test:watch": "vitest",
+    "test:e2e": "npm --prefix tooling/e2e test",
     "architecture": "depcruise --config dependency-cruiser.config.cjs --exclude \"(^|/)(dist|\\.output|\\.wxt|node_modules)/\" apps packages",
     "check": "pnpm typecheck && pnpm test && pnpm architecture"
   },

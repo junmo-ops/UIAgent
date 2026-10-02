@@ -1,3 +1,4 @@
+import { parseHTML } from 'linkedom';
 import { type WorkspaceFiles } from './workspace-types';
 import { validateModuleJavaScript, validateModuleBindings } from './module-compiler';
 import { validateAuthorCss, validateHtml, validateCss } from './source-validation';
@@ -56,7 +57,9 @@ export function renderWorkspacePreview(input: WorkspacePreviewInput): string | u
         : ''}${unreadableStyleSources.map(source => `\n<link rel="stylesheet" href="${escapeHtmlAttribute(source)}" data-ui-agent-render-only-stylesheet>`).join('')}`;
     style = `${orderedStyleLinks}\n<link rel="stylesheet" href="${workspaceAssetPath}author-overrides.css${assetQuery}" data-ui-agent-author-overrides>`;
   }
-  const localizedHtml = localizeSnapshotResources(html, authorResources);
+  const localizedHtml = localizeSnapshotResources(
+    candidate === 'B' ? neutralizeSnapshotStage(html) : html, authorResources
+  );
   const componentRuntime = /<ui-agent-module\b/i.test(localizedHtml)
     ? `<script src="${workspaceAssetPath}replica-runtime.js${assetQuery}" defer data-ui-agent-replica-runtime="module-v2"></script>\n<script src="${workspaceAssetPath}module.js${assetQuery}" defer data-ui-agent-module-source></script>\n`
     : '';
@@ -84,4 +87,25 @@ function localizeSnapshotResources(html: string, resources: AuthorStyleResource[
       return attribute;
     }
   });
+}
+
+/** The generated capture frame is not part of the author's layout. Keep its
+ * marker for editor tooling, but prevent tag/universal rules from creating an
+ * extra grid, clipping box or positioned containing block in author-rule mode.
+ * Frozen mode deliberately retains its capture-time coordinate frame.
+ */
+function neutralizeSnapshotStage(html: string): string {
+  const { document } = parseHTML(html);
+  const stage = document.querySelector('[data-ui-agent-snapshot-stage]');
+  if (!stage || stage.hasAttribute('data-ui-source-id')) return html;
+  const neutral = document.createElement('ui-agent-stage');
+  neutral.setAttribute('data-ui-agent-snapshot-stage', '');
+  neutral.setAttribute('style', 'all:unset!important;display:contents!important');
+  while (stage.firstChild) neutral.appendChild(stage.firstChild);
+  stage.replaceWith(neutral);
+  const style = document.createElement('style');
+  style.setAttribute('data-ui-agent-stage-isolation', '');
+  style.textContent = 'ui-agent-stage[data-ui-agent-snapshot-stage]::before,ui-agent-stage[data-ui-agent-snapshot-stage]::after{content:none!important;display:none!important}';
+  document.head.appendChild(style);
+  return document.toString();
 }

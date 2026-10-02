@@ -1306,6 +1306,7 @@ export function SidePanelApp() {
               disabled={busy || !modelChoice.ready || modelChoice.saving}
               onChange={value => void modelChoice.choose(value)}
               placement="topLeft"
+              classNames={{ popup: { root: 'composer-model-menu' } }}
               optionRender={option => <div className="model-option"><span>{option.label}</span>
                 {option.data.disabled && <small>请检查服务端是否已配置该模型及密钥</small>}</div>}
               options={modelChoice.models.map(model => ({ value: model.id,

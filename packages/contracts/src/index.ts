@@ -523,6 +523,8 @@ export interface ExtensionProtocolMap {
 }
 // Capture-time facts only: these must never be treated as post-edit geometry.
 export const CAPTURED_LAYOUT_PROPERTIES = [
+  'box-sizing', 'padding-top', 'padding-right', 'padding-bottom', 'padding-left',
+  'border-top-width', 'border-right-width', 'border-bottom-width', 'border-left-width',
   'display', 'position', 'width', 'height', 'min-width', 'min-height', 'max-width', 'max-height',
   'overflow', 'overflow-x', 'overflow-y', 'flex-direction', 'flex-wrap', 'flex-basis',
   'flex-grow', 'flex-shrink', 'align-items', 'align-content', 'justify-content',

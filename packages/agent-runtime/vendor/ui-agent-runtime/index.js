@@ -83,7 +83,7 @@ export class Agent {
     let rateLimitRetries = 0;
     const usage = {};
     const runtimeStarted = Date.now();
-    const diagnostics = { version: 1, runtimeRevision: '2026-09-26-responses-v17',
+    const diagnostics = { version: 1, runtimeRevision: '2026-10-02-tool-validation-v18',
       apiProtocol: this.config.apiProtocol ?? 'chat-completions',
       countingBasis: 'model decision rounds; rate-limit request retries are recorded separately per call',
       maxIterations: this.config.maxIterations ?? 12, maxOutputTokens: this.config.maxOutputTokens,
@@ -107,6 +107,8 @@ export class Agent {
     // Serialize tool execution; successful completion prevents later mutations.
     let queue = Promise.resolve();
     let terminalToolError;
+    // Scoped to this run and tool; unrelated reads do not erase a repeated failure.
+    const validationFailures = new Map();
     const runtimeTools = () => Object.fromEntries((this.config.tools ?? [])
       .filter(tool => tool.isAvailable?.({ iteration: iterations }) !== false)
       .map(tool => [tool.name, {
@@ -115,6 +117,7 @@ export class Agent {
       execute: (args, call) => {
         const task = queue.then(async () => {
           if (controller.signal.aborted) throw new Error('Run aborted');
+          if (terminalToolError) return { error: terminalToolError.message };
           if (completed) return { error: 'Run already completed; no further tools allowed' };
           const toolStarted = Date.now();
           const toolLog = { name: tool.name, toolCallId: call?.toolCallId, status: 'running' };
@@ -125,6 +128,7 @@ export class Agent {
             const value = await tool.execute(args, { agentId, runId, iteration: iterations,
               toolCallId: call?.toolCallId, signal: controller.signal, metadata: this.config.toolContextMetadata,
               emitUpdate: update => { if (update?.type === 'tool-outcome' && update.outcome === 'blocked') toolLog.status = 'blocked'; } });
+            validationFailures.delete(tool.name);
             if (tool.lifecycle?.completesRun) { completed = true; completionOutput = value; }
             if (toolLog.status !== 'blocked') toolLog.status = 'succeeded';
             if (tool.lifecycle?.completesRun) diagnostics.completionTool = tool.name;
@@ -133,6 +137,15 @@ export class Agent {
             toolLog.status = 'failed';
             toolLog.error = errorInfo(error);
             lastToolError = asError(error).message;
+            if (error?.name === 'ToolInputValidationError') {
+              const previous = validationFailures.get(tool.name);
+              const count = previous?.message === lastToolError ? previous.count + 1 : 1;
+              validationFailures.set(tool.name, { message: lastToolError, count });
+              if (count >= 3) terminalToolError = Object.assign(
+                new Error(`工具 ${tool.name} 连续 3 次出现相同参数校验错误，已停止本轮执行。请检查模型工具协议或切换模型后重试。`),
+                { code: 'TOOL_INPUT_VALIDATION_STALLED' }
+              );
+            } else validationFailures.delete(tool.name);
             if (error?.terminalToolError === true) terminalToolError = asError(error);
             return { error: lastToolError };
           } finally {

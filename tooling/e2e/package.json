@@ -1,0 +1,17 @@
+{
+  "name": "uiagent-local-e2e",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "test": "playwright test --config playwright.config.mjs",
+    "report": "playwright show-report ../../output/playwright/report",
+    "test:cos": "node cos.mjs",
+    "test:real": "playwright test --config real.config.mjs",
+    "test:smoke": "node regression.mjs smoke",
+    "test:core": "node regression.mjs core",
+    "test:compare": "node regression.mjs compare"
+  },
+  "devDependencies": {
+    "@playwright/test": "1.63.0"
+  }
+}

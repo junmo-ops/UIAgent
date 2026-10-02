@@ -56,13 +56,14 @@ const text = (value: Buffer) => new TextDecoder('utf-8', { fatal: true }).decode
 
 /** Only operator-reviewed packages shipped with the service are admitted. This is not a sandbox. */
 export class SkillRegistry implements SkillProvider {
-  private readonly config = configSchema.parse(readConfigurationFile('skills.json'));
+  private readonly config: z.infer<typeof configSchema>;
   private readonly packages = new Map<string, Package>();
   private active = 0;
   readonly pythonAvailable: boolean;
   readonly pythonVersion?: string;
   readonly issues: string[] = [];
-  constructor() {
+  constructor(config?: z.input<typeof configSchema>) {
+    this.config = configSchema.parse(config ?? readConfigurationFile('skills.json'));
     const probe = spawnSync(this.config.pythonExecutable, ['--version'], { timeout: 5000, maxBuffer: 4096, env: { PATH: '/usr/local/bin:/usr/bin:/bin' } });
     this.pythonVersion = `${probe.stdout ?? ''}\n${probe.stderr ?? ''}`.match(/^Python 3\.\d+\.\d+[^\r\n]*/m)?.[0];
     this.pythonAvailable = probe.status === 0 && Boolean(this.pythonVersion);

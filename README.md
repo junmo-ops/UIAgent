@@ -21,6 +21,8 @@
 
 ## 本地启动
 
+插件端到端回归的独立安装、运行命令和覆盖范围见 [本机端到端测试](tooling/e2e/README.md)。
+
 准备 Node.js 22 或更高版本、**pnpm 10.33.0**（以 `package.json` 为准）和支持 Side Panel 的 Chrome。
 
 ```bash
@@ -106,3 +108,5 @@ pnpm build        # 构建
 专题文档包含阶段性设计与历史记录；当前命令、配置和行为以代码为准。
 
 副本对象存储支持与旧数据迁移见 [部署说明](docs/副本对象存储部署说明.md)。普通存储参数统一填写 `apps/agent-service/config/workspace-storage.json`，行内部署设置 `mode: "s3"`，本地开发默认 `local`；只有存储凭证通过环境变量注入，插件无需设置。
+
+真实模型的场景集、运行方式与人工审核标准见 [真实模型场景评测](docs/真实模型场景评测.md)。

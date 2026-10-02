@@ -29,7 +29,7 @@
   },
   "files": {
     "index.js": {
-      "sha256": "1b210da15b1013596bf0c88d272ba285e58ce05a0ba4480d58639efb89705011"
+      "sha256": "7c1881c053af64c04ecfceef7a33bbe15a1a74003787e105dc219cc330c9dae1"
     },
     "index.d.ts": {
       "sha256": "418704ed7272993ea3328e0b97012596184d4c9e1ae93e2d8d61e5ff8b396181"
@@ -39,5 +39,5 @@
     }
   },
   "checksumNote": "manifest.json is excluded to avoid a self-referential checksum.",
-  "localRevision": "2026-09-10-stall-guards-v12"
+  "localRevision": "2026-10-02-tool-validation-v18"
 }

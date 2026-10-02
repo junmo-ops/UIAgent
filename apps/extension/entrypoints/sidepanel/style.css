@@ -551,7 +551,58 @@ button, textarea { font: inherit; }
   line-height: 1.35;
 }
 
-.composer-model-select.ant-select { width: 180px; min-width: 0; max-width: calc(100% - 46px); font-size: 12px; }
+.composer-model-select.ant-select {
+  width: 128px;
+  min-width: 0;
+  max-width: calc(100% - 46px);
+  height: 30px;
+  padding-inline: 10px;
+  color: #66615e;
+  background: transparent;
+  border: 1px solid transparent;
+  border-radius: 8px;
+  box-shadow: none;
+  font-size: 12px;
+  transition: background .15s ease, border-color .15s ease;
+}
+.composer-model-select.ant-select:not(.ant-select-disabled):hover,
+.composer-model-select.ant-select.ant-select-open {
+  color: #66615e;
+  background: #f5f3f1;
+  border-color: transparent;
+}
+.composer-model-select.ant-select.ant-select-focused:not(.ant-select-disabled) {
+  border-color: #c9c6c2;
+  box-shadow: 0 0 0 2px rgba(102, 97, 94, .08);
+}
+/* Ant Design dims the selected value while open; keep this non-searchable picker steady. */
+.composer-model-select.ant-select.ant-select-single.ant-select-open .ant-select-content.ant-select-content-has-value {
+  opacity: 1;
+}
+.composer-model-select.ant-select .ant-select-suffix { color: #96908b; }
+.composer-model-select.ant-select.ant-select-disabled { color: #aaa5a0; background: transparent; }
+.composer-model-menu.ant-select-dropdown {
+  padding: 5px;
+  border: 1px solid #ebe8e5;
+  border-radius: 10px;
+  background: #fff;
+  box-shadow: 0 6px 22px rgba(34, 28, 24, .12);
+}
+.composer-model-menu.ant-select-dropdown .ant-select-item {
+  min-height: 32px;
+  padding: 7px 10px;
+  border-radius: 6px;
+  color: #514c47;
+  line-height: 18px;
+}
+.composer-model-menu.ant-select-dropdown .ant-select-item-option-selected:not(.ant-select-item-option-disabled) {
+  color: #302c29;
+  background: #f0ede9;
+  font-weight: 500;
+}
+.composer-model-menu.ant-select-dropdown .ant-select-item-option-active:not(.ant-select-item-option-disabled) { background: #f6f4f2; }
+.composer-model-menu.ant-select-dropdown .ant-select-item-option-state { color: #77716d; }
+.composer-model-menu.ant-select-dropdown .ant-select-item-option-disabled { color: #aaa5a0; }
 .model-option { white-space: normal; overflow-wrap: anywhere; font-size: 12px; }
 .model-option small { display: block; margin-top: 3px; font-size: 11px; color: #77716d; line-height: 1.5; }
 .composer-model-error { display: flex; align-items: baseline; gap: 8px; margin-top: 6px; color: #a33c31; font-size: 12px; }

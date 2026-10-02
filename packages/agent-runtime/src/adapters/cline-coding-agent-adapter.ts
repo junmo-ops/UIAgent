@@ -121,6 +121,7 @@ function interactionPlanSchema(properties: Record<string, Record<string, unknown
     name, schema.type === 'string' ? { ...schema, minLength: 1 } : schema
   ]));
   return {
+    ...objectSchema(fields, ['mode']),
     anyOf: [
       objectSchema({ ...fields, mode: { ...fields.mode, enum: ['none', 'preserve-existing'] } }, ['mode']),
       objectSchema({ ...fields, mode: { ...fields.mode, enum: ['local-demo'] } }, ['mode', ...INTERACTION_BEHAVIOR_FIELDS])
@@ -207,7 +208,13 @@ function createTool<TInput, TOutput>(config: AgentTool<TInput, TOutput>): AgentT
       const issues: string[] = [];
       validateRequiredFields(config.inputSchema, input, '', issues);
       if (issues.length) {
-        throw Object.assign(new Error(`[工具参数校验] ${config.name} 缺少或错误的必填参数：${issues.join('、')}；本次未执行`), { name: 'ToolInputValidationError' });
+        // Only schema-owned field names and value types; never log argument values.
+        const typeOf = (value: unknown): string => value === null ? 'null' : Array.isArray(value) ? 'array' : typeof value;
+        const record = input && typeof input === 'object' ? input as Record<string, unknown> : {};
+        const properties = config.inputSchema.properties as Record<string, unknown> | undefined;
+        const types = Object.keys(properties ?? {}).slice(0, 32)
+          .map(key => `${key}=${Object.prototype.hasOwnProperty.call(record, key) ? typeOf(record[key]) : 'missing'}`);
+        throw Object.assign(new Error(`[工具参数校验] ${config.name} 缺少或错误的必填参数：${issues.join('、')}；收到类型：input=${typeOf(input)}, ${types.join(', ')}；对象和数组必须直接传 JSON 对象或数组，不能传序列化字符串；本次未执行`), { name: 'ToolInputValidationError' });
       }
       return config.execute(input, context);
     }
@@ -225,14 +232,17 @@ const clineSourceRules = [
   '样式查询统一使用 query_style_symbols。目标已知时优先提供 sourceId 和本次关注的 properties，一次查询所需证据；source 默认 all，只有明确需要覆盖层时才选 overrides。未命中不等于工具失败，也不要求不断补查。',
   '目标明确且已有 selectedElementContext 时，不重复读取选中元素源码。完整替换选中元素使用 replace_element，无需复制原元素整段 HTML；应在前两次模型决策内完成意图声明并开始写入。不要为了比较未被用户要求的视觉方案检索相邻示例。',
   '修改前只需确认目标、最近相关容器和必要的相邻元素。复制原样保留原结构，小改保留现有实现；新增、重做、改变控件类型或组合交互统一使用 Ant Design 局部模块。只读取必要布局证据，明确风格要求时只读取相关参照。修改行内样式时注意级联优先级，背景也可能由子元素或伪元素绘制。',
+  '布局需求必须在 visualConstraints 中保留用户要求的视觉关系、参照对象及需保持的区域，不能将视觉位置降格为源码前后顺序。根据实际容器布局、自动排布和定位上下文规划插入位置与样式；新增同级元素可能挤走邻居，需同时考虑受影响的兄弟区域。',
+  '修改尺寸或排列前，利用已有布局上下文核对 box-sizing、内边距、边框、尺寸约束、伸缩规则与相关祖先的 overflow。百分比内容宽度不等于包含内边距和边框的总宽度；调整内部高度不能消除外层裁切。按证据修改必要范围，不统一改为自动高度或解除溢出限制。缺少关键属性时一次查询相关样式，不为简单改字增加布局检查。',
   '位置描述以用户明确容器为准，否则以 selectedSourceId 或最近语义祖先为锚点。相邻组件只扩展到最近公共父容器；用户未明确要求全局视口定位时不得新增 position:fixed。新增元素后调用 validate_spatial_scope。',
   '若多个方案会显著改变最终视觉结果，修改前调用 clarify；问题只询问源码无法确定的信息。已有澄清回复时结合 conversation 继续原需求。保留 button、input 等语义表示最终渲染标签和可访问行为保持一致，不等于必须保留原 sourceId 或原 DOM 节点；只有用户明确要求保留节点身份时才按原节点修改。',
-  '首次写入前调用一次 declare_intent，简洁列出目标、相关 sourceId、供用户检查的效果约束和布局范围。涉及交互时必须明确初始状态、触发动作、出现内容、是否占据布局、结束状态和节点身份策略。declare_intent 是方案决策边界；成功后按已声明方案执行，只有工具返回新的冲突证据时才调整，不重新比较组件或交互方案。新增 sourceId 会由系统自动加入验证范围。',
+  '涉及新增、移动、尺寸或排列变化时，在 declare_intent.layoutPlan 中根据实际布局声明实施机制和保持区域；纯文案/颜色修改可省略。完成后调用 review_layout_plan，先核对方案是否保留用户原始要求的参照对象、内外边界与关系，再用实际操作核对方案；不可为了避开布局冲突自行替换目标关系，有关键歧义则 clarify。遗漏则修正并重新核对；finish.layoutAssessment 说明源码依据。不要把该核对当作渲染验证。',
+  '首次写入前调用一次 declare_intent，简洁列出目标、相关 sourceId、供用户检查的效果约束和布局范围。涉及交互时必须明确初始状态、触发动作、出现内容、是否占据布局、结束状态和节点身份策略。declare_intent 锁定用户目标与约束；按已声明方案执行，发现实现与约束冲突或工具返回新证据时可调整实现，不放宽需求，也不重新比较无关组件或交互方案。新增 sourceId 会由系统自动加入验证范围。',
   '已明确实际文本承载元素时优先 set_element_text；含图标或其他子结构的父控件不能直接清空，应定位文字子元素，不确定时再 inspect。属性、插入、完整元素替换、移动、删除和批量操作使用对应结构化工具；完整替换已有元素使用 replace_element，元素内部精确替换才使用 replace_in_element，search 必须来自已读取的原始源码，禁止根据 compactHtml、domText 或结构摘要拼接 HTML，文件级精确替换必须基于已读取原文，追加 CSS 使用 apply_patch。相关修改尽量在同一轮并行调用或用批量工具完成。',
   '不得添加 script、事件属性、远程资源、接口请求、表单 action 或 javascript: URL。',
   INTERACTION_INSTRUCTIONS,
-  '修改完成后直接调用 finish；finish 会执行工作区校验。新增元素仍须先完成空间归属校验。源码和捕获布局不能证明真实渲染结果，不得声称已经通过浏览器验证。无需修改时提供源码证据并使用 already_satisfied。',
-  'finish.summary 是给产品用户看的结果说明，不是技术执行日志。用 1～3 句自然语言说明改了什么；仅在有新增交互时补充如何使用，仅在影响用户预期时说明实际限制（例如仅为演示、未连接真实检索）。简单文案修改一句即可。不罗列 sourceId、文件名、class、React/组件库、工具名或校验过程，不复述完整需求，不追加通用验证免责声明。不得把源码校验表述成已验证视觉效果，不承诺无裁切、绝不影响其他区域。确有未完成项或已知风险必须明确说明，不能为简短而隐瞒。技术细节保留在工具调用日志。',
+  '修改后先用已有源码与工具结果逐项对照声明的效果约束，检查是否遗漏位置关系、盒模型或影响保留区域；有矛盾就修正实现，不能为了尽快结束而改写需求。优先复用已有证据，已声明布局方案时完成 review_layout_plan，避免重复读取。随后调用 finish 执行工作区校验，新增元素仍须先完成空间归属校验。源码和捕获布局不能证明真实渲染结果，不得声称已经通过浏览器验证。无需修改时提供源码证据并使用 already_satisfied。',
+  'finish.summary 是给产品用户看的结果说明，不是技术执行日志。用 1～3 句自然语言说明改了什么；仅在有新增交互时补充如何使用，仅在影响用户预期时说明实际限制（例如仅为演示、未连接真实检索）。简单文案修改一句即可。不罗列 sourceId、文件名、class、React/组件库、工具名或校验过程，不复述完整需求，不追加通用验证免责声明。不得把源码校验表述成已验证视觉效果；没有渲染证据时，只报告实际执行的修改，不断言位置正确、内容全部可见、无裁切或其他区域完全未受影响。只在本轮布局要求依赖尚未验证的效果时，简短指出具体待确认项，不对简单文字修改追加免责声明。确有未完成项或已知风险必须明确说明，不能为简短而隐瞒。技术细节保留在工具调用日志。',
   '没有调用 finish 或 clarify，本轮不算完成。保持推理和工具说明简洁，不做无关重构。',
   '完成回复优先压缩为两句：一句概括结果，另一句仅补充必要操作方法或真实限制。不要逐项复述标题、占位文案、提示文案、尺寸和颜色；除非用户要求逐项核对。不得为了简短隐瞒未完成项，也不通过截断字符串压缩结果。'
 ].join('\n');
@@ -415,6 +425,10 @@ export class ClineCodingAgentAdapter implements CodingAgentPort {
     let originalSelectedPath: string[] = [];
     let introducedFixedPosition = false;
     let intentDeclared = false;
+    let layoutPlan: { containerSourceIds: string[]; mechanism: string; preservedRegions: string } | undefined;
+    let mutationVersion = 0;
+    let reviewedLayoutVersion = -1;
+    const layoutChanges: { action: string; input: unknown }[] = [];
     let declaredIntent: import('@ui-agent/contracts').WorkspaceIntent | undefined;
     const changedPositioningClassNames = new Set<string>();
     const repeatedFailures = new Map<string, number>();
@@ -562,6 +576,8 @@ export class ClineCodingAgentAdapter implements CodingAgentPort {
         const result = await operation();
         if (BUDGETED_READ_ACTIONS.has(action) && !firstMutationAt) preMutationReadCalls += 1;
         if (MUTATING_ACTIONS.has(action)) {
+          mutationVersion += 1;
+          layoutChanges.push({ action, input });
           if (!firstMutationAt) {
             firstMutationAt = new Date().toISOString();
             firstMutationModelCall = context.iteration;
@@ -690,6 +706,7 @@ export class ClineCodingAgentAdapter implements CodingAgentPort {
         relevantSourceIds?: string[];
         verificationSourceIds?: string[];
         visualConstraints?: string[];
+        layoutPlan?: { containerSourceIds: string[]; mechanism: string; preservedRegions: string };
         layoutScope?: 'selected-context' | 'explicit-container' | 'global';
       }, string>({
         name: 'declare_intent',
@@ -727,8 +744,13 @@ export class ClineCodingAgentAdapter implements CodingAgentPort {
           },
           visualConstraints: {
             type: 'array', maxItems: 12,
-            items: stringProperty('预期的简洁视觉或结构约束，供用户检查；声明约束不代表已经验证。')
+            items: stringProperty('保留用户原意的效果约束：涉及布局时说明目标与参照对象的视觉关系、需保持的区域；不得用 DOM 插入顺序代替视觉关系。声明不代表已经验证。')
           },
+          layoutPlan: objectSchema({
+            containerSourceIds: { type: 'array', minItems: 1, maxItems: 12, items: stringProperty('实际控制目标布局的已有容器 sourceId。') },
+            mechanism: stringProperty('根据已读取的布局事实，说明具体结构/样式实施方案及其如何实现目标关系。不能只重复需求或 DOM before/after；已有布局足够时说明原因，不强制修改 CSS。涉及并排关系时说明实际可用宽度、控件占用及换行/收缩规则能否容纳目标；排在源码后面或换到下一行不等于位于右侧。容量不足时由模型选择符合约束的方案，若必须改变用户要求则先澄清。'),
+            preservedRegions: stringProperty('说明需保持的区域及本方案如何避免改变其位置/尺寸；无此要求时说明。')
+          }, ['containerSourceIds', 'mechanism', 'preservedRegions']),
           layoutScope: { type: 'string', enum: ['selected-context', 'explicit-container', 'global'] }
         }, ['summary', 'interactionPlan']),
         execute: (input, context) => execute(
@@ -754,6 +776,15 @@ export class ClineCodingAgentAdapter implements CodingAgentPort {
             if (!sourceIds.length) {
               throw new Error('declare_intent 必须列出至少一个实际相关的 sourceId；请先查询并检查目标结构，无法定位时调用 clarify');
             }
+            if (input.layoutPlan && (!input.layoutPlan.containerSourceIds?.length
+              || !input.layoutPlan.mechanism?.trim() || !input.layoutPlan.preservedRegions?.trim())) {
+              throw new Error('布局方案需包含实际容器、实施机制及保持区域的处理方式');
+            }
+            if (layoutPlan && !input.layoutPlan) {
+              throw new Error('已声明布局方案，不能通过重新声明省略方案来跳过核对');
+            }
+            layoutPlan = input.layoutPlan;
+            reviewedLayoutVersion = -1;
             intentDeclared = true;
             declaredIntent = {
               intentId: randomUUID(),
@@ -764,7 +795,7 @@ export class ClineCodingAgentAdapter implements CodingAgentPort {
               layoutScope: input.layoutScope ?? 'selected-context',
               createdAt: new Date().toISOString()
             };
-            return `意图已声明并锁定实现方案：${input.summary}${interactionConstraint ? `；${interactionConstraint}` : '；本轮无交互改动'}。除非工具返回新的冲突证据，请直接执行并完成校验。`;
+            return `意图与效果约束已声明：${input.summary}${interactionConstraint ? `；${interactionConstraint}` : '；本轮无交互改动'}。效果约束：${constraints.join('；')}。实现必须满足这些要求，不能仅凭源码顺序判断视觉位置；当前尚未验证渲染结果。`;
           }
         )
       }),
@@ -1001,7 +1032,7 @@ export class ClineCodingAgentAdapter implements CodingAgentPort {
         styleReferenceSourceId?: string;
       }, string>({
         name: 'insert_element',
-        description: '在目标元素内部开头/末尾或目标前后插入静态 HTML；系统为所有新元素生成 sourceId。可选提供已检查的同类元素作为冻结计算样式参照。',
+        description: '按源码树顺序在目标元素内部开头/末尾或目标前后插入静态 HTML；这些位置不代表屏幕上下左右。系统为所有新元素生成 sourceId。可选提供已检查的同类元素作为冻结计算样式参照。',
         inputSchema: objectSchema({
           targetSourceId: stringProperty('定位目标 sourceId。'),
           position: { type: 'string', enum: ['insideStart', 'insideEnd', 'before', 'after'], description: 'insideStart/insideEnd 表示 targetSourceId 内部，before/after 表示目标外部前后。' },
@@ -1094,7 +1125,7 @@ export class ClineCodingAgentAdapter implements CodingAgentPort {
         targetSourceId: string;
       }, string>({
         name: 'move_element',
-        description: '按 sourceId 原样移动元素，所有位置均相对于必填的 targetSourceId。insideStart/insideEnd 放入目标容器内部；before/after 放在目标外部前后。',
+        description: '按 sourceId 原样移动元素，所有位置均相对于必填的 targetSourceId。insideStart/insideEnd 放入目标容器内部；before/after 仅表示源码同级顺序，不保证视觉方向，也不保证其他元素原位不变。',
         inputSchema: objectSchema({
           sourceId: stringProperty('要移动的现有元素 sourceId。'),
           position: { type: 'string', enum: ['insideStart', 'insideEnd', 'before', 'after'] },
@@ -1117,7 +1148,7 @@ export class ClineCodingAgentAdapter implements CodingAgentPort {
         replacements?: Array<{ search: string; replace: string }>;
       }, string>({
         name: 'clone_element',
-        description: '克隆元素并生成新 sourceId。所有位置相对于必填 targetSourceId：insideStart/insideEnd 为目标内部，before/after 为目标外部前后，replace 替换目标。',
+        description: '克隆元素并生成新 sourceId。所有位置相对于必填 targetSourceId：insideStart/insideEnd 为目标内部，before/after 为源码中的同级前后，replace 替换目标。源码顺序不保证视觉方向；网格、弹性及定位布局需根据实际样式规划，避免挤走原有区域。',
         inputSchema: objectSchema({
           templateSourceId: stringProperty('要复用的现有组件 sourceId。'),
           position: { type: 'string', enum: ['replace', 'insideStart', 'insideEnd', 'before', 'after'] },
@@ -1160,7 +1191,7 @@ export class ClineCodingAgentAdapter implements CodingAgentPort {
         reason: string;
       }, string>({
         name: 'validate_spatial_scope',
-        description: '校验新增模块是否围绕选区或用户明确指定的容器定位。新增元素后、finish 前必须调用。',
+        description: '仅校验新增节点的源码容器归属及定位权限，不检查浏览器坐标、视觉方向、裁切或相邻区域是否移动。新增元素后、finish 前必须调用，通过不代表视觉要求已满足。',
         inputSchema: spatialScopeSchema({
           scope: { type: 'string', enum: ['selected-context', 'explicit-container', 'global'] },
           containerSourceId: stringProperty('实际承载新增顶层模块的容器 sourceId；global 可省略。'),
@@ -1231,14 +1262,45 @@ export class ClineCodingAgentAdapter implements CodingAgentPort {
               }
             }
             spatialScopeValidated = true;
-            return `空间归属校验通过：scope=${input.scope}${input.containerSourceId ? `，container=${input.containerSourceId}` : ''}${removedSourceIds.length ? `；已忽略本轮随后删除的元素 ${removedSourceIds.join(', ')}` : ''}；${input.reason}`;
+            return `源码容器归属校验通过（未验证视觉位置、裁切及邻居位移）：scope=${input.scope}${input.containerSourceId ? `，container=${input.containerSourceId}` : ''}${removedSourceIds.length ? `；已忽略本轮随后删除的元素 ${removedSourceIds.join(', ')}` : ''}；${input.reason}`;
           }
         )
+      }),
+      createTool<Record<string, never>, string>({
+        name: 'review_layout_plan',
+        description: '布局修改完成后读取已声明方案和本轮成功的源码操作，再由模型核对实施机制与保持约束。同时返回当前容器源码上下文，核对真实子项顺序与邻居排布。操作记录不是最终 diff；有覆盖或证据不足时读取当前源码。后续再修改需重新核对。此工具不判断视觉结果。',
+        inputSchema: objectSchema({}, []),
+        execute: (input, context) => execute('review_layout_plan', input, context, async () => {
+          if (!layoutPlan) throw new Error('尚未声明 layoutPlan');
+          const containerIds = [...new Set(layoutPlan.containerSourceIds)];
+          const budget = Math.min(MAX_BATCH_ELEMENT_CHARS, Math.floor(MAX_BATCH_INSPECTION_CHARS / containerIds.length));
+          const currentContainers = [];
+          for (const sourceId of containerIds) {
+            const source = await workspace.inspectElement(sourceId, { detail: 'compact' });
+            currentContainers.push({ sourceId, context: boundedInspection(source, budget, new Set<string>()) });
+          }
+          reviewedLayoutVersion = mutationVersion;
+          return JSON.stringify({
+            evidence: '成功的源码操作记录，不是浏览器渲染证据。先对照原始请求核对方案是否擅自改变参照对象、内外边界或位置关系，再核对操作是否落实方案；不能只证明自拟方案自洽。发现缺项先修正，再重新核对。',
+            originalRequest: turn.request.instruction,
+            currentContainers,
+            contextEvidence: '容器源码结构来自本次修改后的工作区；其中捕获矩形与计算样式仍是捕获时数据，不是当前渲染结果。依据实际子项顺序和布局规则核对所有受影响区域；没有修改邻居源码不能证明邻居位置不变。',
+            layoutPlan,
+            constraints: declaredIntent?.constraints,
+            mutationVersion,
+            changes: layoutChanges.map(change => {
+              const serialized = JSON.stringify(change.input);
+              return { action: change.action, input: serialized.slice(0, 12000), truncated: serialized.length > 12000 };
+            }),
+            next: 'finish.layoutAssessment 说明实际结构/样式如何落实方案并保持受保护区域。截断或相互覆盖的操作不能作为完整源码证明，应读取当前相关片段。'
+          });
+        })
       }),
       createTool<{
         summary: string;
         outcome?: 'changed' | 'already_satisfied';
         evidence?: string;
+        layoutAssessment?: string;
       }, string>({
         name: 'finish',
         description: `${finishDescription}若当前副本无需改动，设置 outcome=already_satisfied，并提供源码证据。`,
@@ -1249,6 +1311,7 @@ export class ClineCodingAgentAdapter implements CodingAgentPort {
             enum: ['changed', 'already_satisfied'],
             description: '本轮是否产生了源码修改；默认 changed。'
           },
+          layoutAssessment: stringProperty('已声明 layoutPlan 时必填：根据 review_layout_plan 的原始请求与实际操作，说明目标关系未被替换、方案如何落地、保持约束如何实现；存在缺项应先修改，不能用意图声明代替实现证据。仅源码判断，不声称视觉已验证。'),
           evidence: stringProperty('仅 outcome=already_satisfied 时填写：说明已读取和验证的当前源码证据。')
         }, ['summary']),
         lifecycle: { completesRun: true },
@@ -1264,6 +1327,9 @@ export class ClineCodingAgentAdapter implements CodingAgentPort {
             }
             if (newSourceIds.size > 0 && !spatialScopeValidated) {
               throw new Error(`本轮新增了 ${newSourceIds.size} 个源码元素，finish 前必须调用 validate_spatial_scope 校验其参照容器`);
+            }
+            if (layoutPlan && (reviewedLayoutVersion !== mutationVersion || !input.layoutAssessment?.trim())) {
+              throw new Error('请先调用 review_layout_plan 核对最新源码操作，再在 finish.layoutAssessment 中说明实际实现与方案的对应关系');
             }
             const validation = await workspace.validate();
             const commit = await workspace.commit(input.summary, {

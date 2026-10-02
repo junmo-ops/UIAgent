@@ -354,7 +354,7 @@ export function compactElementSource(outerHtml: string, maxHtmlChars = 4_000): s
   )].slice(0, 40);
   return [
     `domText: ${JSON.stringify(domText)}`,
-    'visibilityNote: domText 仅表示源码中存在文字，不代表元素在渲染后可见；完成时的内置工作区校验会检查静态裁剪风险。',
+    'visibilityNote: domText 仅表示源码中存在文字，不代表元素在渲染后可见；工作区校验不等于真实浏览器的可见性或裁切验证。',
     `rawTextSegments: ${JSON.stringify(rawTextSegments)}`,
     'sourceNote: compactHtml 是删除 style、折叠空白且可能截断的结构摘要，不能用作精确替换原文；rawTextSegments 仅是去除首尾空白的文本片段。纯文字修改优先按实际文字元素 sourceId 使用 set_element_text；需要 HTML 精确替换时先读取完整原始源码。',
     `styleClasses: ${JSON.stringify(styleClasses)}`,
@@ -365,14 +365,19 @@ export function compactElementSource(outerHtml: string, maxHtmlChars = 4_000): s
 export const LAYOUT_PROPERTIES = CAPTURED_LAYOUT_PROPERTIES;
 
 export const COMPACT_TARGET_LAYOUT_PROPERTIES = new Set([
+  'box-sizing', 'padding-top', 'padding-right', 'padding-bottom', 'padding-left',
+  'border-top-width', 'border-right-width', 'border-bottom-width', 'border-left-width',
   'display', 'position', 'width', 'height', 'min-width', 'min-height', 'max-width', 'max-height',
-  'overflow', 'overflow-x', 'overflow-y', 'flex-direction', 'flex-wrap', 'flex-grow', 'flex-shrink',
-  'align-items', 'justify-content', 'gap', 'grid-template-columns', 'grid-auto-flow'
+  'overflow', 'overflow-x', 'overflow-y', 'flex-direction', 'flex-wrap', 'flex-basis', 'flex-grow', 'flex-shrink',
+  'align-items', 'justify-content', 'gap', 'grid-template-columns', 'grid-template-rows', 'grid-auto-flow', 'grid-column', 'grid-row'
 ]);
 
 export const COMPACT_CONTEXT_LAYOUT_PROPERTIES = new Set([
-  'display', 'position', 'width', 'height', 'overflow', 'flex-direction', 'flex-wrap',
-  'align-items', 'justify-content', 'gap', 'grid-template-columns'
+  'box-sizing', 'padding-top', 'padding-right', 'padding-bottom', 'padding-left',
+  'border-top-width', 'border-right-width', 'border-bottom-width', 'border-left-width',
+  'display', 'position', 'width', 'height', 'min-width', 'max-width', 'min-height', 'max-height',
+  'overflow', 'overflow-x', 'overflow-y', 'flex-direction', 'flex-wrap', 'flex-basis', 'flex-shrink',
+  'align-items', 'justify-content', 'gap', 'grid-template-columns', 'grid-template-rows', 'grid-auto-flow', 'grid-column', 'grid-row'
 ]);
 
 export function extractCapturedLayoutIndex(html: string): { html: string; layoutIndex: CapturedLayoutIndex } {

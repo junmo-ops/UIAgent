@@ -1,7 +1,7 @@
 import { readServiceConfig, type ServiceConfig } from './configuration/service-config';
 import { createModelRegistry } from './configuration/model-registry';
 import { SkillRegistry } from './skills/registry';
-import { readWorkspaceStorageConfig } from './storage/config';
+import { readWorkspaceStorageConfig, type WorkspaceStorageConfig } from './storage/config';
 import { WorkspaceStorageError } from './storage/s3-workspace-storage';
 import { zValidator } from '@hono/zod-validator';
 import { fetchWorkspaceResource, resourceErrorCode } from './workspace/resource-fetch';
@@ -58,10 +58,12 @@ export function createApp(
   providedAuthenticator?: Authenticator,
   providedAssistantRouter?: AssistantRouterPort,
   providedAssistantChat?: AssistantChatPort,
-  providedConfig?: ServiceConfig
+  providedConfig?: ServiceConfig,
+  providedStorageConfig?: WorkspaceStorageConfig,
+  providedSkills?: SkillRegistry
 ) {
   const config = providedConfig ?? readServiceConfig();
-  const storageConfig = readWorkspaceStorageConfig();
+  const storageConfig = providedStorageConfig ?? readWorkspaceStorageConfig();
   if (storageConfig.mode === 's3' && !providedWorkspaceStore?.persistence?.ready) {
     throw new Error('S3 模式必须通过已完成恢复的存储实例启动');
   }
@@ -93,7 +95,7 @@ export function createApp(
       return undefined;
     }
   })();
-  const skills = new SkillRegistry();
+  const skills = providedSkills ?? new SkillRegistry();
   for (const issue of skills.issues) console.warn('[skills] Disabled package:', issue);
   const models = createModelRegistry(config, env, skills, {
     chat: providedAssistantChat, router: providedAssistantRouter, coding: providedCodingAgent
