@@ -10,7 +10,6 @@
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
-    "@ai-sdk/openai": "4.0.78",
     "@ai-sdk/openai-compatible": "3.0.27",
     "@ui-agent/contracts": "workspace:*",
     "ai": "^7.0.58",

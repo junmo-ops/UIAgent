@@ -17,7 +17,7 @@ export default defineConfig({
     name: 'UI需求助手',
     description: '在页面上说出需求，直观看到修改效果。',
     version: extensionPackage.version,
-    permissions: ['activeTab', 'scripting', 'sidePanel', 'storage', 'downloads'],
+    permissions: ['identity', 'activeTab', 'scripting', 'sidePanel', 'storage', 'downloads'],
     host_permissions: [...new Set([serviceHostPermission, 'http://*/*', 'https://*/*'])],
     web_accessible_resources: [{ resources: ['icons/logo.svg'], matches: ['http://*/*', 'https://*/*'] }],
     icons: { 16: '/icons/16.png', 32: '/icons/32.png', 48: '/icons/48.png', 128: '/icons/128.png' },

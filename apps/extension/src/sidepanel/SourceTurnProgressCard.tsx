@@ -15,7 +15,9 @@ function elapsed(start: string, end: number): string {
   return seconds < 60 ? `${seconds} 秒` : `${Math.floor(seconds / 60)} 分 ${seconds % 60} 秒`;
 }
 
-export function SourceTurnProgressCard({ progress }: { progress: SourceTurnTranscript }) {
+export function SourceTurnProgressCard({ progress, defaultExpanded = false }: { progress: SourceTurnTranscript; defaultExpanded?: boolean }) {
+  const [expanded, setExpanded] = useState(defaultExpanded);
+  useEffect(() => setExpanded(defaultExpanded), [defaultExpanded, progress.turnId]);
   const [now, setNow] = useState(Date.now);
   const active = progress.status === 'running' || progress.status === 'cancelling';
   useEffect(() => {
@@ -59,7 +61,7 @@ export function SourceTurnProgressCard({ progress }: { progress: SourceTurnTrans
             : progress.execution === 'model' && progress.message.includes('繁忙') ? '服务繁忙，等待重试…'
               : '正在思考…'}
       </AgentWorkingStatus>
-    </> : hasProcess && <details className="agent-activity-disclosure">
+    </> : hasProcess && <details className="agent-activity-disclosure" open={expanded} onToggle={event => setExpanded(event.currentTarget.open)}>
       <summary>用时 {duration}<svg className="agent-activity-chevron" viewBox="0 0 16 16" aria-hidden="true"><path d="m6 4 4 4-4 4" /></svg></summary>
       {content}
     </details>}

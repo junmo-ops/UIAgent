@@ -37,7 +37,7 @@ export interface AssistantChatAgentFactoryInput {
   apiKey: string;
   baseUrl: string;
   enableThinking?: boolean;
-  apiProtocol?: 'chat-completions' | 'responses';
+  apiProtocol?: 'chat-completions';
   systemPrompt: string;
   maxIterations: number;
   tools?: readonly AgentTool<any, any>[];
@@ -51,7 +51,7 @@ export interface ClineAssistantChatOptions {
   skills?: SkillProvider;
   baseUrl: string;
   enableThinking?: boolean;
-  apiProtocol?: 'chat-completions' | 'responses';
+  apiProtocol?: 'chat-completions';
   apiKey: string;
   modelName: string;
   factory?: AssistantChatAgentFactory;

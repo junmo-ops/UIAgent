@@ -1,0 +1,15 @@
+{
+  "baseUrl": "http://one-account-gateway.paasuat.cmbchina.cn",
+  "clientId": "填写应用注册获得的-clientId",
+  "callbackUrl": "https://ui-agent-dev.paas.cmbchina.cn/v1/auth/sso/callback",
+  "extensionIds": ["aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"],
+  "centerPublicKey": "填写对应环境认证中心公钥-65字节非压缩点的Base64或Hex",
+  "idTokenAlgorithm": "填写行内确认的JWT-header-alg",
+  "issuer": "",
+  "scope": "",
+  "tenantId": "ui-agent-dev",
+  "signatureFormat": "raw",
+  "sm2UserId": "1234567812345678",
+  "sessionTtlSeconds": 28800,
+  "previewTtlSeconds": 300
+}

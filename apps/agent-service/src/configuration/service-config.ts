@@ -14,13 +14,22 @@ const schema = z.object({
       id: z.string().regex(/^[a-z0-9][a-z0-9-]{0,63}$/).refine(id => id !== 'default'),
       label: text, baseUrl: httpUrl, name: text, providerLabel: text,
       apiKeyEnv: z.string().regex(/^[A-Z][A-Z0-9_]*$/), enableThinking: z.boolean().optional(),
-      apiProtocol: z.enum(['chat-completions', 'responses']).optional()
-    }).strict().refine(item => item.apiProtocol !== 'responses' || item.enableThinking === undefined,
-      'Responses 不支持 enableThinking，请使用模型的推理设置')).optional(),
+      apiProtocol: z.literal('chat-completions').optional()
+    }).strict()).optional(),
     edit: z.object({ maxIterations: positiveInteger, maxOutputTokens: positiveInteger }).strict(),
     router: z.object({ maxIterations: positiveInteger.max(5) }).strict()
   }).strict(),
   auth: z.object({ mode: z.enum(['auto', 'installation', 'development', 'external']),
+    sso: z.object({
+      baseUrl: httpUrl, clientId: text, callbackUrl: httpUrl,
+      extensionIds: z.array(z.string().regex(/^[a-p]{32}$/)).min(1),
+      centerPublicKey: text, idTokenAlgorithm: text, issuer: z.string().default(''),
+      scope: z.string().default(''), tenantId: text,
+      signatureFormat: z.enum(['raw', 'der']).default('raw'),
+      sm2UserId: text.default('1234567812345678'),
+      sessionTtlSeconds: positiveInteger.max(86400).default(28800),
+      previewTtlSeconds: positiveInteger.max(3600).default(300)
+    }).strict().optional(),
     installation: z.object({ tenantId: text, tokenTtlSeconds: positiveInteger, previewTokenTtlSeconds: positiveInteger }).strict(),
     development: z.object({ userId: text, tenantId: text }).strict()
   }).strict(),

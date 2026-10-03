@@ -1,3 +1,4 @@
+import { SsoAuthenticator } from './auth/sso-authenticator';
 import { readServiceConfig, type ServiceConfig } from './configuration/service-config';
 import { createModelRegistry } from './configuration/model-registry';
 import { SkillRegistry } from './skills/registry';
@@ -222,6 +223,8 @@ export function createApp(
     .use('/v1/models', authenticate)
     .use('/v1/auth/installations/refresh', authenticate)
     .use('/v1/auth/me', authenticate)
+    .use('/v1/auth/sso/legacy-workspaces', authenticate)
+    .use('/v1/auth/sso/bind-installation', authenticate)
     .use('/workspaces/*', authenticate)
     .use('/logs', authenticate)
     .use('/v1/logs', authenticate)
@@ -236,7 +239,9 @@ export function createApp(
     .use('/v1/workspaces/:workspaceId', persistMutation)
     .use('/v1/workspaces/:workspaceId/*', persistMutation)
     .get('/ready', c => c.json({ ready: workspaceStore.persistence?.healthy ?? true }, (workspaceStore.persistence?.healthy ?? true) ? 200 : 503))
-    .get('/v1/auth/me', c => c.json(c.get('principal')))
+    .get('/v1/auth/config', c => { c.header('Cache-Control','no-store'); return c.json({mode:authenticator.mode,ready:!authenticator.configurationError,message:authenticator.configurationError}); })
+    .route('/v1/auth/sso', authenticator instanceof SsoAuthenticator ? authenticator.routes() : new Hono().all('*',c=>c.json({message:'行内登录尚未配置'},503)))
+    .get('/v1/auth/me', c => { const {sessionId: _sessionId, ...identity}=c.get('principal'); c.header('Cache-Control','no-store'); return c.json(identity); })
     .get('/v1/skills', c => c.json({ skills: skills.list(), pythonAvailable: skills.pythonAvailable }))
     .get('/logs', c => c.html(logPageHtml))
     .get('/v1/logs', c => c.json(logStore.list()))
@@ -290,6 +295,36 @@ export function createApp(
       return credential
         ? c.json(installationCredentialSchema.parse(credential))
         : c.json({ code: 'INSTALLATION_REFRESH_UNAVAILABLE', message: '当前身份不能续期' }, 409);
+    })
+    .post('/v1/auth/sso/legacy-workspaces', async c => {
+      if (!(authenticator instanceof SsoAuthenticator)) return c.json({message:'需要行内登录'},403);
+      const input = await c.req.json().catch(()=>null);
+      if (typeof input?.installationToken !== 'string' || input.installationToken.length>8192) return c.json({message:'旧身份凭证无效'},400);
+      const legacy=createAuthenticator({...config.auth,mode:'installation'},env);
+      const previous=await legacy.authenticate(new Request('https://local.invalid',{headers:{authorization:`Bearer ${input.installationToken}`}}));
+      if(previous?.identityType!=='installation') return c.json({message:'旧安装身份已过期或签名密钥不匹配，请联系管理员处理'},403);
+      const result=workspaceStore.list({limit:100},previous);
+      return c.json({items:result.items.map(item=>({workspaceId:item.workspaceId,title:item.title})),total:result.total});
+    })
+    .post('/v1/auth/sso/bind-installation', async c => {
+      if (!(authenticator instanceof SsoAuthenticator)) return c.json({message:'需要行内登录'},403);
+      const input = await c.req.json().catch(()=>null);
+      if (typeof input?.installationToken !== 'string' || input.installationToken.length>8192 || !Array.isArray(input.workspaceIds)
+        || input.workspaceIds.length>100 || input.workspaceIds.some((id:unknown)=>typeof id!=='string'||!/^[0-9a-f-]{36}$/i.test(id))) return c.json({message:'关联参数无效'},400);
+      const legacy=createAuthenticator({...config.auth,mode:'installation'},env);
+      const previous=await legacy.authenticate(new Request('https://local.invalid',{headers:{authorization:`Bearer ${input.installationToken}`}}));
+      if(previous?.identityType!=='installation') return c.json({message:'旧安装身份无效'},403);
+      const principal=c.get('principal');const results:{workspaceId:string;ok:boolean}[]=[];
+      for(const id of new Set<string>(input.workspaceIds)) {
+        try {
+          if(sourceTurns.has(id)) throw new Error('副本正在修改');
+          if(workspaceStore.owns(id,principal)) {results.push({workspaceId:id,ok:true});continue;}
+          const bind=()=>workspaceStore.bindInstallationOwner(id,previous,principal);
+          if(workspaceStore.persistence) await workspaceStore.persistence.run(id,bind);else bind();
+          results.push({workspaceId:id,ok:true});
+        } catch {results.push({workspaceId:id,ok:false});}
+      }
+      return c.json({results});
     })
     .get('/v1/models', c => c.json(models.catalog()))
     .post('/v1/assistant/turns', zValidator('json', assistantTurnRequestSchema), async c => {

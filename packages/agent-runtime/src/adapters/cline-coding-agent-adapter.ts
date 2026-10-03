@@ -290,7 +290,7 @@ export interface ClineAgentFactoryInput {
   apiKey: string;
   baseUrl: string;
   enableThinking?: boolean;
-  apiProtocol?: 'chat-completions' | 'responses';
+  apiProtocol?: 'chat-completions';
   systemPrompt: string;
   tools: readonly AgentTool<any, any>[];
   maxIterations: number;
@@ -303,7 +303,7 @@ export interface ClineCodingAgentOptions {
   skills?: SkillProvider;
   baseUrl: string;
   enableThinking?: boolean;
-  apiProtocol?: 'chat-completions' | 'responses';
+  apiProtocol?: 'chat-completions';
   apiKey: string;
   modelName: string;
   maxIterations?: number;

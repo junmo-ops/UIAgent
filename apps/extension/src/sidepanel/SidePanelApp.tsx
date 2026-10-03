@@ -31,6 +31,8 @@ import { SourceTurnProgressCard } from './SourceTurnProgressCard';
 import { AgentThinkingPlaceholder } from './AgentWorkingStatus';
 import { SkillPanel, SkillIcon } from './SkillPanel';
 import { useSkillPreferences } from './use-skill-preferences';
+import { SettingsPanel } from './SettingsPanel';
+import { useUserPreferences } from './use-user-preferences';
 import { useModelChoice } from './use-model-choice';
 import { MarkdownMessage } from './MarkdownMessage';
 import { createSourceTurnResultHandler } from './source-turn-result';
@@ -59,10 +61,11 @@ interface ActiveWorkspace extends SourceWorkspaceInfo {
   tabId: number;
   sourceTabId?: number;
 }
-type IconName = 'sparkle' | 'target' | 'edit' | 'snapshot' | 'undo' | 'redo' | 'reset' | 'upload' | 'arrow' | 'stop' | 'back' | 'history' | 'logs' | 'userId' | 'newChat' | 'search' | 'trash' | 'close';
+type IconName = 'settings' | 'sparkle' | 'target' | 'edit' | 'snapshot' | 'undo' | 'redo' | 'reset' | 'upload' | 'arrow' | 'stop' | 'back' | 'history' | 'logs' | 'userId' | 'newChat' | 'search' | 'trash' | 'close';
 
 function UiIcon({ name }: { name: IconName }) {
   const paths: Record<IconName, React.ReactNode> = {
+    settings: <><path d="m9 3-.6 2.4-2 .9-2.2-.7-2 3.4 1.7 1.7v2.6L2.2 15l2 3.4 2.2-.7 2 .9L9 21h4l.6-2.4 2-.9 2.2.7 2-3.4-1.7-1.7v-2.6L19.8 9l-2-3.4-2.2.7-2-.9L13 3Z"/><circle cx="11" cy="12" r="3"/></>,
     search: <><circle cx="10.5" cy="10.5" r="6.5" /><path d="m16 16 5 5" /></>,
     trash: <><path d="M4 6h16M9 6V3h6v3M6 6l1 15h10l1-15M10 10v7M14 10v7" /></>,
     close: <path d="m6 6 12 12M18 6 6 18" />,
@@ -148,6 +151,9 @@ export function SidePanelApp() {
   const copyingUserIdRef = useRef(false);
   const [instruction, setInstruction] = useState('');
   const [skills, setSkills] = useState<Array<{ id: string; displayName?: string; defaultEnabled?: boolean; description: string; version: string; scripts: Array<{ runtime: 'node' | 'python'; available: boolean }> }>>([]);
+  const [settingsOpen, setSettingsOpen] = useState(false);
+  const settingsButtonRef = useRef<HTMLButtonElement>(null);
+  const closeSettings = () => { setSettingsOpen(false); settingsButtonRef.current?.focus(); };
   const [skillsOpen, setSkillsOpen] = useState(false);
   const [skillReload, setSkillReload] = useState(0);
   const [skillsLoading, setSkillsLoading] = useState(true);
@@ -208,6 +214,7 @@ export function SidePanelApp() {
   const busy = snapshotBusy || assistantBusy || conversationLoading || Boolean(activeSourceTurn) || Boolean(sourceWorkspace && !sessionReady);
   const skillPreferences = useSkillPreferences(serviceUrl, initialization === 'ready' && !skillsLoading && !skillLoadError, skills);
   const modelChoice = useModelChoice(serviceUrl, initialization === 'ready');
+  const preferences = useUserPreferences(serviceUrl, initialization === 'ready');
   useEffect(() => {
     if (initialization !== 'ready') return;
     const controller = new AbortController();
@@ -1112,6 +1119,10 @@ export function SidePanelApp() {
   return (
     <main className="panel">
       {feedbackHolder}
+      {settingsOpen && <SettingsPanel serviceUrl={serviceUrl} preferences={preferences} model={modelChoice}
+        busy={busy} isAdmin={isAdmin} onClose={closeSettings} onCopyId={() => void copyUserId()}
+        onLogs={() => void openLogs()} onUpdate={setAvailableUpdate}
+        />}
       {conversationsOpen && <section className="history-panel" aria-label="历史会话"
         onKeyDown={event => { if (event.key === 'Escape' && !conversationLoading) { event.stopPropagation(); closeConversations(); } }}>
         <header className="history-header">
@@ -1130,7 +1141,7 @@ export function SidePanelApp() {
           <div className="conversation-preview-messages">
             {historyPreview.entries.length === 0 && <p className="history-empty">还没有消息</p>}
             {historyPreview.entries.map(entry => <div key={entry.id} className={`bubble ${entry.role}`}>
-              {entry.progress && <SourceTurnProgressCard progress={entry.progress} />}
+              {entry.progress && <SourceTurnProgressCard defaultExpanded={preferences.value.expandProcess} progress={entry.progress} />}
               <MarkdownMessage text={entry.text} />
             </div>)}
           </div>
@@ -1167,7 +1178,7 @@ export function SidePanelApp() {
         disabledIds={skillPreferences.disabledIds} saving={skillPreferences.saving}
         onToggle={(id, checked) => void skillPreferences.toggle(id, checked)} onClose={closeSkills}
         onRetry={() => { setSkillReload(value => value + 1); skillPreferences.retry(); }} />}
-      <section className="workspace" hidden={conversationsOpen || skillsOpen}>
+      <section className="workspace" hidden={conversationsOpen || skillsOpen || settingsOpen}>
         <header className="conversation-header">
           <div className="conversation-heading">
             <h1 title={sourceWorkspace ? conversationTitle : undefined}>{sourceWorkspace ? conversationTitle : 'UI需求助手'}</h1>
@@ -1203,7 +1214,7 @@ export function SidePanelApp() {
               && pendingClarification?.clarificationId === entry.clarification.clarificationId;
             return (
               <div key={entry.id} className={`bubble ${entry.role}${entry.clarification ? ' clarification' : ''}${restoredMessageIdsRef.current.has(entry.id) ? ' is-restored' : ''}`}>
-                {entry.role === 'assistant' && entry.progress && <SourceTurnProgressCard progress={entry.progress} />}
+                {entry.role === 'assistant' && entry.progress && <SourceTurnProgressCard defaultExpanded={preferences.value.expandProcess} progress={entry.progress} />}
                 {entry.role === 'assistant' && !entry.clarification && entry.id !== streamingAnswerId
                   ? (
                       <MarkdownMessage text={entry.text} />
@@ -1237,7 +1248,7 @@ export function SidePanelApp() {
           {sourceWorkspace && sourceProgress?.workspaceId === sourceWorkspace.workspaceId
             && !chat.some(entry => entry.progress?.turnId === sourceProgress.turnId)
             && (snapshotBusy || !busy) ? (
-            <SourceTurnProgressCard key={sourceProgress.turnId} progress={sourceProgress} />
+            <SourceTurnProgressCard defaultExpanded={preferences.value.expandProcess} key={sourceProgress.turnId} progress={sourceProgress} />
           ) : sourceWorkspace && assistantBusy && !streamingAnswerId ? (
             <AgentThinkingPlaceholder />
           ) : snapshotBusy && sourceWorkspace && (
@@ -1298,7 +1309,12 @@ export function SidePanelApp() {
                 ? '选择一个方案，或直接补充你的要求…'
                 : '请从上方选择一个方案'
               : '可以直接提问，也可以描述希望怎样修改页面…'}
-            onPressEnter={event => { if (!event.shiftKey) { event.preventDefault(); void submit(); } }}
+            onPressEnter={event => {
+              if (event.nativeEvent.isComposing || event.keyCode === 229 || event.shiftKey || event.altKey) return;
+              const shouldSend = preferences.value.sendShortcut === 'modifier-enter'
+                ? event.ctrlKey || event.metaKey : !event.ctrlKey && !event.metaKey;
+              if (shouldSend) { event.preventDefault(); void submit(); }
+            }}
           />
           <div className="composer-toolbar">
             <Select className="composer-model-select" aria-label="选择模型" size="small" variant="borderless"
@@ -1353,15 +1369,15 @@ export function SidePanelApp() {
 
       <nav className="side-tools" aria-label="辅助工具">
         <Tooltip title="技能" placement="left"><button type="button" ref={skillButtonRef} aria-label="技能" aria-pressed={skillsOpen}
-          onClick={() => { if (skillsOpen) closeSkills(); else { setConversationsOpen(false); setSkillsOpen(true); } }}><SkillIcon /></button></Tooltip>
+          onClick={() => { setSettingsOpen(false); if (skillsOpen) closeSkills(); else { setConversationsOpen(false); setSkillsOpen(true); } }}><SkillIcon /></button></Tooltip>
         <Tooltip title="历史会话" placement="left"><button type="button" aria-label="历史会话"
-          ref={historyButtonRef} disabled={!sourceWorkspace} aria-pressed={conversationsOpen} onClick={() => conversationsOpen ? closeConversations() : void openConversations()}><UiIcon name="history" /></button></Tooltip>
+          ref={historyButtonRef} disabled={!sourceWorkspace} aria-pressed={conversationsOpen} onClick={() => { setSettingsOpen(false); conversationsOpen ? closeConversations() : void openConversations(); }}><UiIcon name="history" /></button></Tooltip>
         <Tooltip title="副本管理" placement="left"><button type="button" aria-label="副本管理" onClick={() => void openWorkspaceManager()}><UiIcon name="snapshot" /></button></Tooltip>
         {sourceWorkspace?.sourceTabId && <Tooltip title="返回原页面" placement="left"><button type="button" aria-label="返回原页面" disabled={busy}
           onClick={() => void returnToSource()}><UiIcon name="back" /></button></Tooltip>}
         <div className="side-tools-spacer" />
-        <Tooltip title="复制用户 ID" placement="left"><button type="button" aria-label="复制用户 ID" onClick={() => void copyUserId()}><UiIcon name="userId" /></button></Tooltip>
-        {isAdmin && <Tooltip title="运行日志" placement="left"><button type="button" aria-label="运行日志" onClick={() => void openLogs()}><UiIcon name="logs" /></button></Tooltip>}
+        <Tooltip title="设置" placement="left"><button type="button" ref={settingsButtonRef} aria-label="设置" aria-pressed={settingsOpen}
+          onClick={() => { if (settingsOpen) closeSettings(); else { setSkillsOpen(false); setConversationsOpen(false); setSettingsOpen(true); } }}><UiIcon name="settings" /></button></Tooltip>
       </nav>
       <Modal
         title={`必须更新UI需求助手至 v${availableUpdate?.version ?? ''}`}

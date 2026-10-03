@@ -15,6 +15,12 @@ export function useModelChoice(serviceUrl: string, enabled: boolean) {
     setReady(false); setError(''); keyRef.current = '';
     if (!enabled) return;
     const controller = new AbortController();
+    let defaultId = 'default';
+    const changed = (changes: Record<string, { newValue?: unknown }>, area: string) => {
+      const change = changes[keyRef.current];
+      if (area === 'local' && change) setId(typeof change.newValue === 'string' ? change.newValue : defaultId);
+    };
+    browser.storage.onChanged.addListener(changed);
     void (async () => {
       const base = serviceUrl.replace(/\/$/, '');
       const [response, identityResponse] = await Promise.all([
@@ -23,6 +29,7 @@ export function useModelChoice(serviceUrl: string, enabled: boolean) {
       ]);
       if (!response.ok || !identityResponse.ok) throw new Error('模型列表加载失败，请重试');
       const catalog = modelCatalogSchema.parse(await response.json());
+      defaultId = catalog.defaultId;
       const identity = await identityResponse.json();
       if (typeof identity.userId !== 'string' || !identity.userId) throw new Error('用户身份读取失败');
       const key = `model-choice:${JSON.stringify([base, identity.tenantId ?? '', identity.userId])}`;
@@ -35,7 +42,7 @@ export function useModelChoice(serviceUrl: string, enabled: boolean) {
         [...catalog.models, { id: choice, label: '原模型已移除，请重新选择', name: '', available: false }]);
       setReady(true);
     })().catch(cause => { if (!controller.signal.aborted) setError(cause instanceof Error ? cause.message : '模型列表加载失败'); });
-    return () => { controller.abort(); keyRef.current = ''; };
+    return () => { controller.abort(); keyRef.current = ''; browser.storage.onChanged.removeListener(changed); };
   }, [serviceUrl, enabled, attempt]);
   const choose = async (value: string) => {
     if (!ready || saving || !keyRef.current || !models.some(model => model.id === value && model.available)) return;

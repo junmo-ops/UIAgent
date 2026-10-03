@@ -102,7 +102,7 @@ export interface AgentOptions {
   apiKey?: string;
   baseUrl?: string;
   enableThinking?: boolean;
-  apiProtocol?: 'chat-completions' | 'responses';
+  apiProtocol?: 'chat-completions';
   headers?: Record<string, string>;
   systemPrompt?: string;
   tools?: readonly AgentTool<any, any>[];

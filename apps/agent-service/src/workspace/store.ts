@@ -352,6 +352,13 @@ export class SourceWorkspaceStore {
     }
   }
 
+  bindInstallationOwner(workspaceId: string, previous: WorkspaceOwner, next: WorkspaceOwner): void {
+    const directory = this.storage.workspacePath(workspaceId);
+    const manifest = this.storage.readManifest(directory);
+    if (manifest.ownerId !== previous.userId || manifest.tenantId !== previous.tenantId) throw new Error('副本不属于旧安装身份');
+    this.storage.writeManifest(directory, { ...manifest, ownerId:next.userId, tenantId:next.tenantId });
+  }
+
   rename(workspaceId: string, title: string): ManagedSourceWorkspace {
     const normalized = title.trim();
     if (!normalized || normalized.length > 200) throw new Error('副本名称长度必须为 1-200 个字符');

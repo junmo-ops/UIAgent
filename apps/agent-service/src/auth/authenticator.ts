@@ -1,3 +1,4 @@
+import { SsoAuthenticator } from './sso-authenticator';
 import type { ServiceConfig } from '../configuration/service-config';
 import { createHmac, randomUUID, timingSafeEqual } from 'node:crypto';
 
@@ -5,6 +6,8 @@ export interface AuthPrincipal {
   userId: string;
   tenantId: string;
   roles: string[];
+  displayName?: string;
+  sessionId?: string;
   identityType?: 'development' | 'installation' | 'external';
 }
 
@@ -193,13 +196,10 @@ export function createAuthenticator(config: ServiceConfig['auth'], env: NodeJS.P
     return { mode: 'development', authenticate: () => principal };
   }
 
-  // Production identity providers are injected through this port. Until an adapter is
-  // configured, fail closed instead of trusting a user ID supplied by the client.
-  return {
-    mode: 'external',
-    configurationError: '生产环境尚未配置身份提供方',
-    authenticate: () => undefined
-  };
+  if (!config.sso) return { mode:'external', configurationError:'请配置 auth.sso 后启用行内登录', authenticate:()=>undefined };
+  try { return new SsoAuthenticator(config.sso, env); }
+  catch { return { mode:'external', configurationError:'行内登录配置不完整或密钥格式无效', authenticate:()=>undefined }; }
+
 }
 
 export function staticAuthenticator(principal: AuthPrincipal): Authenticator {

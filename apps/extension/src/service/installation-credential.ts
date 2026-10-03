@@ -81,3 +81,8 @@ export function getInstallationAccessToken(requestUrl: string): Promise<string |
   pending.set(origin, task);
   return task;
 }
+
+// Read only; migration must never mint a replacement installation identity.
+export async function getExistingInstallationCredential(origin:string) {
+  return (await credentialsItem.getValue())[origin];
+}

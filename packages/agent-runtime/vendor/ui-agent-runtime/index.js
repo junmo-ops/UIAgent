@@ -2,7 +2,6 @@
 import { randomUUID } from 'node:crypto';
 import { setTimeout as delay } from 'node:timers/promises';
 import { createOpenAICompatible } from '@ai-sdk/openai-compatible';
-import { createOpenAI } from '@ai-sdk/openai';
 import { jsonSchema, streamText, stepCountIs } from 'ai';
 
 const asError = value => value instanceof Error ? value : new Error(String(value));
@@ -61,8 +60,7 @@ export class Agent {
   constructor(config) {
     if (!['openai-compatible', 'deepseek'].includes(config.providerId)) throw new Error('Unsupported provider');
     if (!config.modelId || !config.baseUrl) throw new Error('modelId and baseUrl are required');
-    if (config.apiProtocol && !['chat-completions', 'responses'].includes(config.apiProtocol)) throw new Error('Unsupported API protocol');
-    if (config.apiProtocol === 'responses' && config.enableThinking !== undefined) throw new Error('Responses does not support enableThinking');
+    if (config.apiProtocol && config.apiProtocol !== 'chat-completions') throw new Error('Unsupported API protocol');
     this.config = config;
     this.listeners = new Set();
   }
@@ -160,10 +158,7 @@ export class Agent {
       messages, usage, finishReason, diagnostics: { ...diagnostics, durationMs: Date.now() - runtimeStarted,
         status, finishReason, ...(error ? { error: errorInfo(error) } : {}) }, ...(error ? { error } : {}) });
     try {
-      const useResponses = this.config.apiProtocol === 'responses';
-      const provider = useResponses
-        ? createOpenAI({ apiKey: this.config.apiKey, baseURL: this.config.baseUrl, headers: this.config.headers })
-        : createOpenAICompatible({ name: 'ui-agent', apiKey: this.config.apiKey,
+      const provider = createOpenAICompatible({ name: 'ui-agent', apiKey: this.config.apiKey,
         baseURL: this.config.baseUrl, headers: this.config.headers,
         ...(typeof this.config.enableThinking === 'boolean' ? {
           fetch: (url, init) => {
@@ -196,11 +191,7 @@ export class Agent {
         let stream;
         for (;;) {
           try {
-            stream = streamText({ model: useResponses ? provider.responses(this.config.modelId) : provider.chatModel(this.config.modelId),
-              // Keep conversation state locally; SDK carries encrypted reasoning between tool rounds.
-              // Existing tool schemas have optional fields, so retain local validation instead of strict API schemas.
-              ...(useResponses ? { providerOptions: { openai: { store: false, strictJsonSchema: false,
-                include: ['reasoning.encrypted_content'] } } } : {}),
+            stream = streamText({ model: provider.chatModel(this.config.modelId),
               system: this.config.systemPrompt, messages, tools, maxOutputTokens: outputBudget, toolChoice,
               stopWhen: stepCountIs(1), abortSignal: controller.signal });
             for await (const event of stream.fullStream) {
