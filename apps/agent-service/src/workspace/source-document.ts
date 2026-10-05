@@ -16,10 +16,34 @@ export function normalizeStructureSearchText(value: string): string {
   return value.toLocaleLowerCase().replace(/[\s\u00a0]+/g, '');
 }
 
+export function currentSourceStructure(nodes: StructureNode[], sourceId: string, limit = 32): Record<string, unknown> {
+  const node = nodes.find(item => item.sourceId === sourceId);
+  if (!node) return { sourceId, available: false };
+  const parent = nodes.find(item => item.sourceId === node.parentSourceId);
+  const childSourceIds = node.childrenSourceIds.slice(0, limit);
+  return {
+    evidence: 'current-source-order-not-visual-order',
+    sourceId,
+    parentSourceId: node.parentSourceId ?? null,
+    indexInParent: parent ? parent.childrenSourceIds.indexOf(sourceId) : null,
+    childCount: node.childrenSourceIds.length,
+    childSourceIds,
+    omittedChildCount: node.childrenSourceIds.length - childSourceIds.length
+  };
+}
+
 export function structureNeighborhood(nodes: StructureNode[], sourceId: string): Record<string, unknown> {
   const node = nodes.find(item => item.sourceId === sourceId);
   if (!node) return { sourceId };
   const parent = node.parentSourceId ? nodes.find(item => item.sourceId === node.parentSourceId) : undefined;
+  const ancestors: string[] = [];
+  const visited = new Set([sourceId]);
+  let ancestor = parent;
+  while (ancestor && !visited.has(ancestor.sourceId)) {
+    visited.add(ancestor.sourceId);
+    ancestors.push(`${ancestor.sourceId}<${ancestor.tag}>`);
+    ancestor = nodes.find(item => item.sourceId === ancestor?.parentSourceId);
+  }
   const siblings = parent?.childrenSourceIds
     .filter(candidate => candidate !== sourceId)
     .map(candidate => nodes.find(item => item.sourceId === candidate))
@@ -32,8 +56,14 @@ export function structureNeighborhood(nodes: StructureNode[], sourceId: string):
     role: node.role,
     text: node.text,
     classes: node.classes.slice(0, 12),
+    // Output budget only: retain the nearest path, explicitly marking a
+    // missing prefix rather than treating a depth as a layout boundary.
+    ancestorPath: ancestors.slice(0, 32).reverse(),
+    omittedAncestorCount: Math.max(0, ancestors.length - 32),
     parent: parent ? { sourceId: parent.sourceId, tag: parent.tag, text: parent.text, role: parent.role } : undefined,
     children: node.childrenSourceIds.slice(0, 12),
+    childCount: node.childrenSourceIds.length,
+    omittedChildCount: Math.max(0, node.childrenSourceIds.length - 12),
     siblings
   };
 }

@@ -2,10 +2,12 @@ import { StyleProvider } from '@ant-design/cssinjs';
 import * as AntDesign from 'antd';
 import React from 'react';
 import { createRoot, type Root } from 'react-dom/client';
+import { AnchoredPanel } from './anchored-panel';
 
 const MODULE_ELEMENT_NAME = 'ui-agent-module';
 const MODULE_NAME_PATTERN = /^[a-z][a-z0-9-]{0,79}$/;
-type ModuleFactory = (context: Readonly<{ React: typeof React; antd: typeof AntDesign }>) => React.ComponentType | React.ReactElement;
+const ui = Object.freeze({ AnchoredPanel });
+type ModuleFactory = (context: Readonly<{ React: typeof React; antd: typeof AntDesign; ui: typeof ui }>) => React.ComponentType | React.ReactElement;
 type RuntimeApi = { define(name: string, factory: ModuleFactory): void };
 declare global { interface Window { UIAgent?: RuntimeApi } }
 
@@ -53,7 +55,7 @@ class UiAgentModuleElement extends HTMLElement {
     }
     this.root ??= createRoot(this);
     try {
-      const output = factory(Object.freeze({ React, antd: AntDesign }));
+      const output = factory(Object.freeze({ React, antd: AntDesign, ui }));
       const content = React.isValidElement(output) ? output
         : typeof output === 'function' ? React.createElement(output)
         : (() => { throw new Error('模块 factory 必须返回 React 组件或元素'); })();

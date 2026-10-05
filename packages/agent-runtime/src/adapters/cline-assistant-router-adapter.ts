@@ -1,4 +1,6 @@
-import { Agent, createTool, type AgentRunResult, type AgentTool } from '../../vendor/ui-agent-runtime/index.js';
+import { createValidatedTool as createTool } from './validated-tool';
+import { RESPONSE_LANGUAGE_INSTRUCTIONS } from './response-language-instructions';
+import { Agent, type AgentRunResult, type AgentTool } from '../../vendor/ui-agent-runtime/index.js';
 import {
   type AssistantTurnRequest,
   type ClarificationOption
@@ -15,17 +17,21 @@ const stringProperty = (description: string): Record<string, unknown> => ({ type
 
 const ROUTER_RULES = [
   '你是 UI 助手的意图路由与普通问答 Agent。你必须且只能调用一个终止工具。',
+  RESPONSE_LANGUAGE_INSTRUCTIONS,
   '根据用户真实语义和最近对话判断，不得使用关键词匹配，不得因为当前存在页面或选区就默认用户想修改页面。',
   '用户明确要求改变页面内容、结构、样式、布局或交互时调用 edit_page。edit_page 只形成完整修改意图，本 Agent 没有任何 DOM 或源码工具。',
+  'routingState 是服务端提供的本轮执行事实：此时尚未调用编辑 Agent，也未读取本轮源码。不能声称编辑 Agent 已查找、已失败或目标不存在。历史回复不是当前源码证据；目标能从请求和对话识别时交给 edit_page 实际定位，不让用户确认尚未执行的查找结果。',
   '当 context.hasWorkspace=true 时，用户以用户故事、验收条件或结构化业务规则描述当前页面期望呈现的状态和交互，也属于页面修改意图；不要因为表达没有使用命令式动词就降级为 chat。目标范围明确且可在静态副本中示意时调用 edit_page。',
   '若这类需求包含静态副本无法真实承载的业务能力，例如服务端数据筛选、接口调用、权限校验、浏览器持久化或跨页面状态，则调用 clarify，说明可以制作哪些页面交互示意、不能承诺哪些真实业务效果；不得把它路由为 chat，也不得假装已实现真实业务能力。',
   '用户在咨询知识、讨论方案、询问原因或进行日常对话，并未要求实际改变当前页面时调用 chat。',
   '询问当前页面内容、已有功能、模块含义或分析改进建议也调用 chat。context.workspaceId 存在时，聊天 Agent 可按需只读查询副本源码；不必要求用户粘贴完整页面，也不要为了读取页面而调用 edit_page。实时浏览器状态不在此读取能力内。',
-  '如果一句话既可能是讨论也可能是执行修改，或者修改目标、范围会显著影响结果且无法从上下文确定，调用 clarify。',
+  '是否执行修改、期望效果或授权范围存在实质歧义时调用 clarify。仅缺少节点标识或尚未读取页面不属于需求歧义：页面定位由编辑 Agent 先读取源码完成；读取后仍有多个合理目标或关键关系不明确时，它会在修改前澄清。',
   '若用户要求修改，但 context.hasWorkspace=false，应调用 clarify，明确告知需先点击“进入副本编辑”；不要询问一个系统无法直接执行的确认动作。',
-  '若修改只可能针对具体局部元素但 context.hasSelection=false，应调用 clarify；若用户清楚要求修改整个副本，则可使用 workspace 范围。',
-  '若当前输入是对上一条澄清问题的回答，应结合最近对话恢复完整意图，不要只转发孤立答案。',
+  '已有副本时，未选区不等于目标不明确。用户明确要求修改，且描述了可从页面结构或内容识别的目标，即使 context.hasSelection=false 也调用 edit_page，targetScope=workspace。workspace 只是读取与定位上下文，不授权修改整页；必须保留用户指定的局部边界。无法从用户原文和对话恢复目标的孤立指代仍应 clarify，不猜测对象。',
+  '若当前输入是对上一条澄清问题的回答，应结合最近对话恢复原任务和已确认约束。回答只补全原任务尚未确定的信息，不自动改变任务的交付目标；除非用户明确取消、改为咨询或要求文档，原来的页面修改需求仍应交给 edit_page。不要只转发孤立答案。',
+  '先判断用户要求的行动（修改、问答或澄清），再选择可选技能。技能目录中的能力不是用户的新要求；不能因为技能能整理需求，就把已确认的页面修改替换成需求文档。没有适用技能时省略 skillId，不改变行动。',
   'edit_page.instruction 只忠实整理用户原文、已确认的对话要求和选区指代，不替用户新增约束。未明确要求的风格一致性、组件复用、尺寸、布局、功能范围不能写成用户要求；也不能删掉用户明确提出的要求。新增模块的默认组件策略由编辑 Agent 执行，不在转述中追加“保持原页面风格”等偏好。',
+  '修改参照当前选区或其相邻区域时，targetScope=selection；明确修改其它可定位区域时用 workspace。选择 workspace 不表示当前选区消失，选区仍可作为参考，但不能替代用户明确指定的其它目标。',
   '可从上下文确定的指代可以补全；影响结果且尚未确认的语义歧义应 clarify，不把自行猜测的实现方案包装成需求。平台能力限制不是用户要求，不得以补全为由静默缩减需求。',
   'chat 只表示交给独立的聊天 Agent 回答，不要在调用工具前输出答案。',
   '不要输出隐藏推理过程。'
@@ -41,6 +47,7 @@ export interface AssistantRouterAgentFactoryInput {
   apiKey: string;
   baseUrl: string;
   enableThinking?: boolean;
+  reasoningEffort?: 'none' | 'low' | 'high' | 'max';
   apiProtocol?: 'chat-completions';
   systemPrompt: string;
   tools: readonly AgentTool<any, any>[];
@@ -55,6 +62,7 @@ export interface ClineAssistantRouterOptions {
   skills?: SkillProvider;
   baseUrl: string;
   enableThinking?: boolean;
+  reasoningEffort?: 'none' | 'low' | 'high' | 'max';
   apiProtocol?: 'chat-completions';
   apiKey: string;
   modelName: string;
@@ -75,6 +83,7 @@ export class ClineAssistantRouterAdapter implements AssistantRouterPort {
       apiKey: input.apiKey,
       baseUrl: input.baseUrl,
       enableThinking: input.enableThinking,
+      reasoningEffort: input.reasoningEffort,
       apiProtocol: input.apiProtocol,
       systemPrompt: input.systemPrompt,
       tools: input.tools,
@@ -88,7 +97,7 @@ export class ClineAssistantRouterAdapter implements AssistantRouterPort {
     let completion: AssistantRouteResult | undefined;
     const catalog = (this.options.skills?.list() ?? []).filter(skill => request.disabledSkillIds
       ? !request.disabledSkillIds.includes(skill.id) : skill.defaultEnabled !== false);
-    const skillProperty = { type: 'string', description: '可选主技能 ID，只在用途匹配时选择；用户指定时沿用。' };
+    const skillProperty = { type: 'string', description: '默认省略。仅当用户指定，或任务确实需要技能描述中的专门流程时选择；页面存在、主题相关或可能有用不足以启用。' };
     const chooseSkill = (id?: string) => {
       const selectedId = request.skillId ?? id;
       if (!selectedId) return {};
@@ -113,7 +122,7 @@ export class ClineAssistantRouterAdapter implements AssistantRouterPort {
         description: '把明确的页面修改需求交给受控源码编辑 Agent。',
         inputSchema: objectSchema({
           instruction: stringProperty('忠实整理用户原文与已确认对话，仅补全必要指代；不新增风格、尺寸、布局或功能约束，不静默缩减需求。'),
-          targetScope: { type: 'string', enum: ['selection', 'workspace'] },
+          targetScope: { type: 'string', enum: ['selection', 'workspace'], description: 'selection 使用当前选区；workspace 从当前副本读取并定位用户描述的目标，不代表授权修改整页。未选区但目标描述明确时使用 workspace。' },
           skillId: skillProperty
         }, ['instruction', 'targetScope']),
         lifecycle: { completesRun: true },
@@ -162,12 +171,16 @@ export class ClineAssistantRouterAdapter implements AssistantRouterPort {
         apiKey: this.options.apiKey,
         baseUrl: this.options.baseUrl,
       enableThinking: this.options.enableThinking,
+        reasoningEffort: this.options.reasoningEffort,
       apiProtocol: this.options.apiProtocol,
-        systemPrompt: `${ROUTER_RULES}\n技能只补充任务流程，不改变用户意图或页面权限。根据描述选择匹配的一个主技能，在 chat/edit_page 中传 skillId；无适用项可省略。目录：${JSON.stringify(catalog)}`,
+        systemPrompt: `${ROUTER_RULES}\n技能只补充任务流程，不改变用户意图或页面权限。默认不启用技能；用户指定时沿用，否则仅在本次任务确实需要目录中描述的专门流程时传 skillId。普通内容概述或直接修改不因页面、风格、需求等主题相关就附加流程，不能用技能扩展用户未要求的分析或交付物。目录：${JSON.stringify(catalog)}`,
         tools,
         maxIterations: this.maxIterations
       });
-      const result = await agent.run(JSON.stringify(request));
+      const result = await agent.run(JSON.stringify({
+        ...request,
+        routingState: { stage: 'before-editor', currentTurnSourceInspected: false }
+      }));
       return completion ?? {
         kind: 'failed',
         code: 'ASSISTANT_ROUTER_INCOMPLETE',

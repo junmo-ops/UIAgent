@@ -25,7 +25,7 @@ let storageMode = 'local';
 async function startService() {
   let bootLog = '';
   service = spawn(process.execPath, [...(process.env.UIAGENT_REAL_MODEL ? ['--env-file=' + resolve(repo, 'apps/agent-service/.env')] : []), '--import', resolve(repo, 'apps/agent-service/node_modules/tsx/dist/loader.mjs'), resolve(repo, process.env.UIAGENT_REAL_MODEL ? 'tooling/e2e/real-service.mjs' : 'tooling/e2e/service.mjs')], {
-    cwd: repo, env: { ...cleanEnv(), REAL_MODEL_ID: process.env.REAL_MODEL_ID ?? 'default', E2E_DATA_DIR: resolve(temp, 'data'), E2E_PORT: serviceUrl ? new URL(serviceUrl).port : '0', E2E_STORAGE: storageMode, E2E_RUN_ID: runId, E2E_COS_CONFIG: process.env.E2E_COS_CONFIG, ...(storageMode === 'cos' ? Object.fromEntries(['ACCESS_KEY_ID', 'SECRET_ACCESS_KEY', 'SESSION_TOKEN'].map(name => [`WORKSPACE_S3_${name}`, process.env[`WORKSPACE_S3_${name}`]])) : {}) }, stdio: ['ignore', 'pipe', 'pipe']
+    cwd: repo, env: { ...cleanEnv(), REAL_MODEL_ID: process.env.REAL_MODEL_ID ?? 'default', REAL_EDIT_REASONING_FILE: process.env.REAL_EDIT_REASONING_FILE, E2E_DATA_DIR: resolve(temp, 'data'), E2E_PORT: serviceUrl ? new URL(serviceUrl).port : '0', E2E_STORAGE: storageMode, E2E_RUN_ID: runId, E2E_COS_CONFIG: process.env.E2E_COS_CONFIG, ...(storageMode === 'cos' ? Object.fromEntries(['ACCESS_KEY_ID', 'SECRET_ACCESS_KEY', 'SESSION_TOKEN'].map(name => [`WORKSPACE_S3_${name}`, process.env[`WORKSPACE_S3_${name}`]])) : {}) }, stdio: ['ignore', 'pipe', 'pipe']
   });
   service.stdout.on('data', data => { serviceLog += data; bootLog += data; }); service.stderr.on('data', data => { serviceLog += data; bootLog += data; });
   await expect.poll(() => { if (service.exitCode !== null) throw new Error(`Test service exited: ${bootLog}`); return bootLog.match(/\{"port":(\d+)\}/)?.[1]; }, { timeout: 30000, message: 'Isolated service ready' }).toBeTruthy();
@@ -135,7 +135,7 @@ async function withPanel(layout, info, run) {
 }
 
 const configure = value => fetch(`${serviceUrl}/__e2e/config`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(value) });
-const state = async () => (await fetch(`${serviceUrl}/__e2e/state`)).json();
+const state = async () => (await fetch(`${serviceUrl}/__e2e/state`, {signal:AbortSignal.timeout(10000)})).json();
 const fill = async (panel, text) => { await expect.poll(() => panel.evaluate(`Boolean(document.querySelector('textarea'))`)).toBe(true); return panel.evaluate(`(() => { const input = document.querySelector('textarea'); Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, 'value').set.call(input, ${JSON.stringify(text)}); input.dispatchEvent(new Event('input', { bubbles: true })); })()`); };
 async function nativeClick(panel, selector) {
   const rect = await panel.evaluate(`(() => { const e = document.querySelector(${JSON.stringify(selector)}); e.scrollIntoView({ block: 'center' }); const r = e.getBoundingClientRect(); return { x: r.x + r.width/2, y: r.y + r.height/2 }; })()`);

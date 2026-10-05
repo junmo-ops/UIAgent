@@ -15,6 +15,8 @@ export interface CodingWorkspaceTools {
   searchText(query: string, path?: string): Promise<string>;
   readFile(path: string, startLine?: number, endLine?: number, startChar?: number, endChar?: number): Promise<string>;
   inspectElement(sourceId: string, options?: { detail?: 'compact' | 'full' }): Promise<string>;
+  /** Current authored HTML for independent review; omissions must be explicit. */
+  readElementSource?(sourceId: string): Promise<{ source: string; complete: boolean; omittedChars: number }>;
   queryStyleSymbols(symbols: string[], options?: { sourceId?: string; source?: 'all' | 'original' | 'overrides'; properties?: string[] }): Promise<string>;
   readStyleRule(className: string): Promise<string>;
   replaceText(path: string, search: string, replace: string): Promise<string>;
@@ -88,8 +90,28 @@ export interface CodingAgentStep {
   modelAttempts?: number;
 }
 
+export interface EditReasoning {
+  discovery: 'none' | 'low' | 'high' | 'max';
+  planning: 'none' | 'low' | 'high' | 'max';
+  execution: 'none' | 'low' | 'high' | 'max';
+  verification?: 'none' | 'low' | 'high' | 'max';
+  correction?: 'none' | 'low' | 'high' | 'max';
+  layoutExecution?: 'none' | 'low' | 'high' | 'max';
+}
+
 export interface CodingAgentCheckpoint {
+  commentaryLocalization?: {
+    modelCalls: number;
+    batches: Array<{ durationMs: number; status: 'translated' | 'fallback'; modelCalls: number }>;
+    originals: Array<{ modelCall: number; text: string; timestamp: string }>;
+  };
+  editMode?: import('@ui-agent/contracts').EditMode;
+  editPolicy?: { revision?: string; reasoning: EditReasoning; preMutationReads: number;
+    readLimits: Readonly<Record<string, number>>; sourceReviewEnabled?: boolean; reviewEffort: 'none' | 'low' | 'high'; maxReviews: number };
   runtime?: import('../../vendor/ui-agent-runtime/index.js').AgentRunDiagnostics;
+  sourceReviews?: Array<{ accepted: boolean; feedback: string; modelCalls: number; durationMs: number;
+    checks?: Array<{ requirement: string; sourceEvidence: string; status?: 'satisfied' | 'conflict' | 'unknown' }>;
+    runtime?: import('../../vendor/ui-agent-runtime/index.js').AgentRunDiagnostics }>;
   lifecycle?: {
     submissionMode: 'direct';
     intentDeclared: boolean;
@@ -97,6 +119,7 @@ export interface CodingAgentCheckpoint {
     completionAttempts: number;
     rollback: 'not_requested' | 'succeeded' | 'failed';
     selectedElementContextProvided?: boolean;
+    selectionContextMode?: 'target' | 'reference' | 'unavailable';
     preMutationReadCalls?: number;
     firstMutationAt?: string;
     firstMutationModelCall?: number;

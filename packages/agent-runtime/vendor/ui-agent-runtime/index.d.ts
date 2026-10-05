@@ -21,6 +21,8 @@ export interface AgentTool<TInput = unknown, TOutput = unknown> {
   name: string;
   description: string;
   inputSchema: Record<string, unknown>;
+  /** Resolve conditional requirements from current state; execution must still enforce them. */
+  resolveInputSchema?: (base: Record<string, unknown>) => Record<string, unknown>;
   lifecycle?: { completesRun?: boolean };
   /** Evaluated before every model call so tools can follow a generic workflow phase. */
   isAvailable?: (context: { iteration: number }) => boolean;
@@ -52,6 +54,7 @@ export interface AgentRunDiagnostics {
   requiredCompletionTool: boolean;
   continuationCount: number;
   outputLimitRecoveryCount?: number;
+  protocolRecoveryCount?: number;
   completionTool?: string;
   durationMs: number;
   status: string;
@@ -62,14 +65,19 @@ export interface AgentRunDiagnostics {
     startedAt: string;
     status: string;
     inputMessageCount: number;
+    systemPromptChars?: number;
+    inputMessageChars?: number;
+    toolSchemaChars?: number;
     availableTools?: string[];
     outputTextChars: number;
-    /** Effective per-call generation budget; smaller for output-stall recovery. */
+    /** Effective per-call generation budget; recovery may restore the configured limit. */
     outputBudget?: number;
     /** True when reported output tokens reached the effective generation budget. */
     outputBudgetReached?: boolean;
     toolChoice?: 'auto' | 'required';
     recoveringOutputLimit?: boolean;
+    reasoningEffort?: 'none' | 'low' | 'high' | 'max';
+    thinkingParameters?: { enable_thinking?: boolean; thinking_budget?: number; reasoning_effort?: string };
     reasoning?: string;
     reasoningTruncated?: boolean;
     firstOutputMs?: number;
@@ -102,6 +110,13 @@ export interface AgentOptions {
   apiKey?: string;
   baseUrl?: string;
   enableThinking?: boolean;
+  reasoningProvider?: 'deepseek' | 'qwen';
+  /** Explicit Chat Completions reasoning_effort; omitted for endpoints without this capability. */
+  reasoningEffort?: 'none' | 'low' | 'high' | 'max';
+  /** Evaluated once before each model call; configured phase policy only. */
+  resolveReasoningEffort?: () => 'none' | 'low' | 'high' | 'max';
+  /** Optional per-call budget; recovery and thinking may keep the configured limit. */
+  resolveMaxOutputTokens?: (context: { reasoningEffort?: 'none' | 'low' | 'high' | 'max'; recoveringOutputLimit: boolean }) => number;
   apiProtocol?: 'chat-completions';
   headers?: Record<string, string>;
   systemPrompt?: string;

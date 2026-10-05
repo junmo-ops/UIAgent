@@ -497,6 +497,8 @@ export function SidePanelApp() {
     if (!text || busy) return;
     if (!modelChoice.available) { setError('所选模型尚未就绪，请检查模型配置或重新选择。'); return; }
     const modelId = modelChoice.id;
+    if (!preferences.ready || preferences.saving) { setError('偏好设置尚未就绪，请稍后重试。'); return; }
+    const editMode = preferences.value.editMode;
     if (!skillPreferences.ready || skillPreferences.saving) { setError('技能设置尚未就绪，请打开技能面板检查。'); return; }
     const disabledSkillIds = [...skillPreferences.disabledIds];
     setSourceProgress(undefined);
@@ -519,6 +521,7 @@ export function SidePanelApp() {
       }
       const request = assistantTurnRequestSchema.parse({
         modelId,
+        editMode,
         protocolVersion: PROTOCOL_VERSION,
         turnId,
         traceId: crypto.randomUUID(),
@@ -608,7 +611,11 @@ export function SidePanelApp() {
         sourceWorkspace,
         finalOutcome.targetScope === 'selection' ? turnSelection?.selected.sourceId : undefined,
         turnId,
-        { modelId, replyToClarificationId, clarificationOptionId, originalInstruction: text, assistantTraceId: request.traceId, disabledSkillIds, skillId: finalOutcome.skillId, skillVersion: finalOutcome.skillVersion }
+        { modelId, editMode, replyToClarificationId, clarificationOptionId, originalInstruction: text,
+          userInstructionHistory: request.conversation.filter(entry => entry.role === 'user').map(entry => entry.text),
+          assistantTargetScope: finalOutcome.targetScope,
+          selectionContextSourceId: turnSelection?.selected.sourceId,
+          assistantTraceId: request.traceId, disabledSkillIds, skillId: finalOutcome.skillId, skillVersion: finalOutcome.skillVersion }
       );
     } catch (error) {
       if (assistantAbort.signal.aborted) {
@@ -734,7 +741,7 @@ export function SidePanelApp() {
     workspace: ActiveWorkspace,
     sourceId?: string,
     turnId = crypto.randomUUID(),
-    requestContext: Pick<SourceTurnRequest, 'modelId' | 'replyToClarificationId' | 'clarificationOptionId' | 'originalInstruction' | 'assistantTraceId' | 'skillId' | 'skillVersion' | 'disabledSkillIds'> = {}
+    requestContext: Pick<SourceTurnRequest, 'editMode' | 'modelId' | 'replyToClarificationId' | 'clarificationOptionId' | 'originalInstruction' | 'userInstructionHistory' | 'assistantTraceId' | 'assistantTargetScope' | 'selectionContextSourceId' | 'skillId' | 'skillVersion' | 'disabledSkillIds'> = {}
   ) => {
     setSnapshotBusy(true);
     let settled = false;
@@ -1277,25 +1284,52 @@ export function SidePanelApp() {
           </div>
         )}
 
-        {sourceWorkspace && <footer className="composer-shell">
-          <div className="composer-context-row">
+        {sourceWorkspace && <footer className="composer-dock">
+          <div className="composer-header">
+            <div className="composer-choices">
+            <Select className="composer-model-select" aria-label="选择模型" size="small" variant="borderless"
+              value={modelChoice.ready ? modelChoice.id : undefined} placeholder={modelChoice.error ? '模型加载失败' : '加载模型…'} loading={!modelChoice.ready && !modelChoice.error}
+              disabled={busy || !modelChoice.ready || modelChoice.saving}
+              onChange={value => void modelChoice.choose(value)}
+              placement="topLeft" popupMatchSelectWidth={220}
+              classNames={{ popup: { root: 'composer-model-menu' } }}
+              optionRender={option => <div className="model-option"><span>{option.label}</span>
+                {option.data.disabled && <small>请检查服务端是否已配置该模型及密钥</small>}</div>}
+              options={modelChoice.models.map(model => ({ value: model.id,
+                label: `${model.label}${model.available ? '' : '（未就绪）'}`, disabled: !model.available }))}
+            />
+            <Select className="composer-model-select composer-mode-select" aria-label="页面修改档位" size="small" variant="borderless"
+              value={preferences.value.editMode} disabled={!preferences.ready || preferences.saving}
+              labelRender={({ value }) => value === 'pro' ? 'Pro' : value === 'normal' ? 'Normal' : 'Fast'}
+              onChange={editMode => void preferences.update({ ...preferences.value, editMode })}
+              placement="topLeft" popupMatchSelectWidth={250}
+              classNames={{ popup: { root: 'composer-model-menu' } }}
+              optionRender={option => <div className="model-option"><span>{option.label}</span><small>{option.data.description}</small></div>}
+              options={[
+                { value: 'fast', label: 'Fast · 快速', description: '速度优先，适合简单修改和快速出稿' },
+                { value: 'normal', label: 'Normal · 均衡', description: '兼顾速度与细节，适合日常页面修改' },
+                { value: 'pro', label: 'Pro · 精细', description: '投入更多思考与核对，适合复杂修改，等待更久' }
+              ]}
+            />
+            </div>
+            <div className="history-actions" role="group" aria-label="选区与页面操作">
             <Tooltip title={selecting ? '在页面中点击目标元素；按 Esc 退出选择' : selection
               ? `当前选区：${selection.selected.tag} · ${selection.selected.text || '无文本内容'}。点击重选，按 Esc 取消选中`
               : '在副本页面中选择要修改的区域；页面问答无需选区'}>
-              <button type="button" className={`composer-selection${selection ? ' has-selection' : ''}`}
+              <button type="button" className={`composer-selection${selection ? ' has-selection' : ''}${selecting ? ' is-selecting' : ''}`}
                 disabled={busy || selecting} onClick={startSelection}
-                aria-label={selecting ? '正在选择区域' : selection ? '当前选区，点击重选' : '选择区域'}>
+                aria-pressed={Boolean(selection) || selecting}
+                aria-label={selecting ? '正在选择区域' : selection ? '当前选区，点击重选' : '选择区域'}
+                aria-description={selection ? `当前选区：${selection.selected.text || selection.selected.tag}` : undefined}>
                 <UiIcon name="target" />
-                <span>{selecting ? '选择中…' : selection ? selection.selected.text || selection.selected.tag : '选择区域'}</span>
-                {selection && !selecting && <span className="selection-reselect">重选</span>}
               </button>
             </Tooltip>
-            <div className="history-actions" role="group" aria-label="页面版本操作">
               <Tooltip title="撤销页面修改"><Button type="text" shape="circle" aria-label="撤销页面修改" disabled={!sourceWorkspace.canUndo || busy} icon={<UiIcon name="undo" />} onClick={() => history('undo')} /></Tooltip>
               <Tooltip title="重做页面修改"><Button type="text" shape="circle" aria-label="重做页面修改" disabled={!sourceWorkspace.canRedo || busy} icon={<UiIcon name="redo" />} onClick={() => history('redo')} /></Tooltip>
               <Tooltip title="恢复初始"><Button type="text" shape="circle" aria-label="恢复初始" disabled={!sourceWorkspace.canUndo || busy} icon={<UiIcon name="reset" />} onClick={() => history('reset')} /></Tooltip>
             </div>
           </div>
+          <div className="composer-shell">
           <Input.TextArea
             ref={composerRef}
             aria-label="提问或描述页面修改需求"
@@ -1308,7 +1342,7 @@ export function SidePanelApp() {
               ? pendingClarification.allowFreeText
                 ? '选择一个方案，或直接补充你的要求…'
                 : '请从上方选择一个方案'
-              : '可以直接提问，也可以描述希望怎样修改页面…'}
+              : '提问，或描述你想修改的内容…'}
             onPressEnter={event => {
               if (event.nativeEvent.isComposing || event.keyCode === 229 || event.shiftKey || event.altKey) return;
               const shouldSend = preferences.value.sendShortcut === 'modifier-enter'
@@ -1317,17 +1351,6 @@ export function SidePanelApp() {
             }}
           />
           <div className="composer-toolbar">
-            <Select className="composer-model-select" aria-label="选择模型" size="small" variant="borderless"
-              value={modelChoice.ready ? modelChoice.id : undefined} placeholder={modelChoice.error ? '模型加载失败' : '加载模型…'} loading={!modelChoice.ready && !modelChoice.error}
-              disabled={busy || !modelChoice.ready || modelChoice.saving}
-              onChange={value => void modelChoice.choose(value)}
-              placement="topLeft"
-              classNames={{ popup: { root: 'composer-model-menu' } }}
-              optionRender={option => <div className="model-option"><span>{option.label}</span>
-                {option.data.disabled && <small>请检查服务端是否已配置该模型及密钥</small>}</div>}
-              options={modelChoice.models.map(model => ({ value: model.id,
-                label: `${model.label}${model.available ? '' : '（未就绪）'}`, disabled: !model.available }))}
-            />
             {assistantBusy || sourceProgress && (sourceProgress.status === 'running' || sourceProgress.status === 'cancelling') ? (
               <Tooltip title={sourceProgress?.status === 'cancelling' ? '正在停止' : '停止生成'}>
                 <Button
@@ -1364,6 +1387,7 @@ export function SidePanelApp() {
           {modelChoice.error && <div className="composer-model-error" role="alert">
             <span>{modelChoice.error}</span><button type="button" disabled={busy} onClick={modelChoice.retry}>重试</button>
           </div>}
+          </div>
         </footer>}
       </section>
 

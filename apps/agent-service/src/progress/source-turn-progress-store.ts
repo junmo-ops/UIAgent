@@ -131,7 +131,12 @@ export class SourceTurnProgressStore {
     const timeline = [...(current.timeline ?? [])];
     const index = timeline.findIndex(previous => previous.id === item.id);
     if (index >= 0) timeline[index] = { ...item, timestamp: timeline[index]!.timestamp };
-    else timeline.push(item);
+    else {
+      timeline.push(item);
+      // Translated commentary can arrive after its tool result; retain the
+      // original event order instead of making it look like a later action.
+      timeline.sort((a, b) => Date.parse(a.timestamp) - Date.parse(b.timestamp));
+    }
     return { timeline: timeline.slice(-500), timelineTruncated: current.timelineTruncated || timeline.length > 500 };
   }
 
@@ -189,8 +194,8 @@ export class SourceTurnProgressStore {
         ...this.record(current, { id: `commentary-${event.modelCall}`, kind: 'commentary', text,
           timestamp: event.timestamp }),
         commentary: [...(current.commentary ?? []).filter(item => item.modelCall !== event.modelCall),
-          { modelCall: event.modelCall, text, timestamp: event.timestamp }].slice(-8),
-        updatedAt: event.timestamp });
+          { modelCall: event.modelCall, text, timestamp: event.timestamp }].sort((a, b) => a.modelCall - b.modelCall).slice(-8),
+        updatedAt: new Date(Math.max(Date.now(), Date.parse(current.updatedAt))).toISOString() });
       return;
     }
     if (event.type === 'coding-agent.persistence.updated') {

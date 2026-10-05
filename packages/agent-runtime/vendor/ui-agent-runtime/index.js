@@ -7,6 +7,8 @@ import { jsonSchema, streamText, stepCountIs } from 'ai';
 const asError = value => value instanceof Error ? value : new Error(String(value));
 const RATE_LIMIT_RETRY_LIMIT = 10;
 const RATE_LIMIT_DELAY_MS = 10_000;
+const isMalformedToolResponse = error => error?.name === 'AI_InvalidResponseDataError' &&
+  error.message === "Expected 'function.name' to be a string.";
 const outputStallError = () => Object.assign(
   new Error('模型未能完成修改计划，已停止本轮修改；请重试。'),
   { code: 'MODEL_OUTPUT_STALLED' }
@@ -79,9 +81,10 @@ export class Agent {
     let outputLimitRecoveryStreak = 0;
     let outputLimitRecoveryCount = 0;
     let rateLimitRetries = 0;
+    let protocolRecoveryCount = 0;
     const usage = {};
     const runtimeStarted = Date.now();
-    const diagnostics = { version: 1, runtimeRevision: '2026-10-02-tool-validation-v18',
+    const diagnostics = { version: 1, runtimeRevision: '2026-10-05-edit-modes-v32',
       apiProtocol: this.config.apiProtocol ?? 'chat-completions',
       countingBasis: 'model decision rounds; rate-limit request retries are recorded separately per call',
       maxIterations: this.config.maxIterations ?? 12, maxOutputTokens: this.config.maxOutputTokens,
@@ -107,19 +110,29 @@ export class Agent {
     let terminalToolError;
     // Scoped to this run and tool; unrelated reads do not erase a repeated failure.
     const validationFailures = new Map();
-    const runtimeTools = () => Object.fromEntries((this.config.tools ?? [])
-      .filter(tool => tool.isAvailable?.({ iteration: iterations }) !== false)
-      .map(tool => [tool.name, {
+    let toolSchemaChars = 0;
+    const runtimeTools = response => {
+      const specs = (this.config.tools ?? [])
+        .filter(tool => tool.isAvailable?.({ iteration: iterations }) !== false)
+        .map(tool => ({ ...tool, inputSchema: tool.resolveInputSchema?.(tool.inputSchema) ?? tool.inputSchema }));
+      toolSchemaChars = JSON.stringify(specs.map(tool => ({
+        name: tool.name, description: tool.description, inputSchema: tool.inputSchema
+      }))).length;
+      return Object.fromEntries(specs.map(tool => [tool.name, {
       description: tool.description,
       inputSchema: jsonSchema(tool.inputSchema),
       execute: (args, call) => {
+        // Count scheduling before the queue starts: a queued write is already
+        // unsafe to replay. Capture the response so late callbacks cannot join
+        // a later model decision.
+        response.scheduledTools++;
         const task = queue.then(async () => {
-          if (controller.signal.aborted) throw new Error('Run aborted');
+          if (controller.signal.aborted || response.closed) throw new Error('Run or model response aborted');
           if (terminalToolError) return { error: terminalToolError.message };
           if (completed) return { error: 'Run already completed; no further tools allowed' };
           const toolStarted = Date.now();
           const toolLog = { name: tool.name, toolCallId: call?.toolCallId, status: 'running' };
-          currentCall?.tools.push(toolLog);
+          response.call.tools.push(toolLog);
           this.emit({ type: 'tool-started', iteration: iterations,
             toolCall: { toolName: tool.name, toolCallId: call?.toolCallId } });
           try {
@@ -154,16 +167,35 @@ export class Agent {
         return task;
       }
     }]));
+    };
     const result = (status, error) => ({ agentId, runId, status, iterations, outputText,
       messages, usage, finishReason, diagnostics: { ...diagnostics, durationMs: Date.now() - runtimeStarted,
         status, finishReason, ...(error ? { error: errorInfo(error) } : {}) }, ...(error ? { error } : {}) });
     try {
       const provider = createOpenAICompatible({ name: 'ui-agent', apiKey: this.config.apiKey,
         baseURL: this.config.baseUrl, headers: this.config.headers,
-        ...(typeof this.config.enableThinking === 'boolean' ? {
+        ...(typeof this.config.enableThinking === 'boolean' || this.config.reasoningEffort !== undefined || this.config.resolveReasoningEffort ? {
           fetch: (url, init) => {
             if (typeof init?.body !== 'string') throw new Error('Expected JSON model request');
-            return fetch(url, { ...init, body: JSON.stringify({ ...JSON.parse(init.body), enable_thinking: this.config.enableThinking }) });
+            const body = JSON.parse(init.body);
+            // A non-thinking response has no reasoning. When an explicitly
+            // configured phase re-enables thinking, represent that absence as
+            // an empty field, while preserving every actual reasoning payload
+            // supplied by the SDK. Never reconstruct it from truncated logs.
+            if (this.config.reasoningProvider !== 'qwen' && this.config.resolveReasoningEffort && currentCall?.reasoningEffort !== 'none') {
+              body.messages = body.messages.map(message => message.role === 'assistant' && message.reasoning_content === undefined
+                ? { ...message, reasoning_content: '' } : message);
+            }
+            const effort = currentCall?.reasoningEffort;
+            // Qwen uses a thinking switch; do not send DeepSeek effort levels to it.
+            const thinking = this.config.reasoningProvider === 'qwen' && effort !== undefined
+              ? { enable_thinking: effort !== 'none', ...(effort !== 'none' ? {
+                  thinking_budget: Math.min(effort === 'low' ? 1024 : effort === 'high' ? 4096 : 8192,
+                    Math.max(1, Math.floor((currentCall.outputBudget ?? 8192) / 2))) } : {}) }
+              : { ...(typeof this.config.enableThinking === 'boolean' ? { enable_thinking: this.config.enableThinking } : {}),
+                  ...(effort !== undefined ? { reasoning_effort: effort } : {}) };
+            if (currentCall) currentCall.thinkingParameters = thinking;
+            return fetch(url, { ...init, body: JSON.stringify({ ...body, ...thinking }) });
           }
         } : {}) });
       this.emit({ type: 'run-started', iteration: 0 });
@@ -171,29 +203,42 @@ export class Agent {
         if (controller.signal.aborted) throw new Error('Run aborted');
         iterations += 1;
         const callStarted = Date.now();
-        const tools = runtimeTools();
+        const response = { controller: new AbortController(), scheduledTools: 0, closed: false, call: undefined };
+        const tools = runtimeTools(response);
         const recoveringOutputLimit = outputLimitRecoveryStreak > 0;
-        // Recovery also needs room for reasoning and a complete tool payload.
-        // Narrow the next action in the prompt, not the configured output budget.
-        const outputBudget = this.config.maxOutputTokens;
         // Thinking endpoints may reject forced tool choice. Recovery is guided
         // by the continuation message and bounded by the progress check below;
         // completion still requires the configured completion tool.
         const toolChoice = 'auto';
+        const reasoningEffort = this.config.resolveReasoningEffort?.() ?? this.config.reasoningEffort;
+        if (reasoningEffort !== undefined && !['none', 'low', 'high', 'max'].includes(reasoningEffort)) throw new Error('Unsupported reasoning effort');
+        const outputBudget = this.config.resolveMaxOutputTokens?.({ reasoningEffort, recoveringOutputLimit })
+          ?? this.config.maxOutputTokens;
+        if (outputBudget !== undefined && (!Number.isSafeInteger(outputBudget) || outputBudget < 1
+          || (this.config.maxOutputTokens !== undefined && outputBudget > this.config.maxOutputTokens))) {
+          throw new Error('Unsupported generation budget');
+        }
         currentCall = { modelCall: iterations, startedAt: new Date(callStarted).toISOString(),
           status: 'running', inputMessageCount: messages.length, availableTools: Object.keys(tools), outputTextChars: 0, tools: [],
-          outputBudget, toolChoice, recoveringOutputLimit };
+          // Counts only: do not duplicate page content or credentials in diagnostics.
+          systemPromptChars: (this.config.systemPrompt ?? '').length,
+          inputMessageChars: JSON.stringify(messages).length,
+          toolSchemaChars,
+          outputBudget, toolChoice, recoveringOutputLimit,
+          ...(reasoningEffort !== undefined ? { reasoningEffort } : {}) };
         diagnostics.calls.push(currentCall);
+        response.call = currentCall;
         this.emit({ type: 'model-call-updated', call: { modelCall: iterations, startedAt: currentCall.startedAt, status: 'running' } });
         let reasoning = '', reasoningTruncated = false;
         let calls = 0, inputErrors = 0, text = '';
         const reportedToolErrorIds = new Set();
         let stream;
+        let recoverProtocol = false;
         for (;;) {
           try {
             stream = streamText({ model: provider.chatModel(this.config.modelId),
               system: this.config.systemPrompt, messages, tools, maxOutputTokens: outputBudget, toolChoice,
-              stopWhen: stepCountIs(1), abortSignal: controller.signal });
+              stopWhen: stepCountIs(1), abortSignal: AbortSignal.any([controller.signal, response.controller.signal]) });
             for await (const event of stream.fullStream) {
               if (currentCall.firstOutputMs === undefined && ['text-delta', 'reasoning-delta', 'tool-call'].includes(event.type)) {
                 currentCall.firstOutputMs = Date.now() - callStarted;
@@ -262,6 +307,31 @@ export class Agent {
             }
             break;
           } catch (error) {
+            if (!controller.signal.aborted && isMalformedToolResponse(error)) {
+              response.closed = true;
+              response.controller.abort(error);
+              await queue;
+              // Retry only an unexecuted response, once per run, using a new
+              // decision from the last completed history. Never reconstruct
+              // missing tool names or replay previously applied mutations.
+              if (!controller.signal.aborted && !terminalToolError && !completed &&
+                protocolRecoveryCount === 0 && response.scheduledTools === 0 && calls === 0 && inputErrors === 0) {
+                protocolRecoveryCount++;
+                diagnostics.protocolRecoveryCount = protocolRecoveryCount;
+                diagnostics.continuationCount++;
+                currentCall.status = 'failed';
+                currentCall.durationMs = Date.now() - callStarted;
+                currentCall.error = errorInfo(error);
+                currentCall.continuationReason = 'malformed_tool_response_without_execution';
+                this.emit({ type: 'model-call-updated', call: { modelCall: iterations,
+                  startedAt: currentCall.startedAt, status: 'failed', durationMs: currentCall.durationMs,
+                  tools: currentCall.tools, error: currentCall.error } });
+                messages.push({ role: 'user', content: '刚才这一轮模型响应的工具协议不完整，未执行这一轮的任何工具。此前已完成的工具结果和修改仍然有效。请从已有结果继续，使用当前工具 schema 提交完整的工具名称和参数，不重复此前已经完成的修改；仍须完成原有校验和提交步骤。' });
+                recoverProtocol = true;
+                break;
+              }
+              throw error;
+            }
             // Only retry a rejected request, never replay a partially executed stream.
             if (controller.signal.aborted || !isOutputRateLimit(error) ||
               currentCall.firstOutputMs !== undefined || currentCall.tools.length) throw error;
@@ -284,7 +354,9 @@ export class Agent {
               startedAt: currentCall.startedAt, status: 'running', rateLimitWait: null } });
           }
         }
+        if (recoverProtocol) continue;
         await queue;
+        response.closed = true;
         if (terminalToolError) throw terminalToolError;
         finishReason = await stream.finishReason;
         currentCall.finishReason = finishReason;

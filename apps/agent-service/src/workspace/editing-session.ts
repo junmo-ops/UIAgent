@@ -16,6 +16,7 @@ export interface EditingSessionOptions {
   authorCssContent: string;
   unreadableStyleSources: string[];
   layoutIndex(): CapturedLayoutIndex;
+  viewport?: { width: number; height: number };
   currentRevision(): number;
   commit(files: WorkspaceFiles, summary: string): number;
   release(): void;
@@ -30,6 +31,13 @@ export function createEditingSession(session: EditingSessionOptions): CodingWork
     ? new Set<string>()
     : new Set(analyzeStaticVisibility(initial['index.html'], initial['snapshot.css']).map(staticVisibilityIssueKey));
   let closed = false;
+  const compileEditedModule = (source: string) => {
+    try { return compileModuleSource(source); }
+    catch (error) {
+      const detail = error instanceof Error ? error.message : String(error);
+      throw new Error(`${detail}；本次模块修改未写入，module.jsx 仍为调用前源码（${working['module.jsx'].length} 字符）。修正候选 JSX 后基于当前源码重试，不能匹配失败候选中的原文；样式须使用合法 JSX 表达，不能在模块文件追加裸 CSS。`);
+    }
+  };
   const writeHtml = (html: string): string => {
     validateHtml(html);
     const elementFingerprint = (element: Element): string => {
@@ -277,7 +285,7 @@ export function createEditingSession(session: EditingSessionOptions): CodingWork
       if (file === 'index.html') {
         identityResult = writeHtml(next);
       } else if (file === 'module.jsx') {
-        const compiled = compileModuleSource(next);
+        const compiled = compileEditedModule(next);
         working[file] = next;
         working['module.js'] = compiled;
       } else {
@@ -333,7 +341,7 @@ export function createEditingSession(session: EditingSessionOptions): CodingWork
       if (file === 'index.html') {
         identityResult = writeHtml(next);
       } else if (file === 'module.jsx') {
-        const compiled = compileModuleSource(next);
+        const compiled = compileEditedModule(next);
         working[file] = next;
         working['module.js'] = compiled;
       } else {

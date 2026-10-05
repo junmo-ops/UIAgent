@@ -3,7 +3,7 @@ import type { CodingAgentStep, CodingAgentCheckpoint } from './coding-agent-port
 import type { CodingWorkspaceTools } from './coding-agent-port';
 
 export type WorkspaceReadTools = Pick<CodingWorkspaceTools,
-  'listFiles' | 'queryWorkspaceStructure' | 'searchText' | 'readFile' | 'inspectElement'>;
+  'listFiles' | 'queryWorkspaceStructure' | 'searchText' | 'readFile' | 'inspectElement' | 'readElementSource'>;
 
 /** Server-authorized, immutable saved revision; no mutation capabilities. */
 export interface AssistantPageContext {

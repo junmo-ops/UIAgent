@@ -192,7 +192,11 @@ export const domOperationSchema = z.discriminatedUnion('kind', [
 ]);
 export type DomOperation = z.infer<typeof domOperationSchema>;
 
+export const editModeSchema = z.enum(['fast', 'normal', 'pro']);
+export type EditMode = z.infer<typeof editModeSchema>;
+
 export const sourceTurnRequestSchema = z.object({
+  editMode: editModeSchema.optional(),
   modelId: z.string().regex(/^[a-z0-9][a-z0-9-]{0,63}$/).optional(),
   disabledSkillIds: z.array(z.string().regex(/^[a-z0-9]+(?:-[a-z0-9]+)*$/).max(64)).max(1000).optional(),
   skillId: z.string().regex(/^[a-z0-9]+(?:-[a-z0-9]+)*$/).max(64).optional(),
@@ -205,8 +209,14 @@ export const sourceTurnRequestSchema = z.object({
   instruction: z.string().min(1).max(10_000),
   /** User text before assistant routing or clarification-context expansion. */
   originalInstruction: z.string().min(1).max(10_000).optional(),
+  /** Prior human messages from the routing conversation, without assistant rewrites. */
+  userInstructionHistory: z.array(z.string().min(1).max(10_000)).max(12).optional(),
   /** Trace of the assistant request that produced this editing instruction. */
   assistantTraceId: z.string().min(1).optional(),
+  /** Assistant routing choice, retained for diagnostics rather than edit authorization. */
+  assistantTargetScope: z.enum(['selection', 'workspace']).optional(),
+  /** Current UI selection as a reading reference, even when the edit targets elsewhere. */
+  selectionContextSourceId: z.string().min(1).max(100).optional(),
   sourceId: z.string().min(1).max(100).optional(),
   replyToClarificationId: z.string().uuid().optional(),
   clarificationOptionId: z.string().min(1).max(100).optional()
@@ -255,6 +265,7 @@ export const assistantConversationEntrySchema = z.object({
 export type AssistantConversationEntry = z.infer<typeof assistantConversationEntrySchema>;
 
 export const assistantTurnRequestSchema = z.object({
+  editMode: editModeSchema.optional(),
   modelId: z.string().regex(/^[a-z0-9][a-z0-9-]{0,63}$/).optional(),
   disabledSkillIds: z.array(z.string().regex(/^[a-z0-9]+(?:-[a-z0-9]+)*$/).max(64)).max(1000).optional(),
   skillId: z.string().regex(/^[a-z0-9]+(?:-[a-z0-9]+)*$/).max(64).optional(),

@@ -34,11 +34,12 @@ export function createModelRegistry(config: ServiceConfig, env: NodeJS.ProcessEn
         throw new Error(`模型 ${item.label} 未就绪，请在服务端配置 ${item.apiKeyEnv}`);
       }
       const options = { baseUrl: item.baseUrl, modelName: item.name, apiKey: apiKey ?? '',
-        enableThinking: item.enableThinking, apiProtocol: item.apiProtocol, skills };
+        enableThinking: item.enableThinking, reasoningEffort: item.reasoningEffort, apiProtocol: item.apiProtocol, skills };
       const agents = {
         chat: custom.chat ?? new ClineAssistantChatAdapter(options),
         router: custom.router ?? new ClineAssistantRouterAdapter({ ...options, ...config.model.router }),
-        coding: custom.coding ?? clineCodingAgentFromConfig({ ...options, ...config.model.edit })
+        coding: custom.coding ?? clineCodingAgentFromConfig({ ...options, ...config.model.edit, editReasoning: item.editReasoning,
+          reasoningProvider: item.providerLabel === 'qwen' ? 'qwen' : item.providerLabel === 'deepseek' ? 'deepseek' : undefined })
       };
       cache.set(id, agents);
       return agents;

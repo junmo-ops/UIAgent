@@ -650,7 +650,8 @@ export class SourceWorkspaceStore {
         authorRuleMode,
         authorCssContent: authorRuleMode ? this.authorCss(workspaceId) ?? '' : '',
         unreadableStyleSources: this.unreadableAuthorStyleSources(workspaceId),
-        layoutIndex: () => layout
+        layoutIndex: () => layout,
+        viewport: this.storage.readManifest(this.storage.workspacePath(workspaceId)).viewport
       })
     };
   }
@@ -671,6 +672,7 @@ export class SourceWorkspaceStore {
         authorCssContent: authorRuleMode ? this.authorCss(workspaceId) ?? '' : '',
         unreadableStyleSources: this.unreadableAuthorStyleSources(workspaceId),
         layoutIndex: () => this.capturedLayoutIndex(workspaceId),
+        viewport: this.storage.readManifest(workspaceDirectory).viewport,
         currentRevision: () => this.storage.readManifest(workspaceDirectory).revision,
         commit: (files, summary) => this.commitWorkingCopy(workspaceId, files, summary),
         release: () => { this.active.delete(workspaceId); }

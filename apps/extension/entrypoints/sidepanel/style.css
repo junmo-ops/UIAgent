@@ -111,31 +111,35 @@ button, textarea { font: inherit; }
 }
 
 
-.composer-context-row { display: flex; align-items: center; gap: 8px; margin-bottom: 10px; min-width: 0; }
+/* Selection shares the action strip; its context remains available in the tooltip. */
 .composer-selection {
+  position: relative;
   display: inline-flex;
   align-items: center;
-  gap: 6px;
-  min-width: 0;
-  max-width: 100%;
-  min-height: 30px;
-  padding: 4px 8px;
-  border: 1px solid var(--composer-line);
-  border-radius: 8px;
-  background: var(--composer-soft);
-  color: var(--composer-secondary);
-  font: inherit;
-  font-size: 12px;
+  justify-content: center;
+  flex: 0 0 26px;
+  width: 26px;
+  height: 28px;
+  padding: 0;
+  margin-right: 4px;
+  border: 0;
+  border-radius: 7px;
+  background: transparent;
+  color: #77716d;
   cursor: pointer;
 }
-.composer-selection.has-selection { border-color: #c9dcfa; background: #f2f7ff; color: #285b9e; }
-.composer-selection > .ui-icon { width: 14px; height: 14px; flex-shrink: 0; }
-.composer-selection > span:first-of-type { min-width: 0; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
-.composer-selection .selection-reselect { flex-shrink: 0; font-size: 11px; }
-.composer-selection:not(:disabled):hover { border-color: #9fc1fb; background: #edf4ff; }
+.composer-selection > .ui-icon { width: 16px; height: 16px; }
+.composer-selection.has-selection, .composer-selection.is-selecting { background: #edf4ff; color: #3274cf; }
+.composer-selection.has-selection::after {
+  content: ''; position: absolute; top: 3px; right: 3px;
+  width: 4px; height: 4px; border-radius: 50%; background: currentColor;
+}
+.composer-selection:not(:disabled):hover { background: #f2f0ee; color: #302c29; }
+.composer-selection.has-selection:not(:disabled):hover { background: #e1edff; color: #285b9e; }
 .composer-selection:disabled { cursor: default; opacity: .6; }
 .composer-selection:focus-visible, .starter-tasks button:focus-visible { outline: 2px solid #3b82f6; outline-offset: 2px; }
-.composer-context-row .history-actions { margin-left: auto; flex-shrink: 0; gap: 0; }
+.composer-header .history-actions { margin-left: auto; flex-shrink: 0; gap: 0; }
+.composer-header .history-actions .ant-btn { width: 26px; min-width: 26px; height: 28px; }
 
 .chat-list {
   min-height: 0;
@@ -609,20 +613,24 @@ button, textarea { font: inherit; }
 .composer-model-error span { min-width: 0; overflow-wrap: anywhere; }
 .composer-model-error button { flex-shrink: 0; padding: 4px; border: 0; background: none; color: inherit; font: inherit; text-decoration: underline; cursor: pointer; }
 
+.composer-dock { margin: 0 14px 14px; flex: 0 0 auto; min-width: 0; }
+.composer-header { display: flex; align-items: center; gap: 8px; min-width: 0; margin-bottom: 8px; }
+
+
 .composer-shell {
   --composer-line: #ebe8e5;
   --composer-soft: #faf9f8;
   --composer-secondary: #66615e;
   min-height: 112px;
-  margin: 0 14px 14px;
-  padding: 15px 15px 11px;
+  margin: 0;
+  padding: 13px 13px 10px;
   display: flex;
   flex-direction: column;
   justify-content: space-between;
   flex: 0 0 auto;
   background: #fff;
   border: 1px solid #dedcd9;
-  border-radius: 25px;
+  border-radius: 16px;
   box-shadow: 0 8px 30px rgba(34, 28, 24, .065);
   transition: border-color .18s ease, box-shadow .18s ease;
 }
@@ -660,7 +668,7 @@ button, textarea { font: inherit; }
   padding: 0 1px;
   display: flex;
   align-items: center;
-  justify-content: space-between;
+  justify-content: flex-end;
   gap: 14px;
 }
 
@@ -733,7 +741,8 @@ button, textarea { font: inherit; }
   .source-workspace-cta { margin: 0 9px 8px; }
   .source-workspace-primary > span { display: none; }
   .source-workspace-primary .ant-btn { width: 100%; }
-  .composer-shell { min-height: 106px; margin: 0 9px 9px; padding: 13px 12px 9px; }
+  .composer-dock { margin: 0 9px 9px; }
+  .composer-shell { min-height: 106px; padding: 12px 11px 9px; }
   .history-actions { gap: 2px; }
 }
 
@@ -762,3 +771,24 @@ button, textarea { font: inherit; }
 .settings-row .ant-switch { flex-shrink: 0; }
 .settings-actions { display: flex; gap: 8px; flex-wrap: wrap; }
 .settings-user-id, .settings-service { overflow-wrap: anywhere; }
+
+.composer-choices {
+  display: flex;
+  flex: 1 1 0;
+  flex-wrap: nowrap;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+.composer-choices .composer-model-select.ant-select {
+  flex: 0 1 104px;
+  width: 104px;
+  max-width: 100%;
+  padding-inline: 7px;
+  background: #f6f5f4;
+  border-radius: 8px;
+}
+.composer-choices .composer-mode-select.ant-select {
+  flex: 0 0 72px;
+  width: 72px;
+}

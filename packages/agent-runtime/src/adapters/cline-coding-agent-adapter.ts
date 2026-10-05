@@ -1,13 +1,17 @@
+import { createValidatedTool as createTool } from './validated-tool';
 import type { SkillProvider } from '../core/skill-port';
+import { reviewSourceImplementation, type SourceReviewResult } from './source-review';
 import { skillTools } from './skill-tools';
+import { createCommentaryLocalizer, needsCommentaryLocalization } from './commentary-localizer';
+import { editModePolicy } from './edit-mode-policy';
+import { RESPONSE_LANGUAGE_INSTRUCTIONS } from './response-language-instructions';
 import {
   Agent,
-  createTool as createRuntimeTool,
   type AgentRunResult,
   type AgentTool,
   type AgentToolContext
 } from '../../vendor/ui-agent-runtime/index.js';
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import {
   domOperationSchema,
   modelCallProgressSchema,
@@ -43,59 +47,179 @@ const stringProperty = (description: string): Record<string, unknown> => ({
   description
 });
 
+function summarizeLayoutChange(change: {
+  action: string; input: unknown; operationId: string; toolCallId?: string;
+}) {
+  let truncated = false;
+  const summarize = (value: unknown): unknown => {
+    // Original arguments remain in model history and the full source-step log.
+    // Retain small style edits and structural parameters; do not resend large
+    // JSX/HTML bodies or turn a partial code snippet into apparent evidence.
+    if (typeof value === 'string' && value.length > 240) {
+      truncated = true;
+      return { omitted: true, chars: value.length, sha256: createHash('sha256').update(value).digest('hex') };
+    }
+    if (Array.isArray(value)) return value.map(summarize);
+    if (value && typeof value === 'object') {
+      return Object.fromEntries(Object.entries(value).map(([key, child]) => [key, summarize(child)]));
+    }
+    return value;
+  };
+  const serialized = JSON.stringify(change.input);
+  const inputSummary = summarize(change.input);
+  return {
+    operationId: change.operationId, action: change.action, toolCallId: change.toolCallId,
+    inputChars: serialized.length, inputSha256: createHash('sha256').update(serialized).digest('hex'),
+    inputSummary, truncated
+  };
+}
+
 function boundedInspection(result: string, budget: number, seenLayout: Set<string>): string {
-  budget = Math.max(600, budget - 300); // Reserve headings and omission notices.
+  const maxChars = budget;
+  budget = Math.max(0, budget - 400); // Reserve headings and omission notices.
   const clip = (value: string, limit: number) => value.length <= limit ? value
     : `${value.slice(0, Math.max(0, limit - 40))}\n[本项已省略部分内容；按需定向读取]`;
   const lines = result.split('\n');
   const layoutLine = lines.find(line => line.startsWith('布局上下文: '));
+  const path = (lines.find(line => line.startsWith('结构路径: ')) ?? '').slice('结构路径: '.length)
+    .split(' > ').filter(Boolean);
+  const parents = new Map<string, string>();
+  const pathIds = path.map(node => node.split('<')[0]!);
+  pathIds.forEach((id, index) => { if (index) parents.set(id, pathIds[index - 1]!); });
+  const pathLimit = Math.floor(budget * 0.1);
+  const retainedPath = [...path];
+  const pathText = () => `结构路径: ${path.length > retainedPath.length ? `[前 ${path.length - retainedPath.length} 项已省略] > ` : ''}${retainedPath.join(' > ')}`;
+  // A deep path must keep the actual target end, not only distant ancestors.
+  while (retainedPath.length > 1 && pathText().length > pathLimit) retainedPath.shift();
   const sourceStart = result.indexOf('domText: ');
   const styleStart = result.indexOf('组件与样式上下文:');
   const source = [
-    clip(lines.find(line => line.startsWith('domText: ')) ?? '', Math.floor(budget * 0.08)),
-    clip(lines.find(line => line.startsWith('compactHtml: ')) ?? '', Math.floor(budget * 0.22))
+    clip(lines.find(line => line.startsWith('domText: ')) ?? '', Math.floor(budget * 0.07)),
+    clip(lines.find(line => line.startsWith('compactHtml: ')) ?? '', Math.floor(budget * 0.23))
   ].filter(Boolean).join('\n');
   const styles = styleStart >= 0 ? result.slice(styleStart, sourceStart >= 0 ? sourceStart : undefined) : '';
-  const layoutBudget = Math.floor(budget * 0.4);
+  const prefix = [
+    clip(lines[0] ?? '', 180),
+    path.length ? clip(pathText(), pathLimit) : '结构路径: 未提供',
+    '源码摘要（非精确原文；精确替换请按字符范围 read_file）：',
+    source,
+    clip(styles, Math.floor(budget * 0.15))
+  ].filter(Boolean).join('\n');
+  const layoutHeading = '布局上下文（捕获值不是修改后的渲染测量；inlineStyle 是当前源码声明；partial 或未列出的事实需按需读取，不能视为不存在）: ';
+  const omissionLimit = 200;
+  const layoutBudget = Math.max(2, maxChars - prefix.length - layoutHeading.length - omissionLimit - 3);
   const layout: Record<string, unknown> = {};
-  let omitted = 0;
+  const omissions: string[] = [];
+  const stripRepeatedNotes = (value: unknown): unknown => {
+    if (Array.isArray(value)) return value.map(stripRepeatedNotes);
+    if (!value || typeof value !== 'object') return value;
+    return Object.fromEntries(Object.entries(value).flatMap(([key, child]) => {
+      if (key === 'cascadeNote') return [];
+      if (key === 'layoutEvidence') return typeof child === 'string' && child.startsWith('unavailable')
+        ? [['layoutUnavailable', true]] : [];
+      return [[key, stripRepeatedNotes(child)]];
+    }));
+  };
+  const compactFact = (original: Record<string, unknown>, limit: number): Record<string, unknown> | undefined => {
+    const fact = stripRepeatedNotes(original) as Record<string, unknown>;
+    if (typeof fact.sourceId === 'string' && parents.has(fact.sourceId)) fact.parentSourceId = parents.get(fact.sourceId);
+    if (JSON.stringify(fact).length <= limit) return fact;
+    const node: Record<string, unknown> = {
+      sourceId: fact.sourceId, tag: fact.tag, parentSourceId: fact.parentSourceId, partial: true
+    };
+    if (JSON.stringify(node).length > limit) return undefined;
+    const add = (key: string, value: unknown) => {
+      if (value !== undefined && JSON.stringify({ ...node, [key]: value }).length <= limit) node[key] = value;
+    };
+    add('capturedRect', fact.capturedRect);
+    add('layoutUnavailable', fact.layoutUnavailable);
+    // Preserve layout mechanism before long dimensions or optional metadata.
+    const computed = (fact.computedLayout ?? {}) as Record<string, unknown>;
+    const properties = [...new Set(['display', 'position', 'overflow', 'overflow-x', 'overflow-y',
+      'box-sizing', 'width', 'height', 'flex-direction', 'flex-wrap', 'flex-basis', 'flex-shrink',
+      'grid-template-columns', 'grid-template-rows', 'grid-auto-flow', 'gap', ...Object.keys(computed)])];
+    for (const property of properties) {
+      if (computed[property] !== undefined) add('computedLayout', {
+        ...(node.computedLayout as Record<string, unknown> ?? {}), [property]: computed[property]
+      });
+    }
+    add('inlineStyle', fact.inlineStyle);
+    return node;
+  };
+  const append = (kind: string, node: unknown, array: boolean): boolean => {
+    const candidate = { ...layout, [kind]: array ? [...(layout[kind] as unknown[] ?? []), node] : node };
+    if (JSON.stringify(candidate).length > layoutBudget) return false;
+    layout[kind] = candidate[kind];
+    return true;
+  };
+  const available = () => Math.max(0, layoutBudget - JSON.stringify(layout).length - 40);
   if (layoutLine) {
     const facts = JSON.parse(layoutLine.slice('布局上下文: '.length)) as Record<string, unknown>;
-    for (const [kind, value] of Object.entries(facts)) {
+    if (facts.capturedViewport) append('capturedViewport', facts.capturedViewport, false);
+    // Keep current direct-child order separate from captured rectangles and
+    // verbose child style facts, which may consume the remaining budget.
+    if (facts.currentSourceStructure && !append('currentSourceStructure', facts.currentSourceStructure, false)) {
+      omissions.push('currentSourceStructure（预算不足）');
+    }
+    // Keep measured neighboring rectangles before verbose target/ancestor
+    // styles consume the budget. These are evidence, not placement decisions.
+    const neighborGroups = ['children', 'siblings'] as const;
+    const neighbors = Object.fromEntries(neighborGroups.map(kind => [kind,
+      (Array.isArray(facts[kind]) ? facts[kind] : []) as Record<string, unknown>[]
+    ])) as Record<typeof neighborGroups[number], Record<string, unknown>[]>;
+    const capturedNeighborRects: Record<typeof neighborGroups[number], Record<string, unknown>[]> = {
+      children: [], siblings: []
+    };
+    const neighborBudget = Math.floor(available() * 0.25);
+    // Interleave groups so a long child list cannot hide all sibling evidence.
+    for (let index = 0; index < Math.max(neighbors.children.length, neighbors.siblings.length); index++) {
+      for (const kind of neighborGroups) {
+        const original = neighbors[kind][index];
+        if (!original) continue;
+        const rect = { sourceId: original.sourceId,
+          parentSourceId: typeof original.sourceId === 'string'
+            ? parents.get(original.sourceId) ?? original.parentSourceId : original.parentSourceId,
+          ...(original.capturedRect ? { capturedRect: original.capturedRect } : { capturedRectUnavailable: true }) };
+        const candidate = { ...capturedNeighborRects, [kind]: [...capturedNeighborRects[kind], rect] };
+        if (JSON.stringify(candidate).length <= neighborBudget) capturedNeighborRects[kind].push(rect);
+      }
+    }
+    if (neighbors.children.length || neighbors.siblings.length) {
+      const geometry = { ...capturedNeighborRects,
+        omittedChildren: neighbors.children.length - capturedNeighborRects.children.length,
+        omittedSiblings: neighbors.siblings.length - capturedNeighborRects.siblings.length };
+      if (!append('capturedNeighborRects', geometry, false)) omissions.push('capturedNeighborRects（预算不足）');
+    }
+    const ancestors = (Array.isArray(facts.ancestors) ? facts.ancestors : []) as Record<string, unknown>[];
+    if (facts.target && typeof facts.target === 'object') {
+      const targetLimit = Math.min(available(), Math.max(220, Math.floor(available() * (ancestors.length ? 0.45 : 1))));
+      const target = compactFact(facts.target as Record<string, unknown>, targetLimit);
+      if (!target || !append('target', target, false)) omissions.push('target（预算不足）');
+    } else layout.targetUnavailable = true;
+    // The reader supplies actual nearest-first ancestry. Divide the remaining
+    // budget so one large ancestor cannot consume every later ancestor's slot.
+    ancestors.forEach((original, index) => {
+      const limit = Math.min(available(), Math.max(220, Math.floor(available() / (ancestors.length - index))));
+      const node = compactFact(original, limit);
+      if (!node || !append('ancestors', node, true)) omissions.push(`ancestor:${original.sourceId}`);
+    });
+    for (const kind of ['children', 'siblings', 'ancestorPeers']) {
+      const value = facts[kind];
       const nodes = Array.isArray(value) ? value : [value];
-      const accepted: unknown[] = [];
       for (const originalNode of nodes) {
         if (!originalNode || typeof originalNode !== 'object') continue;
-        const fact = originalNode as Record<string, unknown>;
-        let node = Object.fromEntries(Object.entries(fact).filter(([key]) =>
-          !['cascadeNote', 'layoutEvidence'].includes(key)));
-        if (kind === 'target' && JSON.stringify(node).length > layoutBudget) {
-          node = { sourceId: fact.sourceId, tag: fact.tag, capturedRect: fact.capturedRect };
-          for (const [key, value] of Object.entries((fact.computedLayout ?? {}) as Record<string, unknown>)) {
-            const computedLayout = { ...(node.computedLayout as Record<string, unknown> ?? {}), [key]: value };
-            if (JSON.stringify({ ...node, computedLayout }).length <= layoutBudget - 20) node.computedLayout = computedLayout;
-            else omitted++;
-          }
-          omitted++; // Other target fields are intentionally omitted at this budget.
-        }
+        const node = stripRepeatedNotes(originalNode) as Record<string, unknown>;
         const key = JSON.stringify(node);
-        if (kind !== 'target' && seenLayout.has(key)) { omitted++; continue; }
-        const candidate = { ...layout, [kind]: Array.isArray(value) ? [...accepted, node] : node };
-        if (JSON.stringify(candidate).length > layoutBudget) { omitted++; continue; }
-        accepted.push(node);
-        layout[kind] = Array.isArray(value) ? [...accepted] : node;
+        if (seenLayout.has(key) || !append(kind, node, Array.isArray(value))) {
+          omissions.push(`${kind}:${node.sourceId ?? node.ancestorSourceId ?? 'unknown'}`); continue;
+        }
         seenLayout.add(key);
       }
     }
-  }
-  return [
-    clip(lines[0] ?? '', 180),
-    '源码摘要（非精确原文；精确替换请按字符范围 read_file）：',
-    clip(source, Math.floor(budget * 0.3)),
-    clip(styles, Math.floor(budget * 0.2)),
-    `布局上下文（捕获值不是修改后的渲染测量）: ${JSON.stringify(layout)}`,
-    ...(omitted ? [`[省略 ${omitted} 项重复或超预算布局；需要时单独检查目标]`] : [])
-  ].filter(Boolean).join('\n');
+  } else layout.unavailable = true;
+  return [prefix, `${layoutHeading}${JSON.stringify(layout)}`,
+    ...(omissions.length ? [clip(`[省略 ${omissions.length} 项重复或超预算布局：${omissions.join(', ')}；需要时定向检查]`, omissionLimit)] : [])
+  ].join('\n');
 }
 
 // Keep legacy positions in the internal protocol for existing callers, but
@@ -122,145 +246,58 @@ function interactionPlanSchema(properties: Record<string, Record<string, unknown
   ]));
   return {
     ...objectSchema(fields, ['mode']),
+    // Shared field schemas belong above; branches only add conditional requirements.
     anyOf: [
-      objectSchema({ ...fields, mode: { ...fields.mode, enum: ['none', 'preserve-existing'] } }, ['mode']),
-      objectSchema({ ...fields, mode: { ...fields.mode, enum: ['local-demo'] } }, ['mode', ...INTERACTION_BEHAVIOR_FIELDS])
+      { type: 'object', properties: { mode: { enum: ['none', 'preserve-existing'] } }, required: ['mode'] },
+      { type: 'object', properties: { mode: { enum: ['local-demo'] } }, required: ['mode', ...INTERACTION_BEHAVIOR_FIELDS] },
+      { type: 'object', properties: { mode: { enum: ['update-local-demo'] }, changes: { type: 'string', minLength: 1 } }, required: ['mode', 'changes'] }
     ]
   };
 }
 
 function spatialScopeSchema(properties: Record<string, unknown>, required: string[]): Record<string, unknown> {
   return { ...objectSchema(properties, required), anyOf: [
-    objectSchema({ ...properties, scope: { type: 'string', enum: ['global'] } }, required),
-    objectSchema({ ...properties, scope: { type: 'string', enum: ['selected-context', 'explicit-container'] },
-      containerSourceId: { type: 'string', minLength: 1 } }, [...required, 'containerSourceId'])
+    { type: 'object', properties: { scope: { enum: ['global'] } }, required },
+    { type: 'object', properties: { scope: { enum: ['selected-context', 'explicit-container'] },
+      containerSourceId: { type: 'string', minLength: 1 } }, required: [...required, 'containerSourceId'] }
   ] };
 }
 
-function createTool<TInput, TOutput>(config: AgentTool<TInput, TOutput>): AgentTool<TInput, TOutput> {
-  const validateRequiredFields = (
-    schema: Record<string, unknown>,
-    value: unknown,
-    path: string,
-    issues: string[]
-  ): void => {
-    if (Array.isArray(schema.anyOf)) {
-      const branches = schema.anyOf as Record<string, unknown>[];
-      const branchIssues = branches.map(branch => {
-        const errors: string[] = [];
-        validateRequiredFields(branch, value, path, errors);
-        return errors;
-      });
-      if (!branchIssues.some(errors => errors.length === 0)) {
-        issues.push(`${path}: ${branchIssues.map(errors => errors.join('、')).join('；或 ')}`);
-        return;
-      }
-    }
-    if (Array.isArray(schema.enum) && !schema.enum.includes(value)) {
-      issues.push(`${path} 应为 ${schema.enum.join(' / ')}`);
-    }
-    if ('const' in schema && value !== schema.const) issues.push(`${path} 应为 ${String(schema.const)}`);
-    if ((schema.type === 'number' || schema.type === 'integer') && (typeof value !== 'number'
-      || !Number.isFinite(value) || (schema.type === 'integer' && !Number.isInteger(value))
-      || (typeof schema.minimum === 'number' && value < schema.minimum)
-      || (typeof schema.maximum === 'number' && value > schema.maximum))) {
-      issues.push(`${path} 应为范围内的${schema.type === 'integer' ? '整数' : '数字'}`);
-    }
-    if (schema.type === 'string' && (typeof value !== 'string'
-      || (typeof schema.minLength === 'number' && value.length < schema.minLength))) {
-      issues.push(`${path} 应为满足长度要求的字符串`);
-    }
-    if (schema.type === 'object') {
-      if (!value || typeof value !== 'object' || Array.isArray(value)) {
-        issues.push(`${path || 'input'} 应为对象`);
-        return;
-      }
-      const record = value as Record<string, unknown>;
-      for (const key of (schema.required as string[] | undefined) ?? []) {
-        if (!Object.prototype.hasOwnProperty.call(record, key) || record[key] === undefined || record[key] === null) {
-          issues.push(path ? `${path}.${key}` : key);
-        }
-      }
-      const properties = schema.properties as Record<string, Record<string, unknown>> | undefined;
-      for (const [key, propertySchema] of Object.entries(properties ?? {})) {
-        if (record[key] !== undefined && record[key] !== null) {
-          validateRequiredFields(propertySchema, record[key], path ? `${path}.${key}` : key, issues);
-        }
-      }
-      return;
-    }
-    if (schema.type === 'array') {
-      if (!Array.isArray(value)) {
-        issues.push(`${path} 应为数组`);
-        return;
-      }
-      const itemSchema = schema.items as Record<string, unknown> | undefined;
-      if ((typeof schema.minItems === 'number' && value.length < schema.minItems)
-        || (typeof schema.maxItems === 'number' && value.length > schema.maxItems)) {
-        issues.push(`${path} 数组长度不符合要求`);
-      }
-      if (itemSchema) value.forEach((item, index) => validateRequiredFields(itemSchema, item, `${path}[${index}]`, issues));
-    }
-  };
-  return createRuntimeTool({
-    ...config,
-    execute: (input, context) => {
-      const issues: string[] = [];
-      validateRequiredFields(config.inputSchema, input, '', issues);
-      if (issues.length) {
-        // Only schema-owned field names and value types; never log argument values.
-        const typeOf = (value: unknown): string => value === null ? 'null' : Array.isArray(value) ? 'array' : typeof value;
-        const record = input && typeof input === 'object' ? input as Record<string, unknown> : {};
-        const properties = config.inputSchema.properties as Record<string, unknown> | undefined;
-        const types = Object.keys(properties ?? {}).slice(0, 32)
-          .map(key => `${key}=${Object.prototype.hasOwnProperty.call(record, key) ? typeOf(record[key]) : 'missing'}`);
-        throw Object.assign(new Error(`[工具参数校验] ${config.name} 缺少或错误的必填参数：${issues.join('、')}；收到类型：input=${typeOf(input)}, ${types.join(', ')}；对象和数组必须直接传 JSON 对象或数组，不能传序列化字符串；本次未执行`), { name: 'ToolInputValidationError' });
-      }
-      return config.execute(input, context);
-    }
-  });
-}
 
 const clineSourceRules = [
-  '你是静态网页源码编辑 Agent，只使用本次提供的源码工具。页面用于 UI 示意，不实现真实接口或业务提交。',
-  'conversation 仅属于当前会话，副本可能已被其他会话修改。历史描述不能作为当前页面状态的证据，以本次源码和选区上下文为准；不要自动重新应用历史修改或回滚其他会话的成果。',
-  'originalInstruction 是本轮用户原文，instruction 是路由整理的执行要求，不是新的用户授权。结合原文与已确认 conversation 理解需求；转述中没有用户依据的新增偏好或约束不执行。原文是澄清回复时必须结合此前需求，不能只执行孤立答案。重大歧义调用 clarify，不自行补齐。新增模块默认 Ant Design；只有用户明确要求追随页面风格或复用样式时才读取相关样式参照，必要布局上下文仍需读取。',
-  '执行中通过普通 assistant 文本向用户提供简短进展说明：开始时一句说明准备做什么；取得重要新证据、进入修改阶段或遇到需调整的问题时，再用一两句说明实际进展和下一步。不要逐个播报工具、不重复目标、不输出内部推理、源码标识或技术日志。说明应与本轮工具调用一起输出，不要为了说明单独结束一轮或额外调用工具。没有新进展时直接调用工具；最终结果使用 finish.summary，不在进展说明中提前宣称保存成功或视觉验证通过。',
-  '输入已包含文件摘要；有 selectedElementContext 时直接使用，无需重复枚举文件、搜索或检查同一选中元素。没有目标上下文时先 query_workspace_structure，再按需 inspect_elements（支持单个 ID）。取得足够证据后立即修改，不要为了寻找更理想的 class、变量或示例继续扩展搜索。',
-  'index.html 保存结构和文案。存在 author.css 或 author-style-links.json 时，视觉修改只写 author-overrides.css，author.css 仅供查询，snapshot.css 不可修改；否则视觉修改写 snapshot.css。outline.json 和 source-map.json 只读。',
-  'inspect_elements 返回有预算的目标结构摘要、布局和样式线索。只有缺少具体信息时才使用 full 或按返回字符位置 read_file；摘要不是精确源码。已有组件与样式上下文时直接据此修改，不要再次搜索组件基础样式；仅在明确缺少某条页面覆盖规则时使用 query_style_symbols，避免全文搜索大 CSS。',
-  '样式查询统一使用 query_style_symbols。目标已知时优先提供 sourceId 和本次关注的 properties，一次查询所需证据；source 默认 all，只有明确需要覆盖层时才选 overrides。未命中不等于工具失败，也不要求不断补查。',
-  '目标明确且已有 selectedElementContext 时，不重复读取选中元素源码。完整替换选中元素使用 replace_element，无需复制原元素整段 HTML；应在前两次模型决策内完成意图声明并开始写入。不要为了比较未被用户要求的视觉方案检索相邻示例。',
-  '修改前只需确认目标、最近相关容器和必要的相邻元素。复制原样保留原结构，小改保留现有实现；新增、重做、改变控件类型或组合交互统一使用 Ant Design 局部模块。只读取必要布局证据，明确风格要求时只读取相关参照。修改行内样式时注意级联优先级，背景也可能由子元素或伪元素绘制。',
-  '布局需求必须在 visualConstraints 中保留用户要求的视觉关系、参照对象及需保持的区域，不能将视觉位置降格为源码前后顺序。根据实际容器布局、自动排布和定位上下文规划插入位置与样式；新增同级元素可能挤走邻居，需同时考虑受影响的兄弟区域。',
-  '修改尺寸或排列前，利用已有布局上下文核对 box-sizing、内边距、边框、尺寸约束、伸缩规则与相关祖先的 overflow。百分比内容宽度不等于包含内边距和边框的总宽度；调整内部高度不能消除外层裁切。按证据修改必要范围，不统一改为自动高度或解除溢出限制。缺少关键属性时一次查询相关样式，不为简单改字增加布局检查。',
-  '位置描述以用户明确容器为准，否则以 selectedSourceId 或最近语义祖先为锚点。相邻组件只扩展到最近公共父容器；用户未明确要求全局视口定位时不得新增 position:fixed。新增元素后调用 validate_spatial_scope。',
-  '若多个方案会显著改变最终视觉结果，修改前调用 clarify；问题只询问源码无法确定的信息。已有澄清回复时结合 conversation 继续原需求。保留 button、input 等语义表示最终渲染标签和可访问行为保持一致，不等于必须保留原 sourceId 或原 DOM 节点；只有用户明确要求保留节点身份时才按原节点修改。',
-  '涉及新增、移动、尺寸或排列变化时，在 declare_intent.layoutPlan 中根据实际布局声明实施机制和保持区域；纯文案/颜色修改可省略。完成后调用 review_layout_plan，先核对方案是否保留用户原始要求的参照对象、内外边界与关系，再用实际操作核对方案；不可为了避开布局冲突自行替换目标关系，有关键歧义则 clarify。遗漏则修正并重新核对；finish.layoutAssessment 说明源码依据。不要把该核对当作渲染验证。',
-  '首次写入前调用一次 declare_intent，简洁列出目标、相关 sourceId、供用户检查的效果约束和布局范围。涉及交互时必须明确初始状态、触发动作、出现内容、是否占据布局、结束状态和节点身份策略。declare_intent 锁定用户目标与约束；按已声明方案执行，发现实现与约束冲突或工具返回新证据时可调整实现，不放宽需求，也不重新比较无关组件或交互方案。新增 sourceId 会由系统自动加入验证范围。',
-  '已明确实际文本承载元素时优先 set_element_text；含图标或其他子结构的父控件不能直接清空，应定位文字子元素，不确定时再 inspect。属性、插入、完整元素替换、移动、删除和批量操作使用对应结构化工具；完整替换已有元素使用 replace_element，元素内部精确替换才使用 replace_in_element，search 必须来自已读取的原始源码，禁止根据 compactHtml、domText 或结构摘要拼接 HTML，文件级精确替换必须基于已读取原文，追加 CSS 使用 apply_patch。相关修改尽量在同一轮并行调用或用批量工具完成。',
-  '不得添加 script、事件属性、远程资源、接口请求、表单 action 或 javascript: URL。',
+  '你是静态网页源码编辑 Agent，只用本轮源码工具实现 UI 示意，不接真实接口或业务提交。',
+  RESPONSE_LANGUAGE_INSTRUCTIONS,
+  'originalInstruction 是用户原文，userInstructionHistory 是路由对话中的此前用户原文，instruction 是路由转述，不增加授权；只执行有用户依据的要求。原文为澄清回复时结合此前原任务和仍适用的约束；回答只补全未确定信息，不替换原任务。conversation 仅属当前会话，副本可能已被其他会话修改；以本轮源码与选区为状态证据，不重放历史修改或回滚他人成果。',
+  'selectedSourceId 是本轮选区目标；selectionContextSourceId 仅提供当前选区的读取参考，不授权把其它目标改成选区或扩展修改范围。具体对象与参照关系由用户原文确定。',
+  '按当前轮次交付：用户暂时只要求展示或输入时，仅实现该状态，不从控件名称推导校验、提交、反馈或下一阶段功能。平台支持某种交互不等于本轮要求它；既有交互按要求保留，后续明确提出的行为再实现。',
+  '改写或扩充文案时保留原始事实、时态和确定性：操作要求不能改成已经完成的结果，不补造验证结论、业务数据或承诺。用户提供的目标文字优先准确采用；需要扩写时只解释已有含义，缺少的事实不猜测。',
+  '先确认目标、最近相关容器和必要相邻元素；重大歧义先 clarify，已确认的约束不重新比较。输入已有文件摘要和 selectedElementContext，直接复用；无目标时 query_workspace_structure，再按需 inspect_elements。证据足够就声明意图并执行，不为比较未要求的方案扩展检索；选区明确时争取前两次决策内开始写入。',
+  'inspect_elements 提供结构摘要、布局与样式线索，不能当作精确源码。缺信息才用 full 或按字符范围 read_file。样式用 query_style_symbols，已知目标优先 sourceId + properties 一次查齐，source 默认 all；未命中不要求补查，已有组件样式不重复搜索，大 CSS 不全文读取。',
+  '发现决定方案的证据缺口时，先直接查询该证据，再形成一个满足约束的实施方案；不要在读取前反复推演假设分支。当前证据已支持方案时，不为可选美化或未要求的不变量追加规划和读写。',
+  'index.html 保存结构文案；有 author.css 或 author-style-links.json 时视觉修改只写 author-overrides.css，否则写 snapshot.css。author.css、outline.json、source-map.json 只读。',
+  '首次写入前 declare_intent 锁定目标、相关 sourceId、效果约束和范围。先确定实施机制即可，不在此轮预演完整代码；声明后直接实施，仅因工具新证据或实现与约束冲突调整方案，不放宽需求。新增 sourceId 自动加入验证范围。',
+  '声明前对照用户原文核对目标、空间关系和保持要求，requestedRelations 记录用户要求，mechanism 记录实现手段，不把自己的方案写成需求。判断空间不足前检查实际相关容器和邻居矩形；缺少或省略的矩形不代表空间不足。方案必须保留原要求，需要改变要求时先 clarify，不能自行用另一种位置关系替代。',
+  '修改已有本地交互时，先读取本轮 module.jsx，再用 interactionPlan.mode=update-local-demo 和 changes 简述本次行为变化；未涉及的行为以当前源码为准保留，不重新设计完整交互。新建交互用 local-demo 完整声明。任一模式涉及布局变化仍需 layoutPlan。',
+  'visualConstraints 保留用户要求的参照对象、内外边界、视觉关系及保持区域；不得以源码前后顺序代替视觉位置。新增、移动、尺寸或排列变化需 layoutPlan，基于实际布局说明机制及保持方式；纯文案/颜色可省略。注意自动排布、定位与新增同级元素对邻居的影响。',
+  '调整尺寸/排列时核对已有 box-sizing、padding、border、尺寸约束、伸缩规则、相关祖先 overflow；百分比内容宽度不等于外部总宽度，内层高度不能消除外层裁切。缺关键属性则一次定向查询；按证据修改，不统一 height:auto 或解除 overflow；简单改字不增加布局检查。背景可能在子元素/伪元素，注意级联优先级。',
+  '位置以用户明确容器为准，否则以 selectedSourceId 或最近语义祖先为锚点；相邻组件范围仅扩至最近公共父容器。普通页面内容未获全局视口定位授权时禁止新增 position:fixed；局部弹层可用组件公开浮层能力或依实际触发元素测量定位，但必须随锚点变化更新，不能把模块本体改为全局悬浮。新增节点后必须 validate_spatial_scope。',
   INTERACTION_INSTRUCTIONS,
-  '修改后先用已有源码与工具结果逐项对照声明的效果约束，检查是否遗漏位置关系、盒模型或影响保留区域；有矛盾就修正实现，不能为了尽快结束而改写需求。优先复用已有证据，已声明布局方案时完成 review_layout_plan，避免重复读取。随后调用 finish 执行工作区校验，新增元素仍须先完成空间归属校验。源码和捕获布局不能证明真实渲染结果，不得声称已经通过浏览器验证。无需修改时提供源码证据并使用 already_satisfied。',
-  'finish.summary 是给产品用户看的结果说明，不是技术执行日志。用 1～3 句自然语言说明改了什么；仅在有新增交互时补充如何使用，仅在影响用户预期时说明实际限制（例如仅为演示、未连接真实检索）。简单文案修改一句即可。不罗列 sourceId、文件名、class、React/组件库、工具名或校验过程，不复述完整需求，不追加通用验证免责声明。不得把源码校验表述成已验证视觉效果；没有渲染证据时，只报告实际执行的修改，不断言位置正确、内容全部可见、无裁切或其他区域完全未受影响。只在本轮布局要求依赖尚未验证的效果时，简短指出具体待确认项，不对简单文字修改追加免责声明。确有未完成项或已知风险必须明确说明，不能为简短而隐瞒。技术细节保留在工具调用日志。',
-  '没有调用 finish 或 clarify，本轮不算完成。保持推理和工具说明简洁，不做无关重构。',
-  '完成回复优先压缩为两句：一句概括结果，另一句仅补充必要操作方法或真实限制。不要逐项复述标题、占位文案、提示文案、尺寸和颜色；除非用户要求逐项核对。不得为了简短隐瞒未完成项，也不通过截断字符串压缩结果。'
+  '纯文案优先 set_element_text，须定位真实文字承载元素，不能清空含图标或其他子结构的父控件。完整元素替换用 replace_element；内部精确替换用 replace_in_element，search 必须来自已读原文，不从 compactHtml/domText/摘要拼接。文件级替换也基于原文，追加 CSS 用 apply_patch。',
+  '属性、插入、移动、删除使用结构化工具。参数已知且不依赖前一工具结果的相关操作在同一轮提交，运行时依次执行；批量 DOM 用 apply_dom_operations。依赖新生成 sourceId 或失败反馈时等待结果，不猜测标识。',
+  '工具返回成功即已完成该次写入，继续使用返回的 sourceId，不因仍在讨论实现而重放成功操作。只有用户确实要求再次创建时才重复新增；不确定当前状态先定向读取。精确替换的 search 与 replace 必须有实际差异，满足需求后不再添加可选功能或纯防御性外观改动。',
+  '普通 HTML 禁止 script、事件属性、远程资源、接口请求、表单 action、javascript: URL。',
+  '修改后复用现有源码和工具结果逐项核对约束。已声明布局方案则 review_layout_plan：先核对方案忠于原始需求，再核对实际操作；有遗漏先修正，后续修改需重新核对。新增节点先校验空间归属，最后 finish 校验并提交；无需修改须有当前源码证据并用 already_satisfied。',
+  '源码与捕获布局不证明修改后渲染效果，不能声称位置、可见性、裁切、邻居布局或浏览器验证已通过。已知未完成项或风险必须说明，不能为简短隐瞒。',
+  '进展说明是用户可见的正文，工具调用前后的每一段说明也必须遵守回复语言要求，默认使用简体中文，不能只有 finish.summary 使用中文。与工具调用同轮输出：开始一句，取得新证据/进入修改/遇到问题时再简述；没有新进展直接调用工具。不逐工具播报、不输出推理、sourceId或技术日志、不提前声称成功。不要为说明单独结束一轮。',
+  'finish.summary 面向用户，通常两句：概括修改，必要时补操作方法或真实限制。只陈述源码已落实的行为，不把计划或推测的组件默认行为写成已完成事实。不复述完整需求和文案，不写文件/class/框架/工具或校验日志。仅有待确认的具体布局效果时简短提醒；简单改字不附通用免责声明。未调用 finish 或 clarify 不算完成，不做无关重构。'
 ].join('\n');
 
 const DEFAULT_MAX_ITERATIONS = 45;
 const DEFAULT_MAX_OUTPUT_TOKENS = 8_192;
 const MAX_BATCH_INSPECTION_CHARS = 12_000;
 const MAX_BATCH_ELEMENT_CHARS = 4_000;
-const MAX_PRE_MUTATION_READS_WITH_SELECTED_CONTEXT = 4;
 const FINALIZATION_WINDOW = 3;
 const MAX_IDENTICAL_TOOL_FAILURES = 3;
-const MAX_READ_CALLS_PER_ACTION: Readonly<Record<string, number>> = {
-  query_workspace_structure: 2,
-  search_text: 4,
-  inspect_elements: 3,
-  query_style_symbols: 3,
-  read_file: 3
-};
 const BUDGETED_READ_ACTIONS = new Set([
   'query_workspace_structure', 'search_text', 'read_file', 'inspect_elements',
   'query_style_symbols'
@@ -290,6 +327,10 @@ export interface ClineAgentFactoryInput {
   apiKey: string;
   baseUrl: string;
   enableThinking?: boolean;
+  reasoningProvider?: 'deepseek' | 'qwen';
+  reasoningEffort?: 'none' | 'low' | 'high' | 'max';
+  resolveReasoningEffort?: () => 'none' | 'low' | 'high' | 'max';
+  resolveMaxOutputTokens?: (context: { reasoningEffort?: 'none' | 'low' | 'high' | 'max'; recoveringOutputLimit: boolean }) => number;
   apiProtocol?: 'chat-completions';
   systemPrompt: string;
   tools: readonly AgentTool<any, any>[];
@@ -303,6 +344,9 @@ export interface ClineCodingAgentOptions {
   skills?: SkillProvider;
   baseUrl: string;
   enableThinking?: boolean;
+  reasoningProvider?: 'deepseek' | 'qwen';
+  reasoningEffort?: 'none' | 'low' | 'high' | 'max';
+  editReasoning?: import('../core/coding-agent-port').EditReasoning;
   apiProtocol?: 'chat-completions';
   apiKey: string;
   modelName: string;
@@ -393,6 +437,10 @@ export class ClineCodingAgentAdapter implements CodingAgentPort {
       apiKey: input.apiKey,
       baseUrl: input.baseUrl,
       enableThinking: input.enableThinking,
+      reasoningProvider: input.reasoningProvider,
+      reasoningEffort: input.reasoningEffort,
+      resolveReasoningEffort: input.resolveReasoningEffort,
+      resolveMaxOutputTokens: input.resolveMaxOutputTokens,
       apiProtocol: input.apiProtocol,
       systemPrompt: input.systemPrompt,
       tools: input.tools,
@@ -410,8 +458,11 @@ export class ClineCodingAgentAdapter implements CodingAgentPort {
     signal?: AbortSignal
   ): Promise<CodingAgentRunResult> {
     const finishDescription = 'finish 校验并直接提交正式 Revision；实际页面效果由用户检查，不得声称自动渲染验证通过。';
-    const modeRules = clineSourceRules;
+    const policy = editModePolicy(turn.request.editMode, this.options.editReasoning);
+    const editReasoning = policy.reasoning;
+    const modeRules = `${clineSourceRules}\n${policy.instructions}`;
     const startedAt = new Date().toISOString();
+    const selectionContextSourceId = turn.request.sourceId ?? turn.request.selectionContextSourceId;
     const steps: CodingAgentStep[] = [];
     let completion: Completion | undefined;
     // Clarification is a hard execution boundary. Compatible runtimes may
@@ -425,10 +476,24 @@ export class ClineCodingAgentAdapter implements CodingAgentPort {
     let originalSelectedPath: string[] = [];
     let introducedFixedPosition = false;
     let intentDeclared = false;
-    let layoutPlan: { containerSourceIds: string[]; mechanism: string; preservedRegions: string } | undefined;
+    let declaredInteractionMode = 'none';
+    const sourceReviews: SourceReviewResult[] = [];
+    let sourceReviewNeedsCorrection = false;
+    let sourceReviewFailedVersion = -1;
+    let sourceToolNeedsCorrection = false;
+    let independentlyReviewedVersion = -1;
+    let primaryModelCalls = 0;
+    const localizer = createCommentaryLocalizer(this.factory, {
+      providerId: 'openai-compatible', modelId: this.options.modelName, apiKey: this.options.apiKey,
+      baseUrl: this.options.baseUrl, apiProtocol: this.options.apiProtocol, reasoningProvider: this.options.reasoningProvider
+    }, turn.request.originalInstruction ?? turn.request.instruction,
+    entry => safeEmit(observe, { type: 'coding-agent.commentary', ...entry }), signal);
+    const totalModelCalls = () => primaryModelCalls + sourceReviews.reduce((sum, item) => sum + item.modelCalls, 0)
+      + localizer.report.modelCalls;
+    let layoutPlan: { containerSourceIds: string[]; requestedRelations: string; mechanism: string; preservedRegions: string } | undefined;
     let mutationVersion = 0;
     let reviewedLayoutVersion = -1;
-    const layoutChanges: { action: string; input: unknown }[] = [];
+    const layoutChanges: { action: string; input: unknown; operationId: string; toolCallId?: string }[] = [];
     let declaredIntent: import('@ui-agent/contracts').WorkspaceIntent | undefined;
     const changedPositioningClassNames = new Set<string>();
     const repeatedFailures = new Map<string, number>();
@@ -445,6 +510,9 @@ export class ClineCodingAgentAdapter implements CodingAgentPort {
     signal?.addEventListener('abort', abortActiveAgent, { once: true });
     let checkpoint: CodingAgentCheckpoint = {
       version: 1,
+      editMode: policy.mode,
+      editPolicy: { revision: policy.revision, reasoning: editReasoning, preMutationReads: policy.preMutationReads, readLimits: policy.readLimits,
+        sourceReviewEnabled: policy.sourceReviewEnabled, reviewEffort: policy.reviewEffort, maxReviews: policy.maxReviews },
       adapterId: this.adapterId,
       workspaceId: turn.workspaceId,
       turnId: turn.request.turnId,
@@ -498,10 +566,11 @@ export class ClineCodingAgentAdapter implements CodingAgentPort {
         ...(error ? { error } : {})
       };
       steps.push(step);
+      primaryModelCalls = Math.max(primaryModelCalls, context.iteration);
       if (outcome === 'blocked') context.emitUpdate?.({ type: 'tool-outcome', outcome });
       checkpoint = {
         ...checkpoint,
-        modelCalls: Math.max(checkpoint.modelCalls, context.iteration),
+        modelCalls: totalModelCalls(),
         toolCalls: checkpoint.toolCalls + 1,
         stepCount: steps.length,
         lastAction: action,
@@ -520,11 +589,11 @@ export class ClineCodingAgentAdapter implements CodingAgentPort {
     const completedReadResults = new Map<string, string>();
 
     const readBudgetGuidance = () => {
-      if (!selectedElementContextAvailable || firstMutationAt) return '';
-      const remaining = Math.max(0, MAX_PRE_MUTATION_READS_WITH_SELECTED_CONTEXT - preMutationReadCalls);
-      return `[修改前读取额度] 已提供选区上下文；补充读取已用 ${preMutationReadCalls}/${MAX_PRE_MUTATION_READS_WITH_SELECTED_CONTEXT} 次，剩余 ${remaining} 次（按工具调用计数，同轮多次调用分别计数）。${remaining === 0
+      if (!turn.request.sourceId || !selectedElementContextAvailable || firstMutationAt) return '';
+      const remaining = Math.max(0, policy.preMutationReads - preMutationReadCalls);
+      return `[修改前读取额度] 已提供选区上下文；补充读取已用 ${preMutationReadCalls}/${policy.preMutationReads} 次，剩余 ${remaining} 次（按工具调用计数，同轮多次调用分别计数）。${remaining === 0
         ? '下一步不要再请求读取；证据足够则声明意图并修改，缺少会显著影响结果的信息则 clarify，不猜测布局。'
-        : '仅为明确缺失的证据读取，不必用满额度；证据足够则声明意图并修改。'} 各读取工具另有上限：${JSON.stringify(MAX_READ_CALLS_PER_ACTION)}。`;
+        : '仅为明确缺失的证据读取，不必用满额度；证据足够则声明意图并修改。'} 各读取工具另有上限：${JSON.stringify(policy.readLimits)}。`;
     };
 
     const execute = async <TInput>(
@@ -551,9 +620,9 @@ export class ClineCodingAgentAdapter implements CodingAgentPort {
       const budgetKey = action === 'search_text' || action === 'read_file'
         ? `${action}:${(input as { path?: string }).path ?? ''}`
         : action;
-      const actionLimit = MAX_READ_CALLS_PER_ACTION[action];
-      if (BUDGETED_READ_ACTIONS.has(action) && selectedElementContextAvailable && !firstMutationAt
-        && preMutationReadCalls >= MAX_PRE_MUTATION_READS_WITH_SELECTED_CONTEXT) {
+      const actionLimit = policy.readLimits[action];
+      if (BUDGETED_READ_ACTIONS.has(action) && turn.request.sourceId && selectedElementContextAvailable && !firstMutationAt
+        && preMutationReadCalls >= policy.preMutationReads) {
         const message = `[修改前读取预算] 已有 selectedElementContext，且修改前已补充读取 ${preMutationReadCalls} 次。请使用现有结构、组件规范和局部样式证据立即修改；若仍缺少会显著影响结果的信息，请调用 clarify。`;
         record(action, input, context, message, undefined, 'blocked', 'read_budget');
         return message;
@@ -576,8 +645,9 @@ export class ClineCodingAgentAdapter implements CodingAgentPort {
         const result = await operation();
         if (BUDGETED_READ_ACTIONS.has(action) && !firstMutationAt) preMutationReadCalls += 1;
         if (MUTATING_ACTIONS.has(action)) {
+          sourceToolNeedsCorrection = false;
           mutationVersion += 1;
-          layoutChanges.push({ action, input });
+          layoutChanges.push({ action, input, operationId: `mutation-${mutationVersion}`, toolCallId: context.toolCallId });
           if (!firstMutationAt) {
             firstMutationAt = new Date().toISOString();
             firstMutationModelCall = context.iteration;
@@ -585,18 +655,26 @@ export class ClineCodingAgentAdapter implements CodingAgentPort {
           completedReadResults.clear();
           readActionCounts.clear();
           repeatedFailures.clear();
-          if (newSourceIds.size > 0) spatialScopeValidated = false;
+          // Module implementation cannot alter the authored HTML ancestry or
+          // its CSS positioning permissions. Its layout still needs a fresh
+          // review; retain only the already checked source-container fact.
+          if (newSourceIds.size > 0 && !(action === 'apply_patch'
+            && (input as { path?: string }).path === 'module.jsx')) spatialScopeValidated = false;
         }
         if (readKey) completedReadResults.set(readKey, result);
         throwIfCancelled();
+        const pending = MUTATING_ACTIONS.has(action) ? pendingCompletionRequirements() : [];
+        const resultWithRequirements = pending.length
+          ? `${result}\n[提交前条件] ${pending.join('；')}` : result;
         const finalizationResult = remainingAfterThisCall <= 5
-          ? `[运行预算] 当前第 ${context.iteration}/${this.maxIterations} 轮，本次后最多剩余 ${remainingAfterThisCall} 轮。请停止扩展范围，完成必要修改并预留 finish。\n\n${result}`
-          : result;
+          ? `[运行预算] 当前第 ${context.iteration}/${this.maxIterations} 轮，本次后最多剩余 ${remainingAfterThisCall} 轮。请停止扩展范围，完成必要修改并预留 finish。\n\n${resultWithRequirements}`
+          : resultWithRequirements;
         const guidance = BUDGETED_READ_ACTIONS.has(action) ? readBudgetGuidance() : '';
         const guidedResult = guidance ? `${guidance}\n\n${finalizationResult}` : finalizationResult;
         record(action, input, context, guidedResult);
         return guidedResult;
       } catch (error) {
+        if (MUTATING_ACTIONS.has(action)) sourceToolNeedsCorrection = true;
         const baseMessage = error instanceof Error ? error.message : String(error);
         const failureKey = `${action}:${baseMessage}`;
         const repeated = (repeatedFailures.get(failureKey) ?? 0) + 1;
@@ -691,11 +769,28 @@ export class ClineCodingAgentAdapter implements CodingAgentPort {
       }
     };
 
+    // Report all known prerequisites together so fixing one does not reveal
+    // another on the next completion attempt. Execution still checks fresh state.
+    const pendingCompletionRequirements = (): string[] => {
+      const pending: string[] = [];
+      if (introducedFixedPosition && declaredIntent?.layoutScope !== 'global') {
+        pending.push('当前已确认意图不是 global 布局范围，本轮却新增了 position:fixed；请调整到已确认容器内');
+      }
+      if (newSourceIds.size > 0 && !spatialScopeValidated) {
+        pending.push(`本轮新增了 ${newSourceIds.size} 个源码元素，finish 前必须调用 validate_spatial_scope 校验其参照容器`);
+      }
+      if (layoutPlan && reviewedLayoutVersion !== mutationVersion) {
+        pending.push('调用 review_layout_plan 核对最新源码操作；若继续修改，需重新核对');
+      }
+      return pending;
+    };
+
     const tools: AgentTool<any, any>[] = [
       createTool<{
         summary: string;
         interactionPlan: {
-          mode: 'none' | 'preserve-existing' | 'local-demo';
+          mode: 'none' | 'preserve-existing' | 'local-demo' | 'update-local-demo';
+          changes?: string;
           initialState?: string;
           trigger?: string;
           result?: string;
@@ -706,19 +801,20 @@ export class ClineCodingAgentAdapter implements CodingAgentPort {
         relevantSourceIds?: string[];
         verificationSourceIds?: string[];
         visualConstraints?: string[];
-        layoutPlan?: { containerSourceIds: string[]; mechanism: string; preservedRegions: string };
+        layoutPlan?: { containerSourceIds: string[]; requestedRelations: string; mechanism: string; preservedRegions: string };
         layoutScope?: 'selected-context' | 'explicit-container' | 'global';
       }, string>({
         name: 'declare_intent',
-        description: '首次写入前简洁声明目标、范围和保持约束。none / preserve-existing 只需 interactionPlan.mode，无需虚构触发或结束行为；local-demo 必须完整描述新增或改变的交互。有关键歧义时 clarify。声明成功后直接执行。',
+        description: '首次写入前声明目标、范围和约束。none/preserve-existing 仅需 mode；新建交互 local-demo 填完整交互；已有本地交互 update-local-demo 只填 changes。只确定实施决策，不展开代码设计；有关键歧义用 clarify。',
         inputSchema: objectSchema({
-          summary: stringProperty('展示给用户的简短行动说明：准备改什么、必要时说明保留什么，最多两句话。不要包含内部推理、sourceId、文件名或未经验证的完成结论。'),
+          summary: stringProperty('面向用户最多两句：准备改什么、必要时保留什么；不写内部推理、源码标识或完成结论。'),
           interactionPlan: interactionPlanSchema({
             mode: {
               type: 'string',
-              enum: ['none', 'preserve-existing', 'local-demo'],
-              description: '无交互改动、保留既有交互，或使用 React 本地状态实现演示交互。真实业务行为不在副本能力内，应 clarify。'
+              enum: ['none', 'preserve-existing', 'local-demo', 'update-local-demo'],
+              description: '无交互改动、保留既有交互、新建本地演示交互，或修改已读取源码的本地交互。真实业务行为不在副本能力内，应 clarify。'
             },
+            changes: stringProperty('update-local-demo 必填：仅描述本次用户要求改变的行为；其余已有行为保持，不复述整套状态与实现。需先 read_file 读取本轮 module.jsx。'),
             initialState: stringProperty('操作前用户看到的内容。'),
             trigger: stringProperty('触发交互的具体用户动作。'),
             result: stringProperty('触发后具体出现或变化的内容。'),
@@ -735,7 +831,7 @@ export class ClineCodingAgentAdapter implements CodingAgentPort {
             }
           }),
           relevantSourceIds: {
-            type: 'array', maxItems: 12,
+            type: 'array', minItems: 1, maxItems: 12,
             items: stringProperty('与本次目标相关的 sourceId。')
           },
           verificationSourceIds: {
@@ -744,21 +840,29 @@ export class ClineCodingAgentAdapter implements CodingAgentPort {
           },
           visualConstraints: {
             type: 'array', maxItems: 12,
-            items: stringProperty('保留用户原意的效果约束：涉及布局时说明目标与参照对象的视觉关系、需保持的区域；不得用 DOM 插入顺序代替视觉关系。声明不代表已经验证。')
+            items: stringProperty('用户要求的效果、参照对象、视觉关系和保持区域；DOM 顺序不代替视觉关系。')
           },
           layoutPlan: objectSchema({
             containerSourceIds: { type: 'array', minItems: 1, maxItems: 12, items: stringProperty('实际控制目标布局的已有容器 sourceId。') },
-            mechanism: stringProperty('根据已读取的布局事实，说明具体结构/样式实施方案及其如何实现目标关系。不能只重复需求或 DOM before/after；已有布局足够时说明原因，不强制修改 CSS。涉及并排关系时说明实际可用宽度、控件占用及换行/收缩规则能否容纳目标；排在源码后面或换到下一行不等于位于右侧。容量不足时由模型选择符合约束的方案，若必须改变用户要求则先澄清。'),
-            preservedRegions: stringProperty('说明需保持的区域及本方案如何避免改变其位置/尺寸；无此要求时说明。')
-          }, ['containerSourceIds', 'mechanism', 'preservedRegions']),
+            requestedRelations: stringProperty('忠实记录用户要求的位置关系：对象、参照对象、方向和内外边界。与下方实施机制分开；不能把视觉方向改写成源码先后、相邻位置或默认排布。没有指定方向时保留原有关系，不新增要求。'),
+            mechanism: stringProperty('基于已读布局，简述结构/样式机制如何实现目标关系；已有布局足够可说明理由，不强改 CSS。并排需核对可用宽度、占用、换行/收缩；源码前后或换行不等于左右。空间不足时选满足约束的方案，须改变需求则 clarify。'),
+            preservedRegions: stringProperty('列出用户明确要求保持的区域及具体属性，并说明保护方式；其余区域避免无关修改。不把保持位置或宽度扩展为冻结全部尺寸，也不为正常文档流变化增设固定尺寸。无保持要求时说明。')
+          }, ['containerSourceIds', 'requestedRelations', 'mechanism', 'preservedRegions']),
           layoutScope: { type: 'string', enum: ['selected-context', 'explicit-container', 'global'] }
-        }, ['summary', 'interactionPlan']),
+        }, ['summary', 'interactionPlan', 'relevantSourceIds']),
         execute: (input, context) => execute(
           'declare_intent',
           input,
           context,
           async () => {
             const interactionPlan = input.interactionPlan;
+            if (interactionPlan.mode === 'update-local-demo') {
+              const hasCurrentModuleRead = [...completedReadResults.keys()].some(key =>
+                key.startsWith('read_file:') && JSON.parse(key.slice('read_file:'.length)).path === 'module.jsx');
+              if (!hasCurrentModuleRead) {
+                throw new Error('update-local-demo 需要先 read_file 读取本轮 module.jsx；历史对话不能代替当前源码');
+              }
+            }
             const sourceIds = [...new Set([
               ...(turn.request.sourceId ? [turn.request.sourceId] : []),
               ...(input.relevantSourceIds ?? []),
@@ -768,6 +872,8 @@ export class ClineCodingAgentAdapter implements CodingAgentPort {
               ? undefined
               : interactionPlan.mode === 'preserve-existing'
                 ? '保留既有交互；本轮只执行声明的修改目标和约束'
+                : interactionPlan.mode === 'update-local-demo'
+                  ? `已有本地交互的本次变化：${interactionPlan.changes}；未涉及的行为保留本轮已读取源码的实现，不追加未授权功能`
                 : `交互方案：初始=${interactionPlan.initialState}；触发=${interactionPlan.trigger}；结果=${interactionPlan.result}；布局=${interactionPlan.layoutBehavior}；结束=${interactionPlan.completionBehavior}；节点=${interactionPlan.nodeIdentity}`;
             const constraints = [...new Set([
               ...(input.visualConstraints?.length ? input.visualConstraints : [input.summary]),
@@ -777,13 +883,16 @@ export class ClineCodingAgentAdapter implements CodingAgentPort {
               throw new Error('declare_intent 必须列出至少一个实际相关的 sourceId；请先查询并检查目标结构，无法定位时调用 clarify');
             }
             if (input.layoutPlan && (!input.layoutPlan.containerSourceIds?.length
+              || !input.layoutPlan.requestedRelations?.trim()
               || !input.layoutPlan.mechanism?.trim() || !input.layoutPlan.preservedRegions?.trim())) {
-              throw new Error('布局方案需包含实际容器、实施机制及保持区域的处理方式');
+              throw new Error('布局方案需包含用户要求的位置关系、实际容器、实施机制及保持区域的处理方式');
             }
             if (layoutPlan && !input.layoutPlan) {
               throw new Error('已声明布局方案，不能通过重新声明省略方案来跳过核对');
             }
             layoutPlan = input.layoutPlan;
+            declaredInteractionMode = input.interactionPlan.mode;
+            independentlyReviewedVersion = -1;
             reviewedLayoutVersion = -1;
             intentDeclared = true;
             declaredIntent = {
@@ -795,7 +904,7 @@ export class ClineCodingAgentAdapter implements CodingAgentPort {
               layoutScope: input.layoutScope ?? 'selected-context',
               createdAt: new Date().toISOString()
             };
-            return `意图与效果约束已声明：${input.summary}${interactionConstraint ? `；${interactionConstraint}` : '；本轮无交互改动'}。效果约束：${constraints.join('；')}。实现必须满足这些要求，不能仅凭源码顺序判断视觉位置；当前尚未验证渲染结果。`;
+            return `意图已记录：${sourceIds.length} 个目标，${constraints.length} 项效果约束，交互=${interactionPlan.mode}。按本次声明直接执行；约束原文见本次调用参数，尚未验证渲染结果。`;
           }
         )
       }),
@@ -812,7 +921,8 @@ export class ClineCodingAgentAdapter implements CodingAgentPort {
           input,
           context,
           () => workspace.queryWorkspaceStructure(input.query, {
-            selectedSourceId: input.selectedSourceId ?? turn.request.sourceId,
+            selectedSourceId: input.selectedSourceId ?? turn.request.sourceId
+              ?? (selectedElementContextAvailable ? turn.request.selectionContextSourceId : undefined),
             limit: input.limit
           })
         )
@@ -878,13 +988,14 @@ export class ClineCodingAgentAdapter implements CodingAgentPort {
           context,
           async () => {
             const ids = [...new Set(input.sourceIds)];
+            const separator = '\n\n---\n\n';
             const budget = Math.min(ids.length === 1 ? MAX_BATCH_INSPECTION_CHARS : MAX_BATCH_ELEMENT_CHARS,
-              Math.floor(MAX_BATCH_INSPECTION_CHARS / ids.length));
+              Math.floor((MAX_BATCH_INSPECTION_CHARS - separator.length * (ids.length - 1)) / ids.length));
             const seenLayout = new Set<string>();
             const results = await Promise.all(ids.map(sourceId =>
               workspace.inspectElement(sourceId, { detail: input.detail ?? 'compact' })));
             const sections = results.map(result => boundedInspection(result, budget, seenLayout));
-            return sections.join('\n\n---\n\n');
+            return sections.join(separator);
           }
         )
       }),
@@ -1014,7 +1125,7 @@ export class ClineCodingAgentAdapter implements CodingAgentPort {
       }),
       createTool<{ sourceId: string; set?: Record<string, string>; remove?: string[] }, string>({
         name: 'set_element_attributes',
-        description: '结构化设置或删除元素属性；sourceId、捕获矩形和内联 style 由系统保护。',
+        description: '结构化设置或删除元素属性；不接受 style、sourceId 或捕获矩形。样式使用可编辑 CSS 或基于已读原文的 replace_in_element；移动已有节点使用 move_element。',
         inputSchema: objectSchema({
           sourceId: stringProperty('目标元素 sourceId。'),
           set: { type: 'object', additionalProperties: { type: 'string' } },
@@ -1268,7 +1379,7 @@ export class ClineCodingAgentAdapter implements CodingAgentPort {
       }),
       createTool<Record<string, never>, string>({
         name: 'review_layout_plan',
-        description: '布局修改完成后读取已声明方案和本轮成功的源码操作，再由模型核对实施机制与保持约束。同时返回当前容器源码上下文，核对真实子项顺序与邻居排布。操作记录不是最终 diff；有覆盖或证据不足时读取当前源码。后续再修改需重新核对。此工具不判断视觉结果。',
+        description: '布局修改后返回原始请求、方案、当前容器与成功操作引用。核对需求和实际实现；操作记录不是最终 diff，缺证据或操作覆盖时读当前源码。后续修改需再核对，不判断视觉结果。',
         inputSchema: objectSchema({}, []),
         execute: (input, context) => execute('review_layout_plan', input, context, async () => {
           if (!layoutPlan) throw new Error('尚未声明 layoutPlan');
@@ -1281,18 +1392,19 @@ export class ClineCodingAgentAdapter implements CodingAgentPort {
           }
           reviewedLayoutVersion = mutationVersion;
           return JSON.stringify({
-            evidence: '成功的源码操作记录，不是浏览器渲染证据。先对照原始请求核对方案是否擅自改变参照对象、内外边界或位置关系，再核对操作是否落实方案；不能只证明自拟方案自洽。发现缺项先修正，再重新核对。',
-            originalRequest: turn.request.instruction,
+            evidence: '先核对方案是否保留原始请求的参照对象、内外边界、位置关系，再核对实际实现；缺项先修正。以下不是浏览器渲染证据。',
+            originalRequest: turn.request.originalInstruction ?? turn.request.instruction,
+            ...(turn.request.userInstructionHistory?.length ? { userInstructionHistory: turn.request.userInstructionHistory } : {}),
+            ...(turn.request.originalInstruction && turn.request.originalInstruction !== turn.request.instruction
+              ? { routedInstruction: turn.request.instruction } : {}),
             currentContainers,
-            contextEvidence: '容器源码结构来自本次修改后的工作区；其中捕获矩形与计算样式仍是捕获时数据，不是当前渲染结果。依据实际子项顺序和布局规则核对所有受影响区域；没有修改邻居源码不能证明邻居位置不变。',
+            contextEvidence: '容器结构来自当前工作区，矩形/计算样式仍是捕获值。按当前子项与布局规则核对受影响区域；邻居源码未改不等于位置未变。',
             layoutPlan,
             constraints: declaredIntent?.constraints,
             mutationVersion,
-            changes: layoutChanges.map(change => {
-              const serialized = JSON.stringify(change.input);
-              return { action: change.action, input: serialized.slice(0, 12000), truncated: serialized.length > 12000 };
-            }),
-            next: 'finish.layoutAssessment 说明实际结构/样式如何落实方案并保持受保护区域。截断或相互覆盖的操作不能作为完整源码证明，应读取当前相关片段。'
+            changeEvidence: '以下为成功操作的参数摘要，长字符串省略；完整参数在对应历史工具调用中，哈希仅用于追溯，不能证明正确性。操作可能相互覆盖，不等于当前最终源码。',
+            changes: layoutChanges.map(change => summarizeLayoutChange(change)),
+            next: '结合当前容器与历史操作原文核对；缺少代码细节、操作相互覆盖或无法确定最终状态时定向读取当前源码。finish.layoutAssessment 说明结构/样式如何落实用户要求与保持区域。'
           });
         })
       }),
@@ -1311,9 +1423,17 @@ export class ClineCodingAgentAdapter implements CodingAgentPort {
             enum: ['changed', 'already_satisfied'],
             description: '本轮是否产生了源码修改；默认 changed。'
           },
-          layoutAssessment: stringProperty('已声明 layoutPlan 时必填：根据 review_layout_plan 的原始请求与实际操作，说明目标关系未被替换、方案如何落地、保持约束如何实现；存在缺项应先修改，不能用意图声明代替实现证据。仅源码判断，不声称视觉已验证。'),
+          layoutAssessment: stringProperty('有 layoutPlan 时必填：以核对结果说明原始目标关系、实际实现和保持约束；缺项先修正，不能用意图代替实现证据或声称渲染验证。'),
           evidence: stringProperty('仅 outcome=already_satisfied 时填写：说明已读取和验证的当前源码证据。')
         }, ['summary']),
+        resolveInputSchema: base => {
+          const pending = pendingCompletionRequirements();
+          return {
+            ...base,
+            ...(layoutPlan ? { required: ['summary', 'layoutAssessment'] } : {}),
+            ...(pending.length ? { description: `提交前待完成：${pending.join('；')}。这些条件按执行时状态重新检查。` } : {})
+          };
+        },
         lifecycle: { completesRun: true },
         execute: async (input, context) => {
           try {
@@ -1322,16 +1442,51 @@ export class ClineCodingAgentAdapter implements CodingAgentPort {
               throw new Error('本轮已进入等待用户澄清状态，禁止提交；请等待用户回复后开启新一轮执行');
             }
             requireIntentDeclared();
-            if (introducedFixedPosition && declaredIntent?.layoutScope !== 'global') {
-              throw new Error('当前已确认意图不是 global 布局范围，本轮却新增了 position:fixed；请调整到已确认容器内');
+            const pending = pendingCompletionRequirements();
+            if (layoutPlan && !input.layoutAssessment?.trim()) {
+              pending.push('在 finish.layoutAssessment 中说明实际实现与方案的对应关系');
             }
-            if (newSourceIds.size > 0 && !spatialScopeValidated) {
-              throw new Error(`本轮新增了 ${newSourceIds.size} 个源码元素，finish 前必须调用 validate_spatial_scope 校验其参照容器`);
-            }
-            if (layoutPlan && (reviewedLayoutVersion !== mutationVersion || !input.layoutAssessment?.trim())) {
-              throw new Error('请先调用 review_layout_plan 核对最新源码操作，再在 finish.layoutAssessment 中说明实际实现与方案的对应关系');
-            }
+            if (pending.length) throw new Error(`提交前仍需完成：${pending.join('；')}`);
             const validation = await workspace.validate();
+            if (policy.sourceReviewEnabled && firstMutationAt
+              && (layoutPlan || ['local-demo', 'update-local-demo'].includes(declaredInteractionMode)
+                || layoutChanges.some(change => (change.input as { path?: string }).path === 'module.jsx'))
+              && independentlyReviewedVersion !== mutationVersion) {
+              if (sourceReviews.length >= policy.maxReviews) throw Object.assign(new Error('本轮源码核对预算已用完，尚未获得可提交实现，已停止本轮修改。'), { terminalToolError: true });
+              const containerIds = [...new Set(layoutPlan?.containerSourceIds ?? (turn.request.sourceId ? [turn.request.sourceId] : []))];
+              const containers = await Promise.all(containerIds.map(async sourceId => ({ sourceId,
+                context: boundedInspection(await workspace.inspectElement(sourceId, { detail: 'compact' }),
+                  Math.floor(6000 / containerIds.length), new Set<string>()),
+                ...(workspace.readElementSource ? { currentHtml: await workspace.readElementSource(sourceId) } : {}) })));
+              const currentFiles = await workspace.listFiles();
+              const sources = await Promise.all(currentFiles.filter(file => file.path === 'module.jsx' || file.path.endsWith('overrides.css'))
+                .map(async file => {
+                  // readFile defaults to 120 lines. Explicit character ranges
+                  // prevent a partial module from being labelled complete.
+                  if (!file.chars) return { path: file.path, complete: true, source: '' };
+                  if (file.chars <= 20000) return { path: file.path, complete: true,
+                    source: await workspace.readFile(file.path, undefined, undefined, 0, file.chars) };
+                  return { path: file.path, complete: false, omittedChars: file.chars - 20000,
+                    sourceStart: await workspace.readFile(file.path, undefined, undefined, 0, 10000),
+                    sourceEnd: await workspace.readFile(file.path, undefined, undefined, file.chars - 10000, file.chars) };
+                }));
+              const review = await reviewSourceImplementation(this.factory, { providerId: 'openai-compatible',
+                modelId: this.options.modelName, apiKey: this.options.apiKey, baseUrl: this.options.baseUrl,
+                enableThinking: this.options.enableThinking, reasoningProvider: this.options.reasoningProvider, apiProtocol: this.options.apiProtocol }, {
+                  originalRequest: turn.request.originalInstruction ?? turn.request.instruction,
+                  ...(turn.request.userInstructionHistory?.length ? { userInstructionHistory: turn.request.userInstructionHistory } : {}),
+                  conversation: turn.conversation.slice(-8),
+                  selectedSourceId: turn.request.sourceId, containers, sources,
+                  evidence: '结构与源码来自当前工作区；计算样式与矩形是捕获值，不是当前渲染。省略项不能视为不存在。'
+                }, signal, policy.reviewEffort, policy.reviewOutputTokens);
+              sourceReviews.push(review);
+              checkpoint = { ...checkpoint, sourceReviews: [...sourceReviews] };
+              throwIfCancelled();
+              sourceReviewNeedsCorrection = !review.accepted;
+              if (!review.accepted) sourceReviewFailedVersion = mutationVersion;
+              if (!review.accepted) throw new Error(`提交已阻止：${review.feedback}。修正当前源码后重新完成核对与 finish，不改变用户要求。`);
+              independentlyReviewedVersion = mutationVersion;
+            }
             const commit = await workspace.commit(input.summary, {
               allowNoChanges: input.outcome === 'already_satisfied' && Boolean(input.evidence?.trim())
             });
@@ -1391,18 +1546,52 @@ export class ClineCodingAgentAdapter implements CodingAgentPort {
       })
     ];
 
+    // Match existing execution guards before the next model decision. Exposing
+    // an exhausted read tool only invites a paid call that cannot execute.
+    // Per-file budgets stay in execute(): another file may still be readable.
+    // Mutation resets the counters, so these tools automatically return.
+    for (const tool of tools) {
+      if (MUTATING_ACTIONS.has(tool.name)) {
+        tool.isAvailable = () => intentDeclared && !clarificationRequested;
+        continue;
+      }
+      if (tool.name === 'finish') {
+        tool.isAvailable = () => intentDeclared && !clarificationRequested && pendingCompletionRequirements().length === 0;
+        continue;
+      }
+      if (tool.name === 'review_layout_plan') {
+        tool.isAvailable = () => Boolean(layoutPlan);
+        continue;
+      }
+      if (tool.name === 'validate_spatial_scope') {
+        tool.isAvailable = () => intentDeclared && newSourceIds.size > 0;
+        continue;
+      }
+      if (!BUDGETED_READ_ACTIONS.has(tool.name)) continue;
+      tool.isAvailable = ({ iteration }) => {
+        if (tool.name !== 'inspect_elements'
+          && iteration >= Math.max(1, this.maxIterations - FINALIZATION_WINDOW + 1)) return false;
+        if (turn.request.sourceId && selectedElementContextAvailable && !firstMutationAt
+          && preMutationReadCalls >= policy.preMutationReads) return false;
+        if (tool.name === 'read_file' || tool.name === 'search_text') return true;
+        const limit = policy.readLimits[tool.name];
+        return !limit || (readActionCounts.get(tool.name) ?? 0) < limit;
+      };
+    }
+
     let response: SourceTurnResponse;
     let unsubscribe: (() => void) | undefined;
+    let flushCommentary = () => {};
     try {
       throwIfCancelled();
       const skill = this.options.skills?.open(turn.request.skillId, turn.request.skillVersion, turn.request.disabledSkillIds);
       if (skill) tools.push(...skillTools(skill, record));
       const files = await workspace.listFiles();
       let selectedElementContext: string | undefined;
-      if (turn.request.sourceId) {
+      if (selectionContextSourceId) {
         try {
-          selectedElementContext = await workspace.inspectElement(turn.request.sourceId, { detail: 'compact' });
-          originalSelectedPath = ancestrySourceIds(selectedElementContext);
+          selectedElementContext = await workspace.inspectElement(selectionContextSourceId, { detail: 'compact' });
+          if (turn.request.sourceId) originalSelectedPath = ancestrySourceIds(selectedElementContext);
           selectedElementContextAvailable = true;
         } catch {
           // A stale selection should not prevent semantic lookup inside the workspace.
@@ -1415,8 +1604,28 @@ export class ClineCodingAgentAdapter implements CodingAgentPort {
         apiKey: this.options.apiKey,
         baseUrl: this.options.baseUrl,
         enableThinking: this.options.enableThinking,
+        reasoningProvider: this.options.reasoningProvider,
+        reasoningEffort: this.options.reasoningEffort,
+        ...(editReasoning ? { resolveReasoningEffort: () => (
+          // Spend correction reasoning on the first repair. A successful source
+          // mutation returns to the post-write policy; a rejected re-review
+          // re-arms correction for that new source version.
+          (sourceReviewNeedsCorrection && sourceReviewFailedVersion === mutationVersion)
+          || sourceToolNeedsCorrection) && editReasoning.correction
+          ? editReasoning.correction : intentDeclared
+          ? firstMutationAt ? editReasoning.verification ?? editReasoning.execution
+            : layoutPlan && ['none', 'preserve-existing'].includes(declaredInteractionMode)
+              ? editReasoning.layoutExecution ?? editReasoning.execution
+              : editReasoning.execution
+          : preMutationReadCalls > 0 ? editReasoning.planning : editReasoning.discovery } : {}),
+        ...(editReasoning ? { resolveMaxOutputTokens: ({ reasoningEffort, recoveringOutputLimit }) =>
+          // Reading and declaring intent do not generate implementation code.
+          // Keep full room for actual thinking and for an oversized declaration
+          // recovered by the existing bounded output-limit protocol.
+          !intentDeclared && reasoningEffort === 'none' && !recoveringOutputLimit
+            ? Math.min(2048, this.maxOutputTokens) : this.maxOutputTokens } : {}),
         apiProtocol: this.options.apiProtocol,
-        systemPrompt: `${modeRules}\n${skill?.prompt ?? ''}\n单轮最多 ${this.maxIterations} 次模型决策；从第 ${Math.max(1, this.maxIterations - FINALIZATION_WINDOW + 1)} 轮起必须停止扩展读取，只能完成必要修改并 finish，或 clarify。`,
+        systemPrompt: `${modeRules}\n${skill?.prompt ?? ''}\n${RESPONSE_LANGUAGE_INSTRUCTIONS}\n单轮最多 ${this.maxIterations} 次模型决策；从第 ${Math.max(1, this.maxIterations - FINALIZATION_WINDOW + 1)} 轮起必须停止扩展读取，只能完成必要修改并 finish，或 clarify。`,
         tools,
         maxIterations: this.maxIterations,
         maxOutputTokens: this.maxOutputTokens
@@ -1424,13 +1633,22 @@ export class ClineCodingAgentAdapter implements CodingAgentPort {
       let commentaryCall = 0;
       let commentaryText = '';
       let publishedCommentary = '';
-      const publishCommentary = () => {
+      let commentaryTimestamp = '';
+      const queuedCommentary = new Set<number>();
+      const publishCommentary = (final = false) => {
         const text = commentaryText.trim().slice(0, 600);
-        if (!text || text === publishedCommentary || commentaryCall < 1) return;
+        if (!text || text === publishedCommentary || commentaryCall < 1 || queuedCommentary.has(commentaryCall)) return;
+        const entry = { timestamp: commentaryTimestamp, modelCall: commentaryCall, text };
+        if (needsCommentaryLocalization(text)) {
+          if (final) { queuedCommentary.add(commentaryCall); localizer.enqueue(entry); }
+          return;
+        }
+        // Wait for enough text to distinguish Chinese from an English prefix.
+        if (!final && !/\p{Script=Han}/u.test(text)) return;
         publishedCommentary = text;
-        safeEmit(observe, { type: 'coding-agent.commentary', timestamp: new Date().toISOString(),
-          modelCall: commentaryCall, text });
+        safeEmit(observe, { type: 'coding-agent.commentary', ...entry });
       };
+      flushCommentary = () => publishCommentary(true);
       unsubscribe = activeAgent.subscribe?.(event => {
         const timestamp = new Date().toISOString();
         // Only explicit assistant text is public commentary. Never consume
@@ -1439,6 +1657,8 @@ export class ClineCodingAgentAdapter implements CodingAgentPort {
           const iteration = Number(event.iteration);
           if (!Number.isInteger(iteration) || iteration < 1) return;
           if (commentaryCall !== iteration) {
+            publishCommentary(true);
+            commentaryTimestamp = timestamp;
             commentaryCall = iteration;
             commentaryText = '';
             publishedCommentary = '';
@@ -1448,11 +1668,12 @@ export class ClineCodingAgentAdapter implements CodingAgentPort {
         }
         if (event.type === 'model-call-updated' && 'call' in event) {
           const call = modelCallProgressSchema.safeParse(event.call);
-          if (call.success && call.data.status === 'completed') publishCommentary();
+          if (call.success) primaryModelCalls = Math.max(primaryModelCalls, call.data.modelCall);
+          if (call.success && call.data.status === 'completed') publishCommentary(true);
           if (call.success) safeEmit(observe, { type: 'coding-agent.model.updated', timestamp, call: call.data });
         }
         if (event.type === 'tool-started' && 'toolCall' in event) {
-          publishCommentary();
+          publishCommentary(true);
           const tool = event.toolCall as { toolName?: string; toolCallId?: string } | undefined;
           if (tool?.toolName) safeEmit(observe, { type: 'coding-agent.tool.started', timestamp,
             action: tool.toolName, toolCallId: typeof tool.toolCallId === 'string' ? tool.toolCallId : undefined,
@@ -1463,8 +1684,10 @@ export class ClineCodingAgentAdapter implements CodingAgentPort {
       const result = await activeAgent.run(JSON.stringify({
         instruction: turn.request.instruction,
         originalInstruction: turn.request.originalInstruction ?? turn.request.instruction,
+        ...(turn.request.userInstructionHistory?.length ? { userInstructionHistory: turn.request.userInstructionHistory } : {}),
         readBudget: readBudgetGuidance(),
         selectedSourceId: turn.request.sourceId,
+        selectionContextSourceId: turn.request.selectionContextSourceId,
         replyToClarificationId: turn.request.replyToClarificationId,
         clarificationOptionId: turn.request.clarificationOptionId,
         conversation: turn.conversation.slice(-8),
@@ -1474,9 +1697,10 @@ export class ClineCodingAgentAdapter implements CodingAgentPort {
           : 'frozen-styles',
         selectedElementContext
       }));
+      primaryModelCalls = Math.max(primaryModelCalls, result.iterations);
       checkpoint = {
         ...checkpoint,
-        modelCalls: Math.max(checkpoint.modelCalls, result.iterations),
+        modelCalls: totalModelCalls(),
         toolCalls: toolCallStatistics(result.diagnostics, steps).attempted,
         ...(result.diagnostics ? { runtime: result.diagnostics } : {})
       };
@@ -1517,17 +1741,24 @@ export class ClineCodingAgentAdapter implements CodingAgentPort {
     }
 
     unsubscribe?.();
+    flushCommentary();
+    await localizer.finish();
+    if (response.kind === 'completed') response = { ...response, modelCalls: totalModelCalls() };
     signal?.removeEventListener('abort', abortActiveAgent);
     activeAgent = undefined;
 
     const timestamp = new Date().toISOString();
     checkpoint = {
       ...checkpoint,
+      modelCalls: totalModelCalls(),
+      commentaryLocalization: localizer.report,
       lifecycle: {
         submissionMode: 'direct', intentDeclared, spatialScopeValidated,
         completionAttempts: steps.filter(step => step.action === 'finish').length,
         rollback: rollbackStatus,
         selectedElementContextProvided: selectedElementContextAvailable,
+        selectionContextMode: selectedElementContextAvailable
+          ? turn.request.sourceId ? 'target' : 'reference' : 'unavailable',
         preMutationReadCalls,
         ...(firstMutationAt ? {
           firstMutationAt,

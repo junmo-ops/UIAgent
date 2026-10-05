@@ -1,12 +1,14 @@
 import { useEffect, useState } from 'react';
+import type { EditMode } from '@ui-agent/contracts';
 import { browser } from 'wxt/browser';
 import { agentServiceFetch } from '../service/agent-service-client';
 
-export interface UserPreferences { sendShortcut: 'enter' | 'modifier-enter'; expandProcess: boolean }
-const defaults: UserPreferences = { sendShortcut: 'enter', expandProcess: false };
+export interface UserPreferences { sendShortcut: 'enter' | 'modifier-enter'; expandProcess: boolean; editMode: EditMode }
+const defaults: UserPreferences = { sendShortcut: 'enter', expandProcess: false, editMode: 'fast' };
 function decode(value: unknown): UserPreferences {
   const item = value as Partial<UserPreferences> | undefined;
-  return { sendShortcut: item?.sendShortcut === 'modifier-enter' ? 'modifier-enter' : 'enter', expandProcess: item?.expandProcess === true };
+  return { sendShortcut: item?.sendShortcut === 'modifier-enter' ? 'modifier-enter' : 'enter', expandProcess: item?.expandProcess === true,
+    editMode: item?.editMode === 'normal' || item?.editMode === 'pro' ? item.editMode : 'fast' };
 }
 export function useUserPreferences(serviceUrl: string, enabled: boolean) {
   const [value, setValue] = useState(defaults);

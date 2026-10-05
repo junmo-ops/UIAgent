@@ -2,6 +2,7 @@ import { parseHTML } from 'linkedom';
 import type { AssistantPageContext } from '@ui-agent/agent-runtime';
 
 interface ContentEntry {
+  kind: 'element' | 'text';
   sourceId: string;
   region?: string;
   tag: string;
@@ -45,13 +46,13 @@ export function createPageContentReader(html: string, hasModule: boolean): Assis
     const landmarks = new Set(['main', 'navigation', 'complementary', 'banner', 'contentinfo', 'region', 'form', 'dialog', 'search', 'article']);
     // Iterative traversal avoids depending on any fixed DOM depth or layout.
     type Frame = { element: Element; region?: string; hidden: boolean; exit?: { id: string; start: number } };
-    type TextFrame = { text: string; base: ContentEntry };
+    type TextFrame = { text: string; base: Omit<ContentEntry, 'kind'> };
     const stack: Array<Frame | TextFrame> = [{ element: document.body, hidden: false }];
     while (stack.length) {
       const frame = stack.pop()!;
       if ('text' in frame) {
         for (let offset = 0; offset < frame.text.length; offset += 600) {
-          entries.push({ ...frame.base, text: frame.text.slice(offset, offset + 600) });
+          entries.push({ ...frame.base, kind: 'text', text: frame.text.slice(offset, offset + 600) });
         }
         continue;
       }
@@ -80,7 +81,7 @@ export function createPageContentReader(html: string, hasModule: boolean): Assis
           ...(hidden ? { hiddenInSource: true } : {}), readScope: isHeading && level ? 'section' : 'subtree' });
       }
       if (role || label || placeholder || tag === 'input') {
-        entries.push({ ...base, ...(label ? { label: label.slice(0, 240) } : {}),
+        entries.push({ ...base, kind: 'element', ...(label ? { label: label.slice(0, 240) } : {}),
           ...(placeholder ? { placeholder: placeholder.slice(0, 240) } : {}),
           ...(tag === 'input' ? { inputType: el.getAttribute('type') || 'text' } : {}) });
       }

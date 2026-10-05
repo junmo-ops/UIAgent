@@ -1,6 +1,6 @@
 import type { WorkspaceReadTools } from '@ui-agent/agent-runtime';
 import { WORKSPACE_FILES, AGENT_WORKSPACE_FILES, type WorkspaceFile, type WorkspaceFiles, type CapturedLayoutIndex, type StructureNode } from './workspace-types';
-import { extractCapturedLayoutIndex, structureNeighborhood, structureQueryTerms, sourceElementAncestry, normalizeStructureSearchText, sourceElementRange, findTagEnd, sourceLayoutFacts, relevantElementStyleContext, compactElementSource } from './source-document';
+import { extractCapturedLayoutIndex, structureNeighborhood, currentSourceStructure, structureQueryTerms, sourceElementAncestry, normalizeStructureSearchText, sourceElementRange, findTagEnd, sourceLayoutFacts, relevantElementStyleContext, compactElementSource } from './source-document';
 
 export interface WorkspaceReaderOptions {
   files(): WorkspaceFiles;
@@ -8,6 +8,7 @@ export interface WorkspaceReaderOptions {
   authorCssContent: string;
   unreadableStyleSources: string[];
   layoutIndex(): CapturedLayoutIndex;
+  viewport?: { width: number; height: number };
 }
 
 /** Shared readers: edits see their working copy; chat sees a fixed saved snapshot. */
@@ -109,19 +110,21 @@ export function createWorkspaceReader(session: WorkspaceReaderOptions): Workspac
         .join('\n')
         .slice(0, 16_000);
     },
+    readElementSource: async sourceId => {
+      const html = session.files()['index.html'];
+      const range = sourceElementRange(html, sourceId);
+      const source = html.slice(range.start, range.end);
+      if (source.length <= 20000) return { source, complete: true, omittedChars: 0 };
+      return { source: source.slice(0, 10000) + '\n[中间源码已省略]\n' + source.slice(-10000),
+        complete: false, omittedChars: source.length - 20000 };
+    },
     inspectElement: async (sourceId, options = {}) => {
       const html = session.files()['index.html'];
       const full = options.detail === 'full';
       const range = sourceElementRange(html, sourceId);
       const openingTag = html.slice(range.start, findTagEnd(html, range.start) + 1);
       const ancestry = sourceElementAncestry(html, sourceId);
-      const outline = JSON.parse(session.files()['outline.json']) as {
-        nodes: Array<{
-          sourceId: string;
-          parentSourceId?: string;
-          childrenSourceIds: string[];
-        }>;
-      };
+      const outline = JSON.parse(session.files()['outline.json']) as { nodes: StructureNode[] };
       const node = outline.nodes.find(item => item.sourceId === sourceId);
       const parent = node?.parentSourceId
         ? outline.nodes.find(item => item.sourceId === node.parentSourceId)
@@ -146,6 +149,8 @@ export function createWorkspaceReader(session: WorkspaceReaderOptions): Workspac
       }).filter(item => item.totalPeers > 0);
       const layoutContext = {
         evidence: 'capture-time geometry; source ancestry is current; not post-edit rendering',
+        ...(session.viewport ? { capturedViewport: session.viewport } : {}),
+        currentSourceStructure: currentSourceStructure(outline.nodes, sourceId, full ? 64 : 32),
         ancestorPeers,
         target: sourceLayoutFacts(html, session.files()['snapshot.css'], layoutIndex, sourceId, full ? 'full' : 'target'),
         children: (node?.childrenSourceIds ?? []).slice(0, full ? 8 : 6).map(child => sourceLayoutFacts(html, session.files()['snapshot.css'], layoutIndex, child, full ? 'full' : 'context')),

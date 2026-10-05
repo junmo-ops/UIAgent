@@ -6,31 +6,46 @@ import { cases } from './real-cases.mjs';
 import { demoCases } from './demo-cases.mjs';
 import { complexCases, complexPages } from './complex-cases.mjs';
 import { withPanel, state, fill, nativeClick, serviceUrl } from './harness.mjs';
+import { fixtureHtml } from './layouts.mjs';
+const turnTimeoutMs = Number(process.env.REAL_TURN_TIMEOUT_MS || 600000);
+if (!Number.isSafeInteger(turnTimeoutMs) || turnTimeoutMs < 1000) throw new Error('Invalid REAL_TURN_TIMEOUT_MS');
 const suite = process.env.REAL_SUITE === 'demo' ? demoCases : process.env.REAL_SUITE === 'complex' ? complexCases : cases;
 const selected = process.env.REAL_CASES ? suite.filter(c => process.env.REAL_CASES.split(',').includes(c.id)) : process.env.REAL_ALL === '1' || ['complex','demo'].includes(process.env.REAL_SUITE) ? suite : suite.filter(c => c.pilot);
 if (!selected.length) throw new Error('No matching real-model scenarios');
-for (const item of selected) test(`${item.id} ${item.category} ${item.layout}`, async ({}, info) => withPanel(item.layout, info, async ({ page, panel, click, ready }) => {
-  const evidence = { case: item, automated: 'running', semanticReview: 'pending', provenance: { runId: process.env.REAL_RUN_ID, gitHead: execFileSync('git', ['rev-parse','HEAD'], { encoding:'utf8' }).trim(), caseSha256: createHash('sha256').update(JSON.stringify(item)).digest('hex'), runtimeSha256: createHash('sha256').update(readFileSync(new URL('../../packages/agent-runtime/vendor/ui-agent-runtime/index.js', import.meta.url))).digest('hex'), node: process.version }, turns: [], model: (await state()).model };
-  if (complexPages[item.layout]) evidence.provenance.fixtureSha256 = createHash('sha256').update(complexPages[item.layout]).digest('hex');
+for (const item of selected) test(`${item.id} ${item.category} ${item.layout}`, async ({}, info) => {
+  test.setTimeout(item.turns.length * (turnTimeoutMs + 60000) + 120000);
+  const evidence = { case: item, automated: 'running', semanticReview: 'pending', stage: 'setup', turnTimeoutMs, startedAt: new Date().toISOString(), provenance: { runId: process.env.REAL_RUN_ID, gitHead: execFileSync('git', ['rev-parse','HEAD'], { encoding:'utf8' }).trim(), caseSha256: createHash('sha256').update(JSON.stringify(item)).digest('hex'), runtimeSha256: createHash('sha256').update(readFileSync(new URL('../../packages/agent-runtime/vendor/ui-agent-runtime/index.js', import.meta.url))).digest('hex'), node: process.version }, turns: [] };
+  const persist = () => writeFileSync(info.outputPath('evaluation.json'), JSON.stringify(evidence, null, 2) + '\n');
+  persist();
+  try { await withPanel(item.layout, info, async ({ page, panel, click, ready }) => {
+  evidence.model = (await state()).model;
+  if (!item.layout.startsWith('demo/')) evidence.provenance.fixtureSha256 = createHash('sha256').update(complexPages[item.layout] ?? fixtureHtml(item.layout)).digest('hex');
   if (item.assetFiles) evidence.provenance.assetSha256 = Object.fromEntries(item.assetFiles.map(path => [path, createHash('sha256').update(readFileSync(new URL('../../' + path, import.meta.url))).digest('hex')]));
   if (item.viewport) await page.setViewportSize(item.viewport);
+  await settlePresentation(page, 'body');
   await page.screenshot({ path: info.outputPath('source-before-capture.png'), fullPage: true });
   await click('进入副本编辑'); await page.waitForURL(/\/workspaces\/[^/]+\/preview/);
   const id = new URL(page.url()).pathname.split('/')[2];
   const revision = async () => (await (await fetch(`${serviceUrl}/v1/workspaces/${id}`)).json()).revision;
   if (item.select) { await click('选择区域'); await (item.selectionCss ? page.locator(item.selectionCss) : page.getByRole('heading', { name: item.selection || 'E2E target', exact: true })).click(); await expect.poll(() => ready('当前选区，点击重选')).toBe(true); }
-  const buttonSnapshot = async () => page.locator('[data-ui-agent-snapshot-stage]').evaluate((root, selector) => {
+  const buttonSnapshot = async () => {
+    await settlePresentation(page, item.selectionCss);
+    return page.locator('[data-ui-agent-snapshot-stage]').evaluate((root, selector) => {
     const target = root.querySelector(selector), style = getComputedStyle(target), r = target.getBoundingClientRect();
     const copy = root.cloneNode(true); copy.querySelector(selector).textContent = '[TARGET]';
     return { otherText:copy.textContent, tag:target.tagName, className:target.className,
       style:Object.fromEntries(['color','backgroundColor','fontSize','fontWeight','borderRadius','display','padding'].map(k => [k,style[k]])),
       rect:{x:r.x,y:r.y,width:r.width,height:r.height} };
   }, item.selectionCss);
+  };
   const buttonBefore = item.selectionCss ? await buttonSnapshot() : undefined;
   const preserved = [];
   for (const selector of (item.preserveSelectors ?? [])) preserved.push({ selector, text: await page.locator(selector).allTextContents() });
   evidence.preserved = preserved;
+  let activeTurn, activeBaseline;
   try {
+    evidence.stage = 'ready';
+    persist();
     expect(evidence.model.configuredId, 'Isolated service uses requested model').toBe(process.env.REAL_MODEL_ID || 'default');
     for (const [index, turn] of item.turns.entries()) {
       const before = await revision();
@@ -39,7 +54,11 @@ for (const item of selected) test(`${item.id} ${item.category} ${item.layout}`, 
       const previous = await state();
       await page.screenshot({ path: info.outputPath(`turn-${index + 1}-before.png`), fullPage: true });
       let selectedOption;
+      const record = { beforeDom, beforeGeometry, prompt: turn.prompt, chooseClarification: turn.chooseClarification, status: 'prepared', beforeRevision: before, automatedChecks: [], routes: [], logs: [] };
+      evidence.turns.push(record); activeTurn = record; activeBaseline = previous;
+      persist();
       const startedAt = Date.now();
+      record.startedAt = startedAt;
       if (turn.chooseClarification) {
         const options = await panel.evaluate(`Array.from(document.querySelectorAll('.clarification-options button:not(:disabled)')).map((b, index) => ({ index, label: b.querySelector('strong')?.textContent, text: b.textContent }))`);
         evidence.optionSelections ??= [];
@@ -47,28 +66,29 @@ for (const item of selected) test(`${item.id} ${item.category} ${item.layout}`, 
         evidence.optionSelections.push({ options, matches });
         expect(matches, 'Exactly one observed option matches requested placement').toHaveLength(1);
         selectedOption = matches[0];
+        record.selectedOption = selectedOption; record.status = 'submitted'; evidence.stage = 'running'; persist();
         await nativeClick(panel, `.clarification-options button:not(:disabled):nth-child(${selectedOption.index + 1})`);
       } else {
-        await fill(panel, turn.prompt); await click('发送');
+        await fill(panel, turn.prompt);
+        record.status = 'submitted'; evidence.stage = 'running'; persist();
+        await click('发送');
       }
-      await expect.poll(() => panel.evaluate(`Boolean(document.querySelector('button[aria-label="停止生成"]'))`), { timeout: 10000 }).toBe(true);
-      // Router -> editor handoff can briefly hide the stop button. Require the
-      // routed edit to reach a persisted terminal log before observing idle UI.
+      // One shared turn deadline; preserve submitted attempts before waiting.
+      // A very fast response may finish before the stop button is observed.
       await expect.poll(async () => {
         const pending = await state();
         const route = pending.routes.find(r => !previous.routes.some(p => p.turnId === r.turnId));
         if (!route) return false;
-        if (route.result.kind !== 'page_edit') return true;
-        return pending.logs.some(l => l.request.turnId === route.turnId
+        const terminal = route.result.kind !== 'page_edit' || pending.logs.some(l => l.request.turnId === route.turnId
           && ['completed', 'clarification', 'failed', 'cancelled'].includes(l.result?.kind));
-      }, { timeout: 240000, intervals: [500,1000,2000], message: 'Routed edit reaches terminal result' }).toBe(true);
-      await expect.poll(() => panel.evaluate(`Boolean(document.querySelector('button[aria-label="停止生成"]'))`), { timeout: 240000, intervals: [500,1000,2000] }).toBe(false);
+        return terminal && !await panel.evaluate(`Boolean(document.querySelector('button[aria-label="停止生成"]'))`);
+      }, { timeout: Math.max(1, turnTimeoutMs - (Date.now() - startedAt)), intervals: [250,500,1000], message: 'Submitted turn reaches terminal result and idle UI' }).toBe(true);
       const current = await state();
       const logs = current.logs.filter(l => !previous.logs.some(p => p.id === l.id));
       const routes = current.routes.filter(r => !previous.routes.some(p => p.turnId === r.turnId));
       const dialogue = await panel.evaluate(`document.querySelector('.chat-list').innerText`);
-      const record = { beforeDom, beforeGeometry, prompt: turn.prompt, selectedOption, elapsedMs: Date.now() - startedAt, routes, logs, dialogue, beforeRevision: before, afterRevision: await revision(), automatedChecks: [] };
-      evidence.turns.push(record);
+      Object.assign(record, { status: 'completed', selectedOption, elapsedMs: Date.now() - startedAt, routes, logs, dialogue, afterRevision: await revision() });
+      persist();
       await page.screenshot({ path: info.outputPath(`turn-${index + 1}-after.png`), fullPage: true });
       record.dom = await page.locator('[data-ui-agent-snapshot-stage]').evaluate(e => e.outerHTML);
       record.geometry = await captureGeometry(page);
@@ -146,6 +166,8 @@ for (const item of selected) test(`${item.id} ${item.category} ${item.layout}`, 
         await expect(page.getByText('Second section', { exact: true })).toHaveCount(1);
         record.automatedChecks.push('requested title visible, other heading and paragraphs preserved');
       }
+      record.checksPassed = true;
+      persist();
     }
     if (item.placement) {
       const initial = evidence.turns[0].beforeGeometry;
@@ -175,18 +197,65 @@ for (const item of selected) test(`${item.id} ${item.category} ${item.layout}`, 
     }
     evidence.automated = 'passed';
     if (evidence.interactions.some(c => c.outcome === 'failed')) throw new Error('One or more browser interaction checks failed; see evaluation.json');
-  } catch (error) { evidence.automated = 'failed'; evidence.failure = String(error); throw error; }
+  } catch (error) {
+    evidence.automated = 'failed'; evidence.failure = String(error);
+    if (activeTurn?.status === 'submitted') {
+      activeTurn.elapsedMs = Date.now() - activeTurn.startedAt;
+      activeTurn.status = activeTurn.elapsedMs >= turnTimeoutMs ? 'timed_out' : 'interrupted';
+      activeTurn.failure = String(error);
+      const observed = await state().catch(() => undefined);
+      if (observed) {
+        activeTurn.routes = observed.routes.filter(r => !activeBaseline.routes.some(p => p.turnId === r.turnId));
+        activeTurn.logs = observed.logs.filter(l => !activeBaseline.logs.some(p => p.id === l.id));
+      }
+      activeTurn.dialogue = await panel.evaluate(`document.querySelector('.chat-list')?.innerText`).catch(String);
+      activeTurn.afterRevision = await revision().catch(() => undefined);
+      activeTurn.dom = await page.locator('[data-ui-agent-snapshot-stage]').evaluate(e => e.outerHTML).catch(String);
+    }
+    throw error;
+  }
   finally {
     const finalState = await state().catch(error => ({ error: String(error) }));
     evidence.finalState = { ...finalState, logs: finalState.logs?.filter(l => l.sourceWorkspaceId === id || l.request.context?.workspaceId === id), routes: finalState.routes?.filter(r => r.workspaceId === id) };
+    evidence.finishedAt = new Date().toISOString();
+    evidence.failureCategory = evidence.automated === 'passed' ? undefined : evidence.turns.some(t => t.status !== 'prepared') ? 'task' : 'setup';
     const output = JSON.stringify(evidence, null, 2);
     writeFileSync(info.outputPath('evaluation.json'), output);
     await info.attach('evaluation.json', { body: output, contentType: 'application/json' });
     await info.attach('dialogue.html', { body: await panel.evaluate('document.documentElement.outerHTML').catch(String), contentType: 'text/html' });
   }
-}));
+  }); } catch (error) {
+    evidence.automated = 'failed'; evidence.failure ??= String(error);
+    evidence.failureCategory ??= evidence.turns.some(t => t.status !== 'prepared') ? 'task' : 'setup';
+    throw error;
+  } finally { evidence.finishedAt = new Date().toISOString(); persist(); }
+});
+
+// Remove the selection click's hover/focus state, then observe exact stable
+// computed values. No CSS is changed and no style tolerance is relaxed.
+async function settlePresentation(page, selector = '[data-ui-agent-snapshot-stage]') {
+  await page.mouse.move(0, 0);
+  await page.evaluate(() => { if (document.activeElement instanceof HTMLElement) document.activeElement.blur(); });
+  let previous, stable = 0;
+  await expect.poll(async () => {
+    const sample = await page.locator(selector).first().evaluate(root => {
+      const nodes = [root, ...root.querySelectorAll('button,input,h1,h2,section,article,aside')];
+      const values = nodes.map(node => {
+        const r = node.getBoundingClientRect(), s = getComputedStyle(node);
+        return [r.x,r.y,r.width,r.height,s.color,s.backgroundColor,s.opacity,s.transform,s.fontSize,s.padding];
+      });
+      const transitioning = root.getAnimations({subtree:true}).some(animation => animation instanceof CSSTransition && animation.playState === 'running');
+      return {values, transitioning};
+    });
+    const encoded = JSON.stringify(sample.values);
+    stable = !sample.transitioning && encoded === previous ? stable + 1 : 0;
+    previous = encoded;
+    return stable >= 2;
+  }, {timeout:5000, intervals:[100], message:'Presentation styles and geometry settle after clearing hover and focus'}).toBe(true);
+}
 
 async function captureGeometry(page) {
+  await settlePresentation(page);
   return page.locator('[data-ui-agent-snapshot-stage]').evaluate(e => [e, ...e.querySelectorAll('main,header,section,article,h1,h2,p,aside,button,input,.columns,.stack,.pair,.scroll-list,.actions')].map(n => {
     const r = n.getBoundingClientRect(), s = getComputedStyle(n);
     return { tag:n.tagName,sourceId:n.getAttribute('data-ui-source-id'),className:n.className,text:n.textContent.slice(0,500),rect:{x:r.x,y:r.y,width:r.width,height:r.height},color:s.color,fontSize:s.fontSize,display:s.display,position:s.position,overflowX:s.overflowX,overflowY:s.overflowY,scrollHeight:n.scrollHeight,clientHeight:n.clientHeight,scrollWidth:n.scrollWidth,clientWidth:n.clientWidth };

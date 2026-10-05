@@ -8,12 +8,16 @@ const httpUrl = z.string().trim().refine(value => {
   try { const url = new URL(value); return ['http:', 'https:'].includes(url.protocol) && !url.username && !url.password && !url.search && !url.hash; }
   catch { return false; }
 }, '必须是无凭证的 HTTP/HTTPS 地址');
+const effort = z.enum(['none', 'low', 'high', 'max']);
+const editReasoning = z.object({ discovery: effort, planning: effort, execution: effort, verification: effort.optional(), correction: effort.optional(), layoutExecution: effort.optional() }).strict();
 const schema = z.object({
   model: z.object({ baseUrl: httpUrl, name: text, providerLabel: text,
+    reasoningEffort: effort.optional(), editReasoning: editReasoning.optional(),
     alternatives: z.array(z.object({
       id: z.string().regex(/^[a-z0-9][a-z0-9-]{0,63}$/).refine(id => id !== 'default'),
       label: text, baseUrl: httpUrl, name: text, providerLabel: text,
       apiKeyEnv: z.string().regex(/^[A-Z][A-Z0-9_]*$/), enableThinking: z.boolean().optional(),
+      reasoningEffort: effort.optional(), editReasoning: editReasoning.optional(),
       apiProtocol: z.literal('chat-completions').optional()
     }).strict()).optional(),
     edit: z.object({ maxIterations: positiveInteger, maxOutputTokens: positiveInteger }).strict(),
